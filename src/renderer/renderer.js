@@ -23,6 +23,7 @@ const el = {
   intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
   intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
   intMsgcount: $('int-msgcount'), intPrompt: $('int-prompt'),
+  intMeasuredCard: $('int-measured-card'), intMeasured: $('int-measured'), intMeasuredSrc: $('int-measured-src'),
   intLenstabs: $('int-lenstabs'), intContext: $('int-context'), intProcess: $('int-process'),
   intStages: $('int-stages'), intThreads: $('int-threads'), intThreadmeta: $('int-threadmeta'),
   intReview: $('int-review'), intEvalDd: $('int-eval-dd'), intEvalBtn: $('int-eval-btn'), intEvalLabel: $('int-eval-label'),
@@ -561,13 +562,14 @@ function captureInternalsTools(ev) {
   rec.toolTurns = ev.trace || [];        // authoritative reconcile at end of turn
   if (state.page === 'internals') renderInternals();
 }
-// Live: a tool just returned mid-loop — append it and tick occupancy immediately.
+// Live: a tool just returned mid-loop — append it (filtered) and tick occupancy.
 function captureInternalsToolEnd(ev) {
   const rec = state.internals[state.currentChatId];
   if (!rec) return;
   rec.toolTurns = rec.toolTurns || [];
-  const tok = Math.ceil((ev.resultChars || 0) / 4);
-  rec.toolTurns.push({ name: ev.name, resultTokens: tok, truncated: !!ev.truncated, isError: ev.ok === false });
+  const raw = Math.ceil((ev.resultChars || 0) / 4);
+  const tok = Math.ceil((ev.filteredChars != null ? ev.filteredChars : ev.resultChars || 0) / 4); // what enters context
+  rec.toolTurns.push({ name: ev.name, resultTokens: tok, rawTokens: raw, saved: Math.max(0, raw - tok), rules: ev.rules || [], truncated: !!ev.truncated, isError: ev.ok === false });
   if (rec.ledger) {
     rec.ledger.total += tok;
     const tb = rec.ledger.contributors.find((c) => c.key === 'tools');
@@ -575,6 +577,43 @@ function captureInternalsToolEnd(ev) {
   }
   updateCtxMeter();
   if (state.page === 'internals') renderInternals();
+}
+
+function captureMetrics(ev) {
+  const rec = state.internals[state.currentChatId];
+  if (!rec) return;
+  rec.metrics = ev;
+  if (state.page === 'internals' && state.internalsLens === 'context') renderInternals();
+}
+
+// Render the MEASURED card (real provider usage + reductions) in the CONTEXT lens.
+function renderMeasured(rec) {
+  const m = rec && rec.metrics;
+  if (!m) { el.intMeasuredCard.hidden = true; return; }
+  el.intMeasuredCard.hidden = false;
+  el.intMeasuredSrc.textContent = m.measured ? 'real provider usage' : 'estimate only (provider sent no usage)';
+  const items = [];
+  const item = (k, v, cls) => items.push(`<div class="measured__item"><span class="measured__k">${k}</span><span class="measured__v${cls ? ' measured__v--' + cls : ''}">${v}</span></div>`);
+  const inTok = m.inputTokens || 0, outTok = m.outputTokens || 0, cached = m.cachedTokens || 0;
+  const cachePct = inTok ? Math.round((cached / inTok) * 100) : 0;
+  const reductions = (m.skillSavedTokens || 0) + (m.filterSavedTokens || 0) + (m.compactionSavedTokens || 0) + (m.delegateAbsorbedTokens || 0);
+
+  item('input tokens', m.measured ? fmtTok(inTok) : '—');
+  item('output tokens', m.measured ? fmtTok(outTok) : '—');
+  item('cache read', m.measured ? `${fmtTok(cached)} <small>${cachePct}%</small>` : '—', cachePct >= 60 ? 'good' : (cachePct === 0 ? 'warn' : ''));
+  item('token reduction', `${fmtTok(reductions)}`, reductions ? 'good' : '');
+  item('skills used', `${m.skillsLoaded || 0}<small>/${m.skillsAvailable || 0}</small>`);
+  item('delegated', `${m.delegated || 0}${m.delegateAbsorbedTokens ? ` <small>kept ${fmtTok(m.delegateAbsorbedTokens)}</small>` : ''}`);
+
+  let html = items.join('');
+  const est = m.estInputTokens || 0;
+  if (m.measured && est) {
+    const diff = inTok ? Math.round(Math.abs(inTok - est) / inTok * 100) : 0;
+    html += `<div class="measured__est">estimate ${fmtTok(est)} vs measured ${fmtTok(inTok)} input — ${diff}% off (chars/4 heuristic)</div>`;
+  } else if (!m.measured) {
+    html += `<div class="measured__est">provider returned no usage this turn — showing estimate ${fmtTok(est)} input; reductions are still real.</div>`;
+  }
+  el.intMeasured.innerHTML = html;
 }
 
 function updateCtxMeter() {
@@ -602,6 +641,8 @@ function renderInternals() {
   el.intLenstabs.querySelectorAll('.lenstab').forEach((b) => b.classList.toggle('is-active', b.dataset.lens === lens));
   if (lens === 'process') { renderProcess(rec); return; }
   if (lens === 'review') { renderReview(rec); return; }
+
+  renderMeasured(rec);
 
   const pct = L.window ? Math.round((L.total / L.window) * 100) : 0;
   el.intWindow.textContent = `${fmtTok(L.total)} / ${fmtTok(L.window)} tok · ${pct}%`;
@@ -649,7 +690,8 @@ function renderInternals() {
   if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);
   addEvt('⚙', `${L.toolCount || 0} tools offered to the model`, '', false, true);
   for (const t of (rec.toolTurns || [])) {
-    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (truncated)' : ''}`, `${fmtTok(t.resultTokens)} tok`, t.truncated);
+    const delta = t.saved ? ` · filtered −${fmtTok(t.saved)}` : '';
+    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (elided)' : ''}`, `${fmtTok(t.resultTokens)} tok${delta}`, t.saved > 0);
   }
 
   // Assembled prompt viewer.
@@ -684,16 +726,18 @@ function renderProcess(rec) {
   const subs = rec.process || [];
 
   const ss = L.skillSelect;
-  const ssDetail = !ss ? 'no skills'
+  const ssDetail = !ss ? 'no skills enabled this turn'
     : ss.inlined ? `${ss.available} available · all inlined (small)`
     : `${ss.available} available → ${(ss.selected || []).length} loaded${ss.savedTokens ? ` · saved ${fmtTok(ss.savedTokens)}` : ''}`;
+  const filterSaved = (rec.toolTurns || []).reduce((n, t) => n + (t.saved || 0), 0);
   const stages = [
     { name: 'Assemble', detail: `${L.assembled.length} messages`, state: 'done' },
-    { name: 'Select skills', detail: ssDetail, state: ss ? 'done' : 'planned' },
-    { name: 'Trim tools', detail: 'planned — Phase 1', state: 'planned' },
+    { name: 'Select skills', detail: ssDetail, state: 'done' },
+    { name: 'Select mode', detail: 'planned — modes not built yet', state: 'planned' },
     { name: 'Compact', detail: compacted ? 'summarized older history' : 'not needed this turn', state: compacted ? 'done' : 'done' },
     { name: 'Route', detail: L.model || '', state: 'done' },
     { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: nTools ? 'done' : 'done' },
+    { name: 'Filter / trim', detail: nTools ? `${nTools} tool result${nTools === 1 ? '' : 's'} filtered · saved ${fmtTok(filterSaved)}` : 'no tool output to filter', state: 'done' },
     { name: 'Delegate', detail: subs.length ? `${subs.length} sub-agent${subs.length === 1 ? '' : 's'}${subs.length > 1 ? ' (parallel)' : ''}` : 'none this turn', state: subs.length ? 'done' : 'planned' },
     { name: 'Merge', detail: rec.merge ? (rec.merge.status === 'done' ? `merged ${subs.length} results → ${fmtTok(rec.merge.tokens || 0)} tok` : 'merging…') : (subs.length ? 'returned separately (no merge)' : '—'), state: rec.merge ? (rec.merge.status === 'done' ? 'done' : 'active') : (subs.length ? 'done' : 'planned') },
     { name: 'Persist', detail: 'saved to chat', state: 'done' }
@@ -1069,6 +1113,7 @@ async function submit() {
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
     else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
     else if (ev.type === 'process') { captureProcess(ev); }
+    else if (ev.type === 'metrics') { captureMetrics(ev); }
     planEvent(ev);
   });
 
@@ -1079,7 +1124,7 @@ async function submit() {
       const last = history[history.length - 1];
       history[history.length - 1] = { ...last, content: (last.content || '') + block };
     }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId });
+    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId, chatId: state.currentChatId });
     if (res.compressed) {
       const note = document.createElement('div');
       note.className = 'turn turn--meta';

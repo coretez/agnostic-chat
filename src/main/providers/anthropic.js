@@ -83,6 +83,7 @@ async function streamAnthropic(base, key, body, onDelta) {
   const decoder = new TextDecoder();
   let buf = '';
   let text = '';
+  let usage = null;
   const blocks = [];
   try {
     for (;;) {
@@ -98,6 +99,8 @@ async function streamAnthropic(base, key, body, onDelta) {
         const data = line.slice(5).trim();
         if (!data) continue;
         let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.type === 'message_start' && j.message && j.message.usage) usage = { ...j.message.usage };
+        else if (j.type === 'message_delta' && j.usage) usage = { ...(usage || {}), ...j.usage };
         if (j.type === 'content_block_start') { const b = j.content_block || {}; blocks[j.index] = { type: b.type, id: b.id, name: b.name, text: '', jsonbuf: '' }; }
         else if (j.type === 'content_block_delta') {
           const d = j.delta || {}; const b = blocks[j.index] || (blocks[j.index] = { type: 'text', text: '', jsonbuf: '' });
@@ -114,7 +117,18 @@ async function streamAnthropic(base, key, body, onDelta) {
     if (b.type === 'text') content.push({ type: 'text', text: b.text || '' });
     else if (b.type === 'tool_use') { let input = {}; try { input = JSON.parse(b.jsonbuf || '{}'); } catch {} content.push({ type: 'tool_use', id: b.id, name: b.name, input }); toolCalls.push({ id: b.id, name: b.name, args: input }); }
   }
-  return { text, toolCalls, assistantRaw: content };
+  return { text, toolCalls, assistantRaw: content, usage: normalizeUsage(usage) };
+}
+
+// Normalize an Anthropic usage object to our shape (best-effort; null if absent).
+function normalizeUsage(u) {
+  if (!u) return null;
+  return {
+    inputTokens: u.input_tokens || 0,
+    outputTokens: u.output_tokens || 0,
+    cachedTokens: u.cache_read_input_tokens || 0,
+    cacheCreationTokens: u.cache_creation_input_tokens || 0
+  };
 }
 
 /**
@@ -139,7 +153,7 @@ function anthropic({ baseUrl, key }) {
       const content = Array.isArray(json?.content) ? json.content : [];
       const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('');
       const toolCalls = content.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: b.input || {} }));
-      return { text, toolCalls, assistantRaw: content, raw: json };
+      return { text, toolCalls, assistantRaw: content, raw: json, usage: normalizeUsage(json.usage) };
     }
   };
 }

@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 let db = null;
 
@@ -114,6 +114,27 @@ function migrate(database) {
         updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+    `);
+  }
+
+  // v8: turn_metrics telemetry table.
+  if (current < 8) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS turn_metrics (
+        id INTEGER PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+        chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+        model TEXT,
+        measured INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, cache_creation_tokens INTEGER,
+        est_input_tokens INTEGER, window INTEGER,
+        skills_available INTEGER, skills_loaded INTEGER, skill_saved_tokens INTEGER, skills_used TEXT,
+        filter_saved_tokens INTEGER, compaction_saved_tokens INTEGER,
+        delegated INTEGER, delegate_absorbed_tokens INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);
+      CREATE INDEX IF NOT EXISTS idx_turn_metrics_chat ON turn_metrics(chat_id);
     `);
   }
 

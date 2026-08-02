@@ -56,6 +56,33 @@ const projects = {
   }
 };
 
+// ── Turn metrics: per-turn telemetry ────────────────────────────────────────
+const metrics = {
+  record(m = {}) {
+    const db = getDb();
+    const info = db.prepare(
+      `INSERT INTO turn_metrics
+        (project_id, chat_id, model, measured, input_tokens, output_tokens, cached_tokens, cache_creation_tokens,
+         est_input_tokens, window, skills_available, skills_loaded, skill_saved_tokens, skills_used,
+         filter_saved_tokens, compaction_saved_tokens, delegated, delegate_absorbed_tokens)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(
+      m.projectId ?? null, m.chatId ?? null, m.model ?? null, m.measured ? 1 : 0,
+      m.inputTokens ?? null, m.outputTokens ?? null, m.cachedTokens ?? null, m.cacheCreationTokens ?? null,
+      m.estInputTokens ?? null, m.window ?? null, m.skillsAvailable ?? null, m.skillsLoaded ?? null,
+      m.skillSavedTokens ?? null, m.skillsUsed ? JSON.stringify(m.skillsUsed) : null,
+      m.filterSavedTokens ?? null, m.compactionSavedTokens ?? null, m.delegated ?? null, m.delegateAbsorbedTokens ?? null
+    );
+    return info.lastInsertRowid;
+  },
+  listByChat(chatId, limit = 200) {
+    return getDb().prepare('SELECT * FROM turn_metrics WHERE chat_id = ? ORDER BY id ASC LIMIT ?').all(chatId, limit);
+  },
+  listByProject(projectId, limit = 500) {
+    return getDb().prepare('SELECT * FROM turn_metrics WHERE project_id = ? ORDER BY id DESC LIMIT ?').all(projectId, limit);
+  }
+};
+
 // ── Settings: small key/value store (global when project_id is NULL) ─────────
 const settings = {
   get(key, projectId = null) {
@@ -400,4 +427,4 @@ const mcp = {
   }
 };
 
-module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, slugify };
+module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, metrics, slugify };

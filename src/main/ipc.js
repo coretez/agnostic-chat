@@ -147,6 +147,10 @@ function registerIpc() {
   ipcMain.handle('agents:update', (_e, { id, patch }) => repo.agents.update(id, patch));
   ipcMain.handle('agents:remove', (_e, { id }) => repo.agents.remove(id));
 
+  // Turn metrics (telemetry) — read-only for the readout + trend view
+  ipcMain.handle('metrics:listByChat', (_e, { chatId }) => repo.metrics.listByChat(chatId));
+  ipcMain.handle('metrics:listByProject', (_e, { projectId }) => repo.metrics.listByProject(projectId));
+
   // Settings (small key/value store; project_id null = global)
   ipcMain.handle('settings:get', (_e, { key, projectId = null }) => repo.settings.get(key, projectId));
   ipcMain.handle('settings:set', (_e, { key, value, projectId = null }) => repo.settings.set(key, value, projectId));
@@ -443,9 +447,11 @@ function registerIpc() {
         return runSubagent({ connector, model: m, fastModel, agent, task: task || '', tools: subTools, callTool: rawCallTool, onEvent: emitProgress });
       };
 
+      let delegatedCount = 0, delegateAbsorbed = 0; // telemetry: isolation via sub-agents
       const callTool = async (name, args) => {
         if (name === 'delegate') {
           const r = await runOne(args && args.agent, args && args.task);
+          delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
           return { text: r.conclusion || '(sub-agent returned no conclusion)' };
         }
         if (name === 'assign') {
@@ -454,6 +460,7 @@ function registerIpc() {
           if (!tasks.length) return { text: 'assign: no tasks provided', isError: true };
           const results = await Promise.all(tasks.map(async (t) => {
             const r = await runOne(t.agent, t.task);
+            delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
             return { agent: (resolveDelegate(t.agent).agent.name), task: t.task, conclusion: r.conclusion || '' };
           }));
           if (args && args.merge) {
@@ -490,16 +497,42 @@ function registerIpc() {
       // Post-call: report each tool result's size — the raw material for Phase 1
       // (tool-result trimming) and immediately useful to see what's bloating context.
       try {
-        const trace = (result.toolTrace || []).map((t) => ({
-          name: t.name,
-          resultTokens: Math.ceil((t.resultChars || 0) / 4),
-          truncated: !!t.truncated,
-          isError: t.ok === false
-        }));
+        const trace = (result.toolTrace || []).map((t) => {
+          const raw = Math.ceil((t.resultChars || 0) / 4);
+          const filtered = Math.ceil((t.filteredChars != null ? t.filteredChars : t.resultChars || 0) / 4);
+          return { name: t.name, rawTokens: raw, resultTokens: filtered, saved: Math.max(0, raw - filtered), rules: t.rules || [], truncated: !!t.truncated, isError: t.ok === false };
+        });
         if (trace.length) _e.sender.send('chat:progress', { type: 'internals-tools', trace });
       } catch (e) { console.error('[internals tools]', e && e.message); }
 
-      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed };
+      // Telemetry (objective 0): record real usage + reductions for this turn.
+      let metricRow = null;
+      try {
+        const est = estimateTokens(convo);
+        const filterSaved = (result.toolTrace || []).reduce((n, t) => {
+          const raw = t.resultChars || 0; const after = t.filteredChars != null ? t.filteredChars : raw;
+          return n + Math.max(0, raw - after) / 4;
+        }, 0);
+        const compactionSaved = compressed ? Math.max(0, estimateTokens(base) - est) : 0;
+        const u = result.usage || {};
+        metricRow = {
+          projectId: projectId || null, chatId: payload?.chatId || null, model: chosenModel,
+          measured: !!u.measured,
+          inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, cachedTokens: u.cachedTokens || 0, cacheCreationTokens: u.cacheCreationTokens || 0,
+          estInputTokens: est, window: contextWindowFor(chosenModel),
+          skillsAvailable: skillSelect ? skillSelect.available : 0,
+          skillsLoaded: skillSelect ? (skillSelect.selected || []).length : 0,
+          skillSavedTokens: skillSelect ? (skillSelect.savedTokens || 0) : 0,
+          skillsUsed: skillSelect ? (skillSelect.selected || []) : [],
+          filterSavedTokens: Math.round(filterSaved),
+          compactionSavedTokens: compactionSaved,
+          delegated: delegatedCount, delegateAbsorbedTokens: delegateAbsorbed
+        };
+        repo.metrics.record(metricRow);
+        _e.sender.send('chat:progress', { type: 'metrics', ...metricRow });
+      } catch (e) { console.error('[metrics]', e && e.message); }
+
+      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null };
     }
 
     return { model: model || 'stub', reply: `(${model || 'stub'} stub) You said: ${text}`, toolTrace: [] };

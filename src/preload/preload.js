@@ -53,6 +53,12 @@ contextBridge.exposeInMainWorld('api', {
     remove: (id) => ipcRenderer.invoke('agents:remove', { id })
   },
 
+  // Per-turn telemetry (read-only).
+  metrics: {
+    listByChat: (chatId) => ipcRenderer.invoke('metrics:listByChat', { chatId }),
+    listByProject: (projectId) => ipcRenderer.invoke('metrics:listByProject', { projectId })
+  },
+
   // Small key/value store; projectId omitted/null = global.
   settings: {
     get: (key, projectId = null) => ipcRenderer.invoke('settings:get', { key, projectId }),

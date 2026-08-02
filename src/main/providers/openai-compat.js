@@ -91,6 +91,17 @@ function toOpenAiMsg(m) {
 
 // Streaming chat completion (SSE). Idle-timeout based — no total timeout, so a
 // long generation never times out as long as tokens keep flowing.
+// Normalize an OpenAI-style usage object to our shape (best-effort; null if absent).
+function normalizeUsage(u) {
+  if (!u) return null;
+  return {
+    inputTokens: u.prompt_tokens || 0,
+    outputTokens: u.completion_tokens || 0,
+    cachedTokens: (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0,
+    cacheCreationTokens: 0
+  };
+}
+
 async function streamChat(base, key, body, onDelta) {
   const ctrl = new AbortController();
   const IDLE = 90000;
@@ -111,6 +122,7 @@ async function streamChat(base, key, body, onDelta) {
   const decoder = new TextDecoder();
   let buf = '';
   let text = '';
+  let usage = null;
   const byIndex = new Map();
   try {
     for (;;) {
@@ -126,6 +138,7 @@ async function streamChat(base, key, body, onDelta) {
         const data = line.slice(5).trim();
         if (data === '[DONE]') { buf = ''; break; }
         let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.usage) usage = j.usage; // final chunk (include_usage) carries token counts
         const delta = j.choices?.[0]?.delta || {};
         if (delta.content) { text += delta.content; onDelta({ text: delta.content }); }
         for (const tc of (delta.tool_calls || [])) {
@@ -145,7 +158,7 @@ async function streamChat(base, key, body, onDelta) {
   const assistantRaw = { role: 'assistant', content: text || null };
   if (tcArr.length) assistantRaw.tool_calls = tcArr;
   const toolCalls = tcArr.map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-  return { text, toolCalls, assistantRaw };
+  return { text, toolCalls, assistantRaw, usage: normalizeUsage(usage) };
 }
 
 /**
@@ -161,6 +174,7 @@ function openaiCompat({ baseUrl, key }) {
     },
     async chat({ model, messages, tools, maxTokens, onDelta }) {
       const body = { model, messages: messages.map(toOpenAiMsg), stream: !!onDelta };
+      if (onDelta) body.stream_options = { include_usage: true }; // ask for a final usage chunk
       if (maxTokens) body.max_tokens = maxTokens;
       if (tools && tools.length) {
         body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: sanitizeSchema(t.inputSchema) } }));
@@ -171,7 +185,7 @@ function openaiCompat({ baseUrl, key }) {
         const json = await req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000 });
         const msg = json?.choices?.[0]?.message || {};
         const toolCalls = (msg.tool_calls || []).map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json };
+        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage) };
       }
       return streamChat(base, key, body, onDelta);
     }

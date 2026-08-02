@@ -179,6 +179,44 @@ app.whenReady().then(async () => {
   assert(proc.filter((e) => e.kind === 'subagent-done').length === 2, 'both sub-agents emitted done events');
   assert(proc.some((e) => e.kind === 'merge-start') && proc.some((e) => e.kind === 'merge-done'), 'merge emits lifecycle events for the PROCESS view');
 
+  // Noise filter: strips low-signal bulk from tool results (RTK-inspired)
+  const { filterToolResult } = require('../src/main/filter');
+  const pretty = JSON.stringify({ report: 'x'.repeat(80), rows: Array(150).fill({ sev: 'high', host: 'h' }) }, null, 2);
+  const f1 = filterToolResult('run_report', pretty);
+  assert(f1.after < f1.before * 0.5 && f1.rules.includes('json-min'), 'filter minifies pretty JSON (big saving)');
+  const f2 = filterToolResult('logs', Array.from({ length: 20000 }, (_, i) => `event ${i} occurred at host-${i % 7}`).join('\n'), { cap: 2000 });
+  assert(f2.after <= 2500 && f2.rules.includes('middle-elide'), 'filter middle-elides huge output to the cap');
+  const f2b = filterToolResult('logs', 'repeated warning\n'.repeat(5000));
+  assert(f2b.after < 200 && f2b.rules.includes('dedup-lines'), 'filter collapses runs of duplicate lines');
+  const f3 = filterToolResult('noop', 'a short clean result');
+  assert(f3.after === f3.before && f3.rules.length === 0, 'filter leaves small clean output untouched');
+  // Chat loop applies the filter to tool results
+  let cstep = 0;
+  const bigJson = JSON.stringify({ items: Array(400).fill({ a: 1, b: 2 }) }, null, 2);
+  const floop = await runChatLoop({
+    chat: async () => (cstep++ === 0 ? { text: '', toolCalls: [{ id: 'x', name: 'q', args: {} }] } : { text: 'done', toolCalls: [] }),
+    callTool: async () => ({ text: bigJson, isError: false }),
+    model: 'm', messages: [{ role: 'user', content: 'q' }], tools: []
+  });
+  assert(floop.toolTrace[0].filteredChars < floop.toolTrace[0].resultChars, 'chat loop filters tool results before feeding them back');
+
+  // Telemetry: chat loop aggregates real provider usage across calls
+  let ustep = 0;
+  const uloop = await runChatLoop({
+    chat: async () => (ustep++ === 0
+      ? { text: '', toolCalls: [{ id: 'u', name: 'q', args: {} }], usage: { inputTokens: 1000, outputTokens: 50, cachedTokens: 800 } }
+      : { text: 'ok', toolCalls: [], usage: { inputTokens: 1200, outputTokens: 30, cachedTokens: 1100 } }),
+    callTool: async () => ({ text: 'r', isError: false }),
+    model: 'm', messages: [{ role: 'user', content: 'q' }], tools: []
+  });
+  assert(uloop.usage.measured && uloop.usage.inputTokens === 2200 && uloop.usage.cachedTokens === 1900, 'chat loop aggregates provider token usage across iterations');
+
+  // turn_metrics persists and reads back
+  const mid = repo.metrics.record({ projectId: projA.id, chatId: chat.id, model: 'm', measured: true, inputTokens: 2200, outputTokens: 80, cachedTokens: 1900, estInputTokens: 2400, window: 250000, skillsAvailable: 33, skillsLoaded: 2, skillSavedTokens: 218000, skillsUsed: ['a', 'b'], filterSavedTokens: 68000, compactionSavedTokens: 0, delegated: 2, delegateAbsorbedTokens: 140000 });
+  assert(mid > 0, 'turn_metrics row recorded');
+  const mrows = repo.metrics.listByChat(chat.id);
+  assert(mrows.length >= 1 && mrows[mrows.length - 1].cached_tokens === 1900 && mrows[mrows.length - 1].measured === 1, 'turn_metrics reads back real usage');
+
   // Authored agents: per-project CRUD + name/tool resolution
   const ag = repo.agents.create({ projectId: projA.id, name: 'report-reader', description: 'pulls + distills reports', systemPrompt: 'Read the report and return 3 findings.', tools: ['fluency__run_report'] });
   assert(ag.id && Array.isArray(ag.tools) && ag.tools[0] === 'fluency__run_report', 'agent created with tool allowlist parsed');

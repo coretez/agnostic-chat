@@ -98,6 +98,33 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
 
+-- ── Turn metrics: per-turn telemetry (real usage + reductions) ─────────────
+-- The measurement backbone for the "Efficiency, Measured" phase KPIs.
+CREATE TABLE IF NOT EXISTS turn_metrics (
+  id                       INTEGER PRIMARY KEY,
+  project_id               INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  chat_id                  INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+  model                    TEXT,
+  measured                 INTEGER NOT NULL DEFAULT 0,  -- 1 = real provider usage, 0 = estimate only
+  input_tokens             INTEGER,                     -- real prompt tokens (all model calls this turn)
+  output_tokens            INTEGER,
+  cached_tokens            INTEGER,                     -- prompt tokens served from cache
+  cache_creation_tokens    INTEGER,
+  est_input_tokens         INTEGER,                     -- our chars/4 estimate (reconciliation)
+  window                   INTEGER,
+  skills_available         INTEGER,
+  skills_loaded            INTEGER,
+  skill_saved_tokens       INTEGER,
+  skills_used              TEXT,                        -- JSON array of loaded skill names
+  filter_saved_tokens      INTEGER,
+  compaction_saved_tokens  INTEGER,
+  delegated                INTEGER,                     -- # sub-agents this turn
+  delegate_absorbed_tokens INTEGER,                     -- tokens sub-agents kept out of main
+  created_at               TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);
+CREATE INDEX IF NOT EXISTS idx_turn_metrics_chat ON turn_metrics(chat_id);
+
 -- ── Credentials: API keys / tokens, ENCRYPTED at rest ──────────────────────
 -- secret_ciphertext holds safeStorage-encrypted bytes; plaintext never touches disk.
 CREATE TABLE IF NOT EXISTS credentials (
