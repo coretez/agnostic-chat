@@ -57,6 +57,8 @@
           <button class="tab" data-page="overview" type="button">OVERVIEW</button>
           <button class="tab" data-page="documents" type="button">DOCUMENTS</button>
           <button class="tab" data-page="skills" type="button">SKILLS</button>
+          <button class="tab" data-page="agents" type="button">AGENTS</button>
+          <button class="tab" data-page="internals" type="button">INTERNALS</button>
           <div class="spacer"></div>
           <div class="tabbar__note" id="toolbar-note"></div>
         </nav>
@@ -86,6 +88,7 @@
                       <button class="icon-btn icon-btn--bordered" id="attach-btn" type="button" title="Attach files">📎</button>
                       <input id="attach-input" type="file" multiple hidden />
                       <span class="composer__meta" id="composer-scope"></span>
+                      <button class="ctxmeter" id="ctx-meter" type="button" hidden title="Context window usage — click to open INTERNALS"></button>
                       <div class="spacer"></div>
                       <button class="btn btn--brand btn--sm" id="send" type="button" disabled>SEND</button>
                     </div>
@@ -207,6 +210,81 @@
               </div>
             </div>
           </section>
+          <!-- Internals — the glass-box context inspector -->
+          <section class="page page--scroll" data-page="internals" hidden>
+            <div class="internals">
+              <div class="internals__head">
+                <div>
+                  <div class="internals__title">CONTEXT INTERNALS</div>
+                  <div class="internals__sub">Exactly what this chat assembled and sent to the model on its last turn — the context engine, glass-boxed. Read-only for now.</div>
+                </div>
+                <div class="spacer"></div>
+                <div class="internals__model" id="int-model"></div>
+              </div>
+
+              <div class="lenstabs" id="int-lenstabs">
+                <button class="lenstab is-active" data-lens="context" type="button">CONTEXT</button>
+                <button class="lenstab" data-lens="process" type="button">PROCESS</button>
+                <button class="lenstab" data-lens="review" type="button">REVIEW</button>
+                <div class="lenstabs__hint">what's in the window · how it was produced · how to improve it</div>
+              </div>
+
+              <div class="internals__empty" id="int-empty">Send a message in this chat to capture its context breakdown.</div>
+
+              <div id="int-body" hidden>
+                <!-- CONTEXT lens: what exists in the window right now -->
+                <div id="int-context">
+                  <div class="ovcard">
+                    <div class="ovcard__title">WINDOW OCCUPANCY <span class="int-meta" id="int-window"></span></div>
+                    <div class="occbar" id="int-occbar"></div>
+                    <div class="occlegend" id="int-legend"></div>
+                  </div>
+
+                  <div class="ovcard">
+                    <div class="ovcard__title">PIPELINE EVENTS</div>
+                    <ul class="inttimeline" id="int-timeline"></ul>
+                  </div>
+
+                  <div class="ovcard">
+                    <div class="ovcard__title">ASSEMBLED PROMPT <span class="int-meta" id="int-msgcount"></span></div>
+                    <div class="intprompt" id="int-prompt"></div>
+                  </div>
+                </div>
+
+                <!-- PROCESS lens: the pipeline + delegated sub-agents -->
+                <div id="int-process" hidden>
+                  <div class="ovcard">
+                    <div class="ovcard__title">PIPELINE</div>
+                    <ul class="stagelist" id="int-stages"></ul>
+                  </div>
+
+                  <div class="ovcard">
+                    <div class="ovcard__title">THREADS <span class="int-meta" id="int-threadmeta"></span></div>
+                    <div class="threadtree" id="int-threads"></div>
+                  </div>
+                </div>
+
+                <!-- REVIEW lens: a second LLM critiques this turn -->
+                <div id="int-review" hidden>
+                  <div class="ovcard">
+                    <div class="review__bar">
+                      <span class="review__lbl">EVALUATOR</span>
+                      <div class="dropdown ovprop__dd" id="int-eval-dd">
+                        <button class="dropdown__btn" id="int-eval-btn" type="button"><span id="int-eval-label">pick a model…</span><span class="caret">▾</span></button>
+                        <div class="dropdown__menu" id="int-eval-menu" hidden></div>
+                      </div>
+                      <div class="spacer"></div>
+                      <button class="btn btn--brand btn--sm" id="int-eval-run" type="button">EVALUATE LAST TURN</button>
+                    </div>
+                    <div class="review__note" id="int-eval-note">A second model reviews the last turn's context engineering and suggests improvements. Cross-model is encouraged — grade one model's run with another.</div>
+                    <div class="review__assessment" id="int-eval-assessment" hidden></div>
+                    <div class="reviewlist" id="int-eval-findings"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section class="page page--center" data-page="documents" hidden>
             <div class="placeholder"><div class="placeholder__title">DOCUMENTS</div><div class="placeholder__sub">The library + reader + details view is a later phase. For now, documents show in the Chat rail.</div></div>
           </section>
@@ -217,7 +295,7 @@
               <div class="mscreen__head">
                 <div>
                   <div class="mscreen__title">SKILLS</div>
-                  <div class="mscreen__sub">Enabled skills are injected as guidance for the current project's chats. Import a library from a connected MCP server, or author your own.</div>
+                  <div class="mscreen__sub">Skills are <b>on by default</b> for every project — toggle off any you don't want in scope. Enabled skills are injected as guidance for this project's chats. Import a library from a connected MCP server, or author your own.</div>
                 </div>
                 <div class="spacer"></div>
                 <div class="dropdown skills-src" id="skills-src-dd">
@@ -236,6 +314,33 @@
                 <div class="field"><label>Description</label><input id="s-desc" placeholder="one line — when to use it" /></div>
                 <div class="field"><label>Definition</label><textarea id="s-def" rows="8" placeholder="skill instructions (markdown)"></textarea></div>
                 <div class="editor__actions"><div class="spacer"></div><button class="btn btn--ghost btn--sm" id="skill-cancel" type="button">CANCEL</button><button class="btn btn--brand btn--sm" id="skill-save" type="button">SAVE</button></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Agents (authored per-project sub-agent definitions) -->
+          <section class="page page--scroll" data-page="agents" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">AGENTS</div>
+                  <div class="mscreen__sub">Named sub-agents the orchestrator can <code>delegate</code> to. Each runs in its own isolated context and returns a distilled conclusion — define a role, and heavy work gets pushed off the main thread.</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn--brand btn--sm" id="agent-add" type="button">+ NEW AGENT</button>
+              </div>
+              <div class="test-result" id="agents-msg"></div>
+              <ul class="connlist" id="agent-list"></ul>
+              <div class="mscreen__empty" id="agent-empty" hidden>No agents yet. Create one (e.g. <b>report-reader</b>, <b>case-checker</b>) so the orchestrator can delegate to it by name. Until then, delegation uses a general sub-agent.</div>
+
+              <div class="editor" id="agent-editor" hidden>
+                <div class="editor__title" id="agent-editor-title">NEW AGENT</div>
+                <div class="field"><label>Name</label><input id="a-name" placeholder="e.g. report-reader" /></div>
+                <div class="field"><label>Description <span class="opt">when to delegate to it</span></label><input id="a-desc" placeholder="one line — pulls and distills large reports" /></div>
+                <div class="field"><label>System prompt</label><textarea id="a-prompt" rows="7" placeholder="the agent's instructions — its role, what to do, and what to return"></textarea></div>
+                <div class="field"><label>Model <span class="opt">optional — defaults to the chat model</span></label><input id="a-model" placeholder="leave blank to inherit the chat model" /></div>
+                <div class="field"><label>Allowed tools <span class="opt">optional — comma-separated tool names; blank = all</span></label><input id="a-tools" placeholder="e.g. fluency__run_report, fluency__list_cases" /></div>
+                <div class="editor__actions"><div class="spacer"></div><button class="btn btn--ghost btn--sm" id="agent-cancel" type="button">CANCEL</button><button class="btn btn--brand btn--sm" id="agent-save" type="button">SAVE</button></div>
               </div>
             </div>
           </section>

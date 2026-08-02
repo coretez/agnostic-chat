@@ -50,14 +50,16 @@ app.whenReady().then(async () => {
   // Cross-project isolation
   assert(repo.documents.listByProject(projB.id).length === 0, 'projB sees none of projA docs');
 
-  // Skills scoped per project
+  // Skills — opt-out per project (ON by default; disable to exclude)
   const skillDocs = repo.skills.create({ name: 'docx', description: 'Word docs' });
   const skillSec = repo.skills.create({ name: 'security-review', description: 'security' });
-  repo.skills.setForProject({ projectId: projA.id, skillId: skillDocs.id, enabled: true });
-  repo.skills.setForProject({ projectId: projB.id, skillId: skillSec.id, enabled: true });
+  assert(repo.skills.listEnabledForProject(projA.id).length === 2, 'skills are ON by default for a project');
+  assert(repo.skills.isEnabled(projA.id, skillDocs.id) === true, 'skill enabled by default when no row exists');
+  repo.skills.setForProject({ projectId: projA.id, skillId: skillSec.id, enabled: false });
   const aSkills = repo.skills.listEnabledForProject(projA.id);
-  assert(aSkills.length === 1 && aSkills[0].name === 'docx', 'projA sees only its enabled skill');
-  assert(repo.skills.listEnabledForProject(projB.id)[0].name === 'security-review', 'projB scoped separately');
+  assert(aSkills.length === 1 && aSkills[0].name === 'docx', 'disabling a skill removes it for that project only');
+  assert(repo.skills.listEnabledForProject(projB.id).length === 2, 'other project still sees all skills (disable is per-project)');
+  assert(repo.skills.isEnabled(projA.id, skillSec.id) === false, 'explicitly disabled skill reports disabled');
 
   // Credentials: encrypt → store → list (no secret) → reveal round trip
   const cred = repo.credentials.set({
@@ -115,6 +117,78 @@ app.whenReady().then(async () => {
   const loop = await runChatLoop({ chat: fakeChat, callTool: async (n, a) => ({ text: `echo: ${a.text}`, isError: false }), model: 'm', messages: [{ role: 'user', content: 'q' }], tools: [] });
   assert(loop.toolTrace.length === 1 && loop.toolTrace[0].name === 'echo', 'chat loop recorded one tool call');
   assert(loop.reply === 'final: echo: hi', 'chat loop fed tool result back and produced final answer');
+
+  // Sub-agent runtime: delegate → runs its own loop (with a tool) → returns a conclusion
+  const { runSubagent } = require('../src/main/subagent');
+  let sstep = 0;
+  const subConnector = { chat: async ({ messages }) => {
+    if (sstep++ === 0) return { text: '', toolCalls: [{ id: 's1', name: 'read', args: { path: 'big.json' } }] };
+    return { text: 'CONCLUSION: 3 findings', toolCalls: [] };
+  } };
+  const procEvents = [];
+  const sub = await runSubagent({
+    connector: subConnector, model: 'm', fastModel: 'm', task: 'read big.json and distill',
+    tools: [{ name: 'read' }],
+    callTool: async () => ({ text: 'x'.repeat(80000), isError: false }),
+    onEvent: (ev) => procEvents.push(ev)
+  });
+  assert(sub.conclusion === 'CONCLUSION: 3 findings', 'sub-agent returns a distilled conclusion');
+  assert(sub.inputTokens > 15000 && sub.conclusionTokens < 50, 'sub-agent absorbs bulk, returns little (isolation win)');
+  assert(procEvents.some((e) => e.kind === 'subagent-start') && procEvents.some((e) => e.kind === 'subagent-done'), 'sub-agent emits process lifecycle events');
+
+  // Meta-evaluator: parses findings from a model reply (even wrapped in prose/fences)
+  const { runEvaluator, extractJson } = require('../src/main/evaluator');
+  assert(extractJson('here you go: {"a":{"b":1}} thanks').trim() === '{"a":{"b":1}}', 'evaluator extracts balanced JSON from noisy text');
+  const evalConnector = { chat: async () => ({ text: '```json\n{"assessment":"tool-heavy turn","findings":[{"category":"delegation","severity":"high","observation":"74k report dumped inline","suggestion":"delegate the pull","target":"usage"}]}\n```' }) };
+  const evalRes = await runEvaluator({ connector: evalConnector, model: 'm', digest: { totalTokens: 99000 } });
+  assert(evalRes.findings.length === 1 && evalRes.findings[0].target === 'usage', 'evaluator returns parsed findings');
+  assert(evalRes.assessment === 'tool-heavy turn', 'evaluator returns an assessment');
+
+  // Skill selection: only the chosen skill's full definition is loaded
+  const { selectSkills } = require('../src/main/skill-select');
+  const selConnector = { chat: async () => ({ text: 'sure: {"skills":["docx"]}' }) };
+  const selRes = await selectSkills({ connector: selConnector, model: 'm', skills: [
+    { name: 'docx', description: 'make Word docs', definition: 'X'.repeat(9000) },
+    { name: 'security-review', description: 'audit code', definition: 'Y'.repeat(9000) }
+  ], userText: 'write me a word document' });
+  assert(selRes.names.length === 1 && selRes.names[0] === 'docx', 'skill selector picks only the relevant skill');
+  const selNone = await selectSkills({ connector: { chat: async () => ({ text: '{"skills":[]}' }) }, model: 'm', skills: [{ name: 'docx', description: 'd' }], userText: 'hi' });
+  assert(selNone.names.length === 0, 'skill selector can pick none');
+
+  // Orchestration: assign work in PARALLEL + merge the results (the full round-trip)
+  const { runSubagent: rsa, mergeResults } = require('../src/main/subagent');
+  const proc = [];
+  let active = 0, maxActive = 0;
+  const orchConn = { chat: async ({ messages }) => {
+    const u = (messages.find((m) => m.role === 'user') || {}).content || '';
+    if (u.startsWith('You are merging')) return { text: 'MERGED(' + (u.match(/## Result \d+/g) || []).length + ')' };
+    active++; maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 25));
+    active--;
+    return { text: 'C:' + u.slice(0, 10), toolCalls: [] };
+  } };
+  const assignments = [{ task: 'compare the last 14 days' }, { task: 'compare the previous 14 days' }];
+  const results = await Promise.all(assignments.map(async (t) => {
+    const r = await rsa({ connector: orchConn, model: 'm', fastModel: 'm', task: t.task, tools: [], callTool: async () => ({ text: 'x' }), onEvent: (e) => proc.push(e) });
+    return { agent: 'general', task: t.task, conclusion: r.conclusion };
+  }));
+  assert(results.length === 2 && results.every((r) => r.conclusion.startsWith('C:')), 'assign ran both sub-tasks and each returned a conclusion');
+  assert(maxActive === 2, 'assigned sub-agents ran in PARALLEL (both active at once)');
+  const merged = await mergeResults({ connector: orchConn, model: 'm', instruction: 'combine both periods', results, onEvent: (e) => proc.push(e) });
+  assert(merged === 'MERGED(2)', 'merge synthesized both results into one');
+  assert(proc.filter((e) => e.kind === 'subagent-done').length === 2, 'both sub-agents emitted done events');
+  assert(proc.some((e) => e.kind === 'merge-start') && proc.some((e) => e.kind === 'merge-done'), 'merge emits lifecycle events for the PROCESS view');
+
+  // Authored agents: per-project CRUD + name/tool resolution
+  const ag = repo.agents.create({ projectId: projA.id, name: 'report-reader', description: 'pulls + distills reports', systemPrompt: 'Read the report and return 3 findings.', tools: ['fluency__run_report'] });
+  assert(ag.id && Array.isArray(ag.tools) && ag.tools[0] === 'fluency__run_report', 'agent created with tool allowlist parsed');
+  assert(repo.agents.listByProject(projA.id).some((a) => a.name === 'report-reader'), 'agent listed under its project');
+  assert(repo.agents.getByName(projA.id, 'REPORT-READER') && repo.agents.getByName(projA.id, 'REPORT-READER').id === ag.id, 'agent lookup by name is case-insensitive');
+  assert(repo.agents.listByProject(projB.id).length === 0, 'agents are scoped to their project');
+  const ag2 = repo.agents.update(ag.id, { model: 'kimi-k2.6', tools: null });
+  assert(ag2.model === 'kimi-k2.6' && ag2.tools === null, 'agent update patches model + clears tool allowlist');
+  repo.agents.remove(ag.id);
+  assert(repo.agents.listByProject(projA.id).length === 0, 'agent removed');
 
   // Compression bundle
   const providerFast = repo.providers.add({ type: 'openai', label: 'F', secret: 'k', defaultModel: 'gpt-4o', fastModel: 'gpt-4o-mini' });

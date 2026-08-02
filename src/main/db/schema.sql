@@ -83,6 +83,21 @@ CREATE TABLE IF NOT EXISTS project_skills (
   PRIMARY KEY (project_id, skill_id)
 );
 
+-- ── Agents: authored, per-project sub-agent definitions ────────────────────
+-- Named roles the orchestrator can `delegate` to (e.g. report-reader, case-checker).
+CREATE TABLE IF NOT EXISTS agents (
+  id            INTEGER PRIMARY KEY,
+  project_id    INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  name          TEXT NOT NULL,
+  description   TEXT,                     -- one line: when to delegate to it
+  system_prompt TEXT,                     -- the agent's instructions
+  model         TEXT,                     -- optional model override (else chat model)
+  tools_json    TEXT,                     -- optional JSON array of allowed tool names; null = all
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+
 -- ── Credentials: API keys / tokens, ENCRYPTED at rest ──────────────────────
 -- secret_ciphertext holds safeStorage-encrypted bytes; plaintext never touches disk.
 CREATE TABLE IF NOT EXISTS credentials (

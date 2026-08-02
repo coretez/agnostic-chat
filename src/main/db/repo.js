@@ -78,6 +78,41 @@ const settings = {
   }
 };
 
+// ── Agents: authored per-project sub-agent definitions ──────────────────────
+const agents = {
+  listByProject(projectId) {
+    return getDb().prepare('SELECT * FROM agents WHERE project_id = ? ORDER BY name').all(projectId)
+      .map((a) => ({ ...a, tools: a.tools_json ? JSON.parse(a.tools_json) : null }));
+  },
+  get(id) {
+    const a = getDb().prepare('SELECT * FROM agents WHERE id = ?').get(id);
+    return a ? { ...a, tools: a.tools_json ? JSON.parse(a.tools_json) : null } : null;
+  },
+  getByName(projectId, name) {
+    const a = getDb().prepare('SELECT * FROM agents WHERE project_id = ? AND name = ? COLLATE NOCASE').get(projectId, name);
+    return a ? { ...a, tools: a.tools_json ? JSON.parse(a.tools_json) : null } : null;
+  },
+  create({ projectId, name, description = null, systemPrompt = null, model = null, tools = null }) {
+    const info = getDb()
+      .prepare('INSERT INTO agents (project_id, name, description, system_prompt, model, tools_json) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(projectId, name, description, systemPrompt, model, tools ? JSON.stringify(tools) : null);
+    return agents.get(info.lastInsertRowid);
+  },
+  update(id, patch = {}) {
+    const sets = [], vals = [];
+    if (patch.name !== undefined) { sets.push('name = ?'); vals.push(patch.name); }
+    if (patch.description !== undefined) { sets.push('description = ?'); vals.push(patch.description); }
+    if (patch.systemPrompt !== undefined) { sets.push('system_prompt = ?'); vals.push(patch.systemPrompt); }
+    if (patch.model !== undefined) { sets.push('model = ?'); vals.push(patch.model || null); }
+    if (patch.tools !== undefined) { sets.push('tools_json = ?'); vals.push(patch.tools ? JSON.stringify(patch.tools) : null); }
+    sets.push("updated_at = datetime('now')");
+    vals.push(id);
+    getDb().prepare(`UPDATE agents SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return agents.get(id);
+  },
+  remove(id) { getDb().prepare('DELETE FROM agents WHERE id = ?').run(id); }
+};
+
 // ── Chats & messages ──────────────────────────────────────────────────────
 const chats = {
   create({ projectId, title = null, model = null }) {
@@ -166,13 +201,17 @@ const skills = {
   list() {
     return getDb().prepare('SELECT * FROM skills ORDER BY name ASC').all();
   },
-  /** Skills ENABLED for a project — what should actually be in scope. */
+  /**
+   * Skills ENABLED for a project — what should actually be in scope.
+   * Opt-OUT model: a skill is on by default; it's excluded only when the project
+   * has an explicit project_skills row with enabled = 0. (No row = enabled.)
+   */
   listEnabledForProject(projectId) {
     return getDb()
       .prepare(
         `SELECT s.* FROM skills s
-         JOIN project_skills ps ON ps.skill_id = s.id
-         WHERE ps.project_id = ? AND ps.enabled = 1
+         LEFT JOIN project_skills ps ON ps.skill_id = s.id AND ps.project_id = ?
+         WHERE ps.enabled IS NULL OR ps.enabled = 1
          ORDER BY s.name ASC`
       )
       .all(projectId);
@@ -186,8 +225,9 @@ const skills = {
   },
   get(id) { return getDb().prepare('SELECT * FROM skills WHERE id = ?').get(id); },
   isEnabled(projectId, skillId) {
+    // Opt-out: enabled unless an explicit row disables it.
     const row = getDb().prepare('SELECT enabled FROM project_skills WHERE project_id = ? AND skill_id = ?').get(projectId, skillId);
-    return !!(row && row.enabled);
+    return row ? !!row.enabled : true;
   },
   update(id, { name, description, definition }) {
     const db = getDb();
@@ -360,4 +400,4 @@ const mcp = {
   }
 };
 
-module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, slugify };
+module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, slugify };

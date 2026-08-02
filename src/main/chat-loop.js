@@ -35,14 +35,16 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
       let out;
       try { out = await callTool(call.name, call.args); }
       catch (e) { out = { text: `ERROR: ${e.message}`, isError: true }; }
-      emit({ type: 'tool-end', name: call.name, ok: !out.isError });
       // Guard: a giant tool result (e.g. skills_update dumping everything) must not
       // blow the model's context window when fed back.
       const CAP = 24000;
+      const rawLen = (out.text || '').length;
       let content = out.text || '';
-      if (content.length > CAP) content = content.slice(0, CAP) + `\n…[truncated ${content.length - CAP} chars — tool returned too much to include in context]`;
+      const truncated = content.length > CAP;
+      if (truncated) content = content.slice(0, CAP) + `\n…[truncated ${content.length - CAP} chars — tool returned too much to include in context]`;
+      emit({ type: 'tool-end', name: call.name, ok: !out.isError, resultChars: rawLen, truncated });
       history.push({ role: 'tool', toolCallId: call.id, name: call.name, content });
-      toolTrace.push({ name: call.name, args: call.args, ok: !out.isError });
+      toolTrace.push({ name: call.name, args: call.args, ok: !out.isError, resultChars: rawLen, truncated });
     }
   }
 

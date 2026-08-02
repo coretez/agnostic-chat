@@ -19,6 +19,15 @@ const el = {
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
   messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'),
+  ctxMeter: $('ctx-meter'),
+  intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
+  intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
+  intMsgcount: $('int-msgcount'), intPrompt: $('int-prompt'),
+  intLenstabs: $('int-lenstabs'), intContext: $('int-context'), intProcess: $('int-process'),
+  intStages: $('int-stages'), intThreads: $('int-threads'), intThreadmeta: $('int-threadmeta'),
+  intReview: $('int-review'), intEvalDd: $('int-eval-dd'), intEvalBtn: $('int-eval-btn'), intEvalLabel: $('int-eval-label'),
+  intEvalMenu: $('int-eval-menu'), intEvalRun: $('int-eval-run'), intEvalNote: $('int-eval-note'),
+  intEvalAssessment: $('int-eval-assessment'), intEvalFindings: $('int-eval-findings'),
   attachBtn: $('attach-btn'), attachInput: $('attach-input'), composerAttach: $('composer-attach'),
   railTabs: $('rail-tabs'), railDocList: $('rail-doc-list'), railAddDoc: $('rail-add-doc'),
   scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'),
@@ -49,7 +58,11 @@ const el = {
   skillsSrcDd: $('skills-src-dd'), skillsSrcBtn: $('skills-src-btn'), skillsSrcLabel: $('skills-src-label'), skillsSrcMenu: $('skills-src-menu'),
   skillEditor: $('skill-editor'), skillEditorTitle: $('skill-editor-title'),
   sName: $('s-name'), sDesc: $('s-desc'), sDef: $('s-def'),
-  skillCancel: $('skill-cancel'), skillSave: $('skill-save')
+  skillCancel: $('skill-cancel'), skillSave: $('skill-save'),
+  agentAdd: $('agent-add'), agentsMsg: $('agents-msg'), agentList: $('agent-list'), agentEmpty: $('agent-empty'),
+  agentEditor: $('agent-editor'), agentEditorTitle: $('agent-editor-title'),
+  aName: $('a-name'), aDesc: $('a-desc'), aPrompt: $('a-prompt'), aModel: $('a-model'), aTools: $('a-tools'),
+  agentCancel: $('agent-cancel'), agentSave: $('agent-save')
 };
 
 const state = {
@@ -59,8 +72,12 @@ const state = {
   projects: [], currentProjectId: null,
   chats: [], currentChatId: null,
   documents: [], skills: [], attachments: [],
+  internals: {},            // chatId -> { ledger, toolTurns:[], process:[] }
+  internalsLens: 'context', // 'context' | 'process' | 'review'
+  evaluatorModel: null,     // model id used by the meta-evaluator
   registry: [], providers: [], showAllModels: false,
   skillsAll: [], skillsEnabledIds: new Set(), skillEditing: null, skillsSource: null,
+  agents: [], agentEditing: null,
   mcpServers: [], mcpEditing: null, mcpTransport: 'stdio', mcpTools: null,
   editing: null,            // provider id being edited, or null for new
   editorType: null,         // provider type selected in the editor dropdown
@@ -85,6 +102,8 @@ function modelTag(model) { return String(model || 'no model').toUpperCase(); }
 const PAGE_NOTES = {
   chat: () => `${state.documents.length} DOCS IN SCOPE`,
   overview: () => 'UPDATED AUTOMATICALLY',
+  internals: () => 'LAST TURN · READ-ONLY',
+  agents: () => `${state.agents.length} AGENT${state.agents.length === 1 ? '' : 'S'}`,
   documents: () => `${state.documents.length} DOCUMENTS`,
   models: () => `${state.providers.length} CONNECTIONS`
 };
@@ -338,6 +357,7 @@ function showPage(page) {
   el.toolbarNote.textContent = PAGE_NOTES[page] ? PAGE_NOTES[page]() : '';
   el.tbSlug.textContent = '/ ' + page;
   if (page === 'overview') renderOverview();
+  if (page === 'internals') renderInternals();
 }
 function showFirstRun() {
   el.tabbar.hidden = true;
@@ -495,6 +515,351 @@ function updateComposerMeta() {
   el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}`;
 }
 
+// ── Internals: glass-box context inspector ─────────────────────────
+const CONTRIB = {
+  system:  { label: 'system',  color: '#9aa0a6' },
+  skills:  { label: 'skills',  color: '#2e9e5b' },
+  summary: { label: 'summary', color: '#c9821f' },
+  history: { label: 'history', color: '#2f73b7' },
+  current: { label: 'current', color: '#b3242e' },
+  tools:   { label: 'tools',   color: '#7a5cc0' }
+};
+function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
+
+function captureInternals(ev) {
+  if (!state.currentChatId) return;
+  state.internals[state.currentChatId] = { ledger: ev, toolTurns: [], process: [] };
+  updateCtxMeter();
+  if (state.page === 'internals') renderInternals();
+}
+// Sub-agent lifecycle events (delegate → runSubagent) build the thread tree.
+function captureProcess(ev) {
+  if (ev.kind === 'skill-select') return; // carried on the ledger; nothing to accumulate
+  const rec = state.internals[state.currentChatId];
+  if (!rec) return;
+  rec.process = rec.process || [];
+  if (ev.kind === 'merge-start') { rec.merge = { status: 'running', count: ev.count }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
+  if (ev.kind === 'merge-done') { rec.merge = { status: 'done', tokens: ev.tokens }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
+  if (ev.kind === 'subagent-start') {
+    rec.process.push({ agent: ev.agent, task: ev.task, status: 'running', tools: 0, conclusionTokens: 0, inputTokens: 0 });
+  } else {
+    const cur = [...rec.process].reverse().find((p) => p.status === 'running') || rec.process[rec.process.length - 1];
+    if (!cur) return;
+    if (ev.kind === 'subagent-tool-end') cur.tools += 1;
+    else if (ev.kind === 'subagent-done') {
+      cur.status = 'done';
+      cur.conclusionTokens = ev.conclusionTokens || 0;
+      cur.inputTokens = ev.inputTokens || 0;
+      cur.tools = ev.tools != null ? ev.tools : cur.tools;
+    }
+  }
+  if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+}
+function captureInternalsTools(ev) {
+  const rec = state.internals[state.currentChatId];
+  if (!rec) return;
+  rec.toolTurns = ev.trace || [];        // authoritative reconcile at end of turn
+  if (state.page === 'internals') renderInternals();
+}
+// Live: a tool just returned mid-loop — append it and tick occupancy immediately.
+function captureInternalsToolEnd(ev) {
+  const rec = state.internals[state.currentChatId];
+  if (!rec) return;
+  rec.toolTurns = rec.toolTurns || [];
+  const tok = Math.ceil((ev.resultChars || 0) / 4);
+  rec.toolTurns.push({ name: ev.name, resultTokens: tok, truncated: !!ev.truncated, isError: ev.ok === false });
+  if (rec.ledger) {
+    rec.ledger.total += tok;
+    const tb = rec.ledger.contributors.find((c) => c.key === 'tools');
+    if (tb) tb.tokens += tok; else rec.ledger.contributors.push({ key: 'tools', tokens: tok });
+  }
+  updateCtxMeter();
+  if (state.page === 'internals') renderInternals();
+}
+
+function updateCtxMeter() {
+  const rec = state.internals[state.currentChatId];
+  if (!rec || !rec.ledger) { el.ctxMeter.hidden = true; return; }
+  const { total, window } = rec.ledger;
+  const pct = window ? Math.round((total / window) * 100) : 0;
+  el.ctxMeter.hidden = false;
+  el.ctxMeter.classList.toggle('is-high', pct >= 60 && pct < 85);
+  el.ctxMeter.classList.toggle('is-crit', pct >= 85);
+  el.ctxMeter.innerHTML = `<span class="ctxbar"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}% ctx`;
+}
+
+function renderInternals() {
+  const rec = state.internals[state.currentChatId];
+  if (!rec || !rec.ledger) { el.intEmpty.hidden = false; el.intBody.hidden = true; el.intModel.textContent = ''; return; }
+  const L = rec.ledger;
+  el.intEmpty.hidden = true; el.intBody.hidden = false;
+  el.intModel.textContent = L.model || '';
+
+  const lens = state.internalsLens;
+  el.intContext.hidden = lens !== 'context';
+  el.intProcess.hidden = lens !== 'process';
+  el.intReview.hidden = lens !== 'review';
+  el.intLenstabs.querySelectorAll('.lenstab').forEach((b) => b.classList.toggle('is-active', b.dataset.lens === lens));
+  if (lens === 'process') { renderProcess(rec); return; }
+  if (lens === 'review') { renderReview(rec); return; }
+
+  const pct = L.window ? Math.round((L.total / L.window) * 100) : 0;
+  el.intWindow.textContent = `${fmtTok(L.total)} / ${fmtTok(L.window)} tok · ${pct}%`;
+
+  // Occupancy bar — segments scaled to the window; headroom (or overflow) shown.
+  const denom = Math.max(L.total, L.window) || 1;
+  el.intOccbar.innerHTML = '';
+  for (const c of L.contributors) {
+    const seg = document.createElement('div');
+    seg.className = 'occseg occseg--' + c.key;
+    seg.style.width = (c.tokens / denom * 100) + '%';
+    seg.title = `${(CONTRIB[c.key] || {}).label || c.key}: ${fmtTok(c.tokens)} tok`;
+    el.intOccbar.appendChild(seg);
+  }
+  const free = L.window - L.total;
+  el.intLegend.innerHTML = '';
+  for (const c of L.contributors) {
+    const meta = CONTRIB[c.key] || { label: c.key, color: '#888' };
+    const item = document.createElement('div');
+    item.className = 'occitem';
+    item.innerHTML = `<span class="sw" style="background:${meta.color}"></span>${meta.label} <b>${fmtTok(c.tokens)}</b>`;
+    el.intLegend.appendChild(item);
+  }
+  const freeItem = document.createElement('div');
+  freeItem.className = 'occitem';
+  freeItem.innerHTML = free >= 0
+    ? `<span class="sw" style="background:var(--line)"></span>free <b>${fmtTok(free)}</b>`
+    : `<span class="sw" style="background:var(--brand)"></span><b style="color:var(--brand)">OVER by ${fmtTok(-free)}</b>`;
+  el.intLegend.appendChild(freeItem);
+
+  // Pipeline events timeline.
+  el.intTimeline.innerHTML = '';
+  const addEvt = (glyph, label, delta, warn, muted) => {
+    const li = document.createElement('li');
+    li.className = 'intevt' + (muted ? ' intevt--muted' : '');
+    li.innerHTML = `<span class="intevt__glyph">${glyph}</span><span class="intevt__label">${escapeHtml(label)}</span>`
+      + (delta ? `<span class="intevt__delta${warn ? ' intevt__delta--warn' : ''}">${escapeHtml(delta)}</span>` : '');
+    el.intTimeline.appendChild(li);
+  };
+  addEvt('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(L.total)} tok`, false, true);
+  for (const e of (L.events || [])) {
+    if (e.type === 'skill-select') addEvt('◇', `Selected skills · ${e.available} available → ${e.selected} loaded`, e.saved ? `−${fmtTok(e.saved)}` : '', false);
+    else if (e.type === 'compact') addEvt('⚡', `Compacted older history → summary (${fmtTok(e.tokensBefore)} → ${fmtTok(e.tokensAfter)})`, `−${fmtTok(e.saved)}`);
+  }
+  if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);
+  addEvt('⚙', `${L.toolCount || 0} tools offered to the model`, '', false, true);
+  for (const t of (rec.toolTurns || [])) {
+    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (truncated)' : ''}`, `${fmtTok(t.resultTokens)} tok`, t.truncated);
+  }
+
+  // Assembled prompt viewer.
+  el.intMsgcount.textContent = `${L.assembled.length} messages`;
+  el.intPrompt.innerHTML = '';
+  L.assembled.forEach((m, i) => {
+    const meta = CONTRIB[m.contributor] || { label: m.contributor, color: '#888' };
+    const card = document.createElement('div');
+    card.className = 'intmsg';
+    const preview = (m.content || '').replace(/\s+/g, ' ').slice(0, 90) || (m.toolCalls || []).map((t) => `[calls ${t}]`).join(' ') || '(empty)';
+    const body = escapeHtml(m.content || '')
+      + (m.toolCalls && m.toolCalls.length ? `\n\n<span class="intmsg__clip">↳ tool calls: ${escapeHtml(m.toolCalls.join(', '))}</span>` : '')
+      + (m.clippedChars ? `\n<span class="intmsg__clip">…(${fmtTok(m.clippedChars)} more chars not shown)</span>` : '');
+    card.innerHTML = `<div class="intmsg__head">`
+      + `<span class="intmsg__role">${escapeHtml(m.role)}</span>`
+      + `<span class="intmsg__tag" style="background:${meta.color}">${meta.label}</span>`
+      + `<span class="intmsg__title">${escapeHtml(preview)}</span>`
+      + `<span class="intmsg__tok">${fmtTok(m.tokens)} tok</span></div>`
+      + `<pre class="intmsg__body" hidden>${body}</pre>`;
+    const head = card.querySelector('.intmsg__head');
+    const pre = card.querySelector('.intmsg__body');
+    head.onclick = () => { pre.hidden = !pre.hidden; };
+    el.intPrompt.appendChild(card);
+  });
+}
+
+// PROCESS lens — the pipeline stages and the delegated sub-agent tree.
+function renderProcess(rec) {
+  const L = rec.ledger;
+  const compacted = (L.events || []).some((e) => e.type === 'compact');
+  const nTools = (rec.toolTurns || []).length;
+  const subs = rec.process || [];
+
+  const ss = L.skillSelect;
+  const ssDetail = !ss ? 'no skills'
+    : ss.inlined ? `${ss.available} available · all inlined (small)`
+    : `${ss.available} available → ${(ss.selected || []).length} loaded${ss.savedTokens ? ` · saved ${fmtTok(ss.savedTokens)}` : ''}`;
+  const stages = [
+    { name: 'Assemble', detail: `${L.assembled.length} messages`, state: 'done' },
+    { name: 'Select skills', detail: ssDetail, state: ss ? 'done' : 'planned' },
+    { name: 'Trim tools', detail: 'planned — Phase 1', state: 'planned' },
+    { name: 'Compact', detail: compacted ? 'summarized older history' : 'not needed this turn', state: compacted ? 'done' : 'done' },
+    { name: 'Route', detail: L.model || '', state: 'done' },
+    { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: nTools ? 'done' : 'done' },
+    { name: 'Delegate', detail: subs.length ? `${subs.length} sub-agent${subs.length === 1 ? '' : 's'}${subs.length > 1 ? ' (parallel)' : ''}` : 'none this turn', state: subs.length ? 'done' : 'planned' },
+    { name: 'Merge', detail: rec.merge ? (rec.merge.status === 'done' ? `merged ${subs.length} results → ${fmtTok(rec.merge.tokens || 0)} tok` : 'merging…') : (subs.length ? 'returned separately (no merge)' : '—'), state: rec.merge ? (rec.merge.status === 'done' ? 'done' : 'active') : (subs.length ? 'done' : 'planned') },
+    { name: 'Persist', detail: 'saved to chat', state: 'done' }
+  ];
+  el.intStages.innerHTML = '';
+  for (const s of stages) {
+    const li = document.createElement('li');
+    li.className = 'stage stage--' + s.state;
+    li.innerHTML = `<span class="stage__dot"></span><span class="stage__name">${escapeHtml(s.name)}</span>`
+      + `<span class="stage__detail">${escapeHtml(s.detail)}</span>`
+      + (s.state === 'planned' ? '<span class="stage__tag">planned</span>' : '');
+    el.intStages.appendChild(li);
+  }
+
+  // Threads: main + one card per delegated sub-agent.
+  el.intThreadmeta.textContent = subs.length ? `main + ${subs.length} sub-agent${subs.length === 1 ? '' : 's'}` : 'main only';
+  el.intThreads.innerHTML = '';
+  const mainPct = L.window ? Math.min(100, Math.round((L.total / L.window) * 100)) : 0;
+  const main = document.createElement('div');
+  main.className = 'thread thread--main';
+  main.innerHTML = `<div class="thread__head"><span class="thread__name">MAIN THREAD</span>`
+    + `<span class="thread__status thread__status--done">${L.model || ''}</span>`
+    + `<span class="thread__meter"><i style="width:${mainPct}%"></i></span></div>`
+    + `<div class="thread__stats"><span><b>${fmtTok(L.total)}</b> / ${fmtTok(L.window)} tok · ${mainPct}%</span><span><b>${nTools}</b> tools</span><span><b>${subs.length}</b> delegated</span></div>`;
+  el.intThreads.appendChild(main);
+
+  for (const s of subs) {
+    const win = L.window || 1;
+    const subPct = Math.min(100, Math.round(((s.inputTokens || s.conclusionTokens || 0) / win) * 100));
+    const saved = Math.max(0, (s.inputTokens || 0) - (s.conclusionTokens || 0));
+    const card = document.createElement('div');
+    card.className = 'thread thread--sub';
+    card.innerHTML = `<div class="thread__head"><span class="thread__name">${escapeHtml(s.agent || 'sub-agent')}</span>`
+      + `<span class="thread__status thread__status--${s.status === 'done' ? 'done' : 'running'}">${s.status === 'done' ? 'done' : 'running…'}</span>`
+      + `<span class="thread__meter"><i style="width:${subPct}%;background:#7a5cc0"></i></span></div>`
+      + `<div class="thread__task">${escapeHtml((s.task || '').slice(0, 200) || '(no task)')}</div>`
+      + `<div class="thread__stats">`
+      + `<span>absorbed <b>${fmtTok(s.inputTokens || 0)}</b> tok</span>`
+      + `<span>returned <b>${fmtTok(s.conclusionTokens || 0)}</b> tok</span>`
+      + `<span><b>${s.tools || 0}</b> tool${s.tools === 1 ? '' : 's'}</span>`
+      + (saved ? `<span class="thread__win">kept ${fmtTok(saved)} out of main</span>` : '')
+      + `</div>`;
+    el.intThreads.appendChild(card);
+  }
+  if (rec.merge) {
+    const m = document.createElement('div');
+    m.className = 'thread thread--merge';
+    m.innerHTML = `<div class="thread__head"><span class="thread__name">⋈ MERGE</span>`
+      + `<span class="thread__status thread__status--${rec.merge.status === 'done' ? 'done' : 'running'}">${rec.merge.status === 'done' ? 'done' : 'merging…'}</span></div>`
+      + `<div class="thread__stats"><span>combined <b>${subs.length}</b> results${rec.merge.tokens ? ` → <b>${fmtTok(rec.merge.tokens)}</b> tok` : ''}</span></div>`;
+    el.intThreads.appendChild(m);
+  }
+  if (!subs.length) {
+    const note = document.createElement('div');
+    note.className = 'threadtree__empty';
+    note.innerHTML = 'No delegation this turn. The orchestrator can call <code>delegate(agent, task)</code> for one sub-agent, or <code>assign(tasks, merge)</code> to run several in parallel and merge — each runs in its own context and returns only a distilled conclusion.';
+    el.intThreads.appendChild(note);
+  }
+}
+
+// ── REVIEW lens — a second LLM critiques the turn ──────────────────
+function evalLabel() { return state.evaluatorModel || state.selected?.model || 'pick a model…'; }
+
+function renderReview(rec) {
+  el.intEvalLabel.textContent = evalLabel();
+  const rv = rec.review; // { running?, assessment?, findings?, error? } | undefined
+  el.intEvalRun.disabled = !!(rv && rv.running);
+  el.intEvalRun.textContent = (rv && rv.running) ? 'EVALUATING…' : 'EVALUATE LAST TURN';
+  el.intEvalAssessment.hidden = !(rv && rv.assessment);
+  if (rv && rv.assessment) el.intEvalAssessment.textContent = rv.assessment;
+
+  el.intEvalFindings.innerHTML = '';
+  if (!rv) { el.intEvalNote.hidden = false; return; }
+  el.intEvalNote.hidden = true;
+  const note = (cls, text) => { const d = document.createElement('div'); d.className = 'review__running'; d.textContent = text; el.intEvalFindings.appendChild(d); };
+  if (rv.running) return note('', `Reviewing with ${evalLabel()}…`);
+  if (rv.error) {
+    note('', 'Evaluation error: ' + rv.error);
+    if (rv.raw) {
+      const pre = document.createElement('pre');
+      pre.className = 'intmsg__body'; pre.style.marginTop = '8px';
+      pre.textContent = rv.raw;
+      el.intEvalFindings.appendChild(pre);
+    }
+    return;
+  }
+  if (!rv.findings.length) return note('', 'No issues found — the turn looks efficient.');
+  for (const f of rv.findings) {
+    const sev = String(f.severity || 'low').toLowerCase();
+    const target = String(f.target || 'usage').toLowerCase();
+    const card = document.createElement('div');
+    card.className = 'finding';
+    card.innerHTML = `<div class="finding__head">`
+      + `<span class="finding__sev finding__sev--${sev}">${escapeHtml(sev)}</span>`
+      + `<span class="finding__cat">${escapeHtml(f.category || '')}</span>`
+      + `<span class="finding__target finding__target--${target}">${escapeHtml(target)}</span></div>`
+      + `<div class="finding__obs">${escapeHtml(f.observation || '')}</div>`
+      + (f.suggestion ? `<div class="finding__sug">${escapeHtml(f.suggestion)}</div>` : '');
+    el.intEvalFindings.appendChild(card);
+  }
+}
+
+function buildEvalMenu() {
+  el.intEvalMenu.innerHTML = '';
+  const cur = state.evaluatorModel || state.selected?.model;
+  for (const p of state.providers.filter((x) => x.enabled)) {
+    const all = providerModels(p);
+    if (!all.length) continue;
+    const major = all.filter(isMajorModel);
+    let list = (major.length ? major : all).slice(0, 8);
+    if (cur && all.includes(cur) && !list.includes(cur)) list = [cur, ...list];
+    const g = document.createElement('div');
+    g.className = 'menu__group'; g.textContent = (p.label || p.type).toUpperCase();
+    el.intEvalMenu.appendChild(g);
+    for (const m of list) {
+      const b = document.createElement('button');
+      b.className = 'menu__item'; b.type = 'button';
+      b.innerHTML = `<span class="tick">${cur === m ? '›' : ''}</span>${escapeHtml(m)}`;
+      b.onclick = () => setEvaluator(m);
+      el.intEvalMenu.appendChild(b);
+    }
+  }
+}
+function setEvaluator(model) {
+  state.evaluatorModel = model;
+  window.api.settings.set('evaluator_model', model);
+  el.intEvalMenu.hidden = true;
+  el.intEvalLabel.textContent = evalLabel();
+}
+
+// A compact digest of the turn — metrics + structure, never the raw bulk.
+function buildDigest(rec) {
+  const L = rec.ledger;
+  const cur = (L.assembled || []).find((m) => m.contributor === 'current');
+  return {
+    chatModel: L.model,
+    window: L.window,
+    totalTokens: L.total,
+    occupancyPct: L.window ? Math.round((L.total / L.window) * 100) : 0,
+    contributors: L.contributors,
+    compaction: (L.events || []).filter((e) => e.type === 'compact'),
+    tools: {
+      offered: L.toolCount || 0,
+      results: (rec.toolTurns || []).map((t) => ({ name: String(t.name).split('__').pop(), tokens: t.resultTokens, truncated: !!t.truncated }))
+    },
+    delegations: (rec.process || []).map((p) => ({ agent: p.agent, absorbedTokens: p.inputTokens, returnedTokens: p.conclusionTokens, tools: p.tools })),
+    request: cur ? (cur.content || '').slice(0, 500) : ''
+  };
+}
+
+async function runEvaluate() {
+  const rec = state.internals[state.currentChatId];
+  if (!rec || !rec.ledger) return;
+  const model = state.evaluatorModel || state.selected?.model;
+  if (!model) { rec.review = { error: 'no evaluator model selected', findings: [] }; renderReview(rec); return; }
+  const prov = resolveProvider(model);
+  if (!prov.providerId) { rec.review = { error: `no connection for ${model}`, findings: [] }; renderReview(rec); return; }
+  rec.review = { running: true, findings: [] };
+  renderReview(rec);
+  try {
+    const res = await window.api.evaluate.run({ providerId: prov.providerId, model, digest: buildDigest(rec) });
+    rec.review = { running: false, assessment: res.assessment || '', findings: res.findings || [], error: res.error, raw: res.raw };
+  } catch (e) { rec.review = { running: false, error: e?.message || 'failed', findings: [] }; }
+  renderReview(rec);
+}
+
 function turn(text, role, model) {
   const div = document.createElement('div');
   if (role === 'meta') {
@@ -557,6 +922,7 @@ async function loadProviders() {
   state.providers = await window.api.providers.list();
   if (!state.selected) state.selected = await initialSelection();
   if (state.selected) el.modelLabel.textContent = state.selected.model;
+  try { state.evaluatorModel = await window.api.settings.get('evaluator_model'); } catch { /* optional */ }
   buildModelMenu();
   updateComposerMeta();
 }
@@ -587,6 +953,7 @@ async function selectProject(id) {
   state.chats = await window.api.chats.list(id);
   state.documents = await window.api.documents.list(id);
   await loadSkills();
+  await loadAgents();
   renderChats(); renderDocs();
   showPage('chat');
   updateModelSwitch();
@@ -601,6 +968,7 @@ async function selectChat(id) {
   const chat = state.chats.find((c) => c.id === id);
   if (chat?.model) { state.selected = resolveProvider(chat.model); el.modelLabel.textContent = chat.model; updateComposerMeta(); }
   updateModelSwitch();
+  updateCtxMeter();
   renderChats();
   showPage('chat');
   renderMessages(await window.api.messages.list(id));
@@ -697,6 +1065,10 @@ async function submit() {
       if (stick) el.messages.scrollTop = el.messages.scrollHeight;
     } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
+    else if (ev.type === 'internals') { captureInternals(ev); }
+    else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
+    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
+    else if (ev.type === 'process') { captureProcess(ev); }
     planEvent(ev);
   });
 
@@ -1295,6 +1667,66 @@ function openSkillEditor(id) {
   el.skillEditor.hidden = false;
 }
 function closeSkillEditor() { el.skillEditor.hidden = true; state.skillEditing = null; }
+
+// ── Agents screen (authored per-project sub-agents) ────────────────
+async function loadAgents() {
+  if (state.currentProjectId) state.agents = await window.api.agents.list(state.currentProjectId);
+  else state.agents = [];
+  if (state.page === 'agents') renderAgentList();
+}
+function showAgents() {
+  state.page = 'agents';
+  el.pages.querySelectorAll('.page').forEach((s) => { s.hidden = s.dataset.page !== 'agents'; });
+  el.tabbar.querySelectorAll('.tab').forEach((b) => b.classList.toggle('is-active', b.dataset.page === 'agents'));
+  el.tbSlug.textContent = '/ agents';
+  el.agentsMsg.textContent = '';
+  renderAgentList(); closeAgentEditor();
+}
+function renderAgentList() {
+  el.agentList.innerHTML = '';
+  el.agentEmpty.hidden = state.agents.length > 0;
+  for (const a of state.agents) {
+    const li = document.createElement('li'); li.className = 'conn';
+    const toolsLabel = a.tools && a.tools.length ? `${a.tools.length} tool${a.tools.length === 1 ? '' : 's'}` : 'all tools';
+    li.innerHTML = `
+      <span class="conn__status conn__status--ok"></span>
+      <div class="conn__info"><div class="conn__label">${escapeHtml(a.name)}</div><div class="conn__type">agent</div></div>
+      <div class="conn__mid"><div class="conn__url">${escapeHtml(a.description || '')}</div><div class="conn__meta">${escapeHtml(a.model || 'chat model')} · ${toolsLabel}</div></div>
+      <div class="conn__actions"></div>`;
+    const actions = li.querySelector('.conn__actions');
+    const edit = document.createElement('button'); edit.className = 'conn__btn'; edit.textContent = 'EDIT'; edit.onclick = () => openAgentEditor(a.id); actions.appendChild(edit);
+    const rm = document.createElement('button'); rm.className = 'conn__btn conn__btn--danger'; rm.textContent = 'REMOVE'; rm.onclick = async () => { await window.api.agents.remove(a.id); await loadAgents(); renderAgentList(); }; actions.appendChild(rm);
+    el.agentList.appendChild(li);
+  }
+}
+function openAgentEditor(id) {
+  state.agentEditing = id ?? null;
+  const a = id ? state.agents.find((x) => x.id === id) : null;
+  el.agentEditorTitle.textContent = id ? 'EDIT AGENT' : 'NEW AGENT';
+  el.aName.value = a ? (a.name || '') : '';
+  el.aDesc.value = a ? (a.description || '') : '';
+  el.aPrompt.value = a ? (a.system_prompt || '') : '';
+  el.aModel.value = a ? (a.model || '') : '';
+  el.aTools.value = a && a.tools ? a.tools.join(', ') : '';
+  el.agentEditor.hidden = false;
+}
+function closeAgentEditor() { el.agentEditor.hidden = true; state.agentEditing = null; }
+async function saveAgent() {
+  if (!state.currentProjectId) { el.agentsMsg.textContent = 'Select a project first.'; el.agentsMsg.className = 'test-result test-result--error'; return; }
+  const name = el.aName.value.trim();
+  if (!name) { el.agentsMsg.textContent = 'enter a name'; el.agentsMsg.className = 'test-result test-result--error'; return; }
+  const tools = el.aTools.value.split(',').map((t) => t.trim()).filter(Boolean);
+  const patch = {
+    name,
+    description: el.aDesc.value.trim() || null,
+    systemPrompt: el.aPrompt.value.trim() || null,
+    model: el.aModel.value.trim() || null,
+    tools: tools.length ? tools : null
+  };
+  if (state.agentEditing) await window.api.agents.update(state.agentEditing, patch);
+  else await window.api.agents.create({ projectId: state.currentProjectId, ...patch });
+  closeAgentEditor(); await loadAgents(); renderAgentList();
+}
 async function saveSkill() {
   const name = el.sName.value.trim();
   if (!name) { el.skillsMsg.textContent = 'enter a name'; el.skillsMsg.className = 'test-result test-result--error'; return; }
@@ -1399,6 +1831,12 @@ el.modelSwitch.onclick = () => {
   if (r.providerId) selectModel(r.providerId, pref);
 };
 el.ovPrefBtn.onclick = (e) => { e.stopPropagation(); const show = el.ovPrefMenu.hidden; if (show) buildPrefMenu(); el.ovPrefMenu.hidden = !show; };
+el.ctxMeter.onclick = () => showPage('internals');
+el.intLenstabs.querySelectorAll('.lenstab').forEach((b) => {
+  b.onclick = () => { state.internalsLens = b.dataset.lens; renderInternals(); };
+});
+el.intEvalBtn.onclick = (e) => { e.stopPropagation(); const show = el.intEvalMenu.hidden; if (show) buildEvalMenu(); el.intEvalMenu.hidden = !show; };
+el.intEvalRun.onclick = () => runEvaluate();
 document.addEventListener('click', (e) => {
   if (!el.model.contains(e.target)) toggleModelMenu(false);
   if (!el.typeDd.contains(e.target)) toggleTypeMenu(false);
@@ -1406,9 +1844,19 @@ document.addEventListener('click', (e) => {
   if (!el.mTransportDd.contains(e.target)) toggleTransportMenu(false);
   if (el.skillsSrcDd && !el.skillsSrcDd.contains(e.target)) el.skillsSrcMenu.hidden = true;
   if (el.ovPrefDd && !el.ovPrefDd.contains(e.target)) el.ovPrefMenu.hidden = true;
+  if (el.intEvalDd && !el.intEvalDd.contains(e.target)) el.intEvalMenu.hidden = true;
 });
 
-el.tabbar.querySelectorAll('.tab').forEach((b) => { b.onclick = () => (b.dataset.page === 'skills' ? showSkills() : showPage(b.dataset.page)); });
+el.tabbar.querySelectorAll('.tab').forEach((b) => {
+  b.onclick = () => {
+    if (b.dataset.page === 'skills') return showSkills();
+    if (b.dataset.page === 'agents') return showAgents();
+    showPage(b.dataset.page);
+  };
+});
+el.agentAdd.onclick = () => openAgentEditor(null);
+el.agentSave.onclick = saveAgent;
+el.agentCancel.onclick = closeAgentEditor;
 el.railTabs.querySelectorAll('.rail__tab').forEach((b) => { b.onclick = () => showRail(b.dataset.rail); });
 
 el.newProjectBtn.onclick = () => { el.newProjectForm.hidden = !el.newProjectForm.hidden; if (!el.newProjectForm.hidden) el.newProjectInput.focus(); };

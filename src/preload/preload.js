@@ -45,10 +45,23 @@ contextBridge.exposeInMainWorld('api', {
     setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model })
   },
 
+  // Authored per-project sub-agent definitions.
+  agents: {
+    list: (projectId) => ipcRenderer.invoke('agents:list', { projectId }),
+    create: (input) => ipcRenderer.invoke('agents:create', input),
+    update: (id, patch) => ipcRenderer.invoke('agents:update', { id, patch }),
+    remove: (id) => ipcRenderer.invoke('agents:remove', { id })
+  },
+
   // Small key/value store; projectId omitted/null = global.
   settings: {
     get: (key, projectId = null) => ipcRenderer.invoke('settings:get', { key, projectId }),
     set: (key, value, projectId = null) => ipcRenderer.invoke('settings:set', { key, value, projectId })
+  },
+
+  // Meta-evaluator — critique a turn digest with a chosen model.
+  evaluate: {
+    run: (input) => ipcRenderer.invoke('evaluate:run', input)
   },
 
   chats: {

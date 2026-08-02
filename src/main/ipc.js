@@ -7,7 +7,71 @@ const { connectAndList } = require('./mcp/client');
 const mcpManager = require('./mcp/manager');
 const { runAuthFlow } = require('./mcp/oauth');
 const { runChatLoop } = require('./chat-loop');
-const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT } = require('./compress');
+const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
+const { runEvaluator } = require('./evaluator');
+const { selectSkills } = require('./skill-select');
+const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT, estimateTokens } = require('./compress');
+
+// ── Context ledger (INTERNALS tab) ──────────────────────────────────────────
+// Classify each assembled message into a contributor bucket so the UI can show
+// exactly what is occupying the model's context window this turn. Read-only in
+// Phase 0 — it reports the pipeline's real output, it does not change it.
+function classifyContributor(m) {
+  if (m.role === 'system') {
+    const c = m.content || '';
+    if (c.startsWith('Summary of earlier conversation')) return 'summary';
+    if (c.startsWith('Project skills')) return 'skills';
+    return 'system';
+  }
+  return null; // history/current decided by position
+}
+
+function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelect }) {
+  const buckets = { system: 0, skills: 0, summary: 0, history: 0, current: 0, tools: 0 };
+  const nonSystem = convo.filter((m) => m.role !== 'system');
+  const lastNonSystem = nonSystem[nonSystem.length - 1];
+  for (const m of convo) {
+    const t = estimateTokens([m]);
+    const bucket = classifyContributor(m);
+    if (bucket) buckets[bucket] += t;
+    else if (m === lastNonSystem) buckets.current += t;
+    else buckets.history += t;
+  }
+  buckets.tools = tools && tools.length ? Math.ceil(JSON.stringify(tools).length / 4) : 0;
+
+  const total = Object.values(buckets).reduce((a, b) => a + b, 0);
+  const window = contextWindowFor(model);
+  const contributors = Object.entries(buckets)
+    .filter(([, v]) => v > 0)
+    .map(([key, tokens]) => ({ key, tokens }));
+
+  const events = [];
+  if (skillSelect && !skillSelect.inlined) {
+    events.push({ type: 'skill-select', available: skillSelect.available, selected: (skillSelect.selected || []).length, saved: skillSelect.savedTokens || 0, error: skillSelect.error });
+  }
+  if (compressed) {
+    const after = estimateTokens(convo);
+    events.push({ type: 'compact', tokensBefore, tokensAfter: after, saved: Math.max(0, tokensBefore - after) });
+  }
+
+  // The exact message list handed to the model (large individual messages capped
+  // for transport, with a note — the point is faithful visibility).
+  const CAP = 20000;
+  const assembled = convo.map((m) => {
+    const content = m.content || '';
+    const clipped = content.length > CAP;
+    return {
+      role: m.role,
+      contributor: classifyContributor(m) || (m === lastNonSystem ? 'current' : 'history'),
+      tokens: estimateTokens([m]),
+      content: clipped ? content.slice(0, CAP) : content,
+      clippedChars: clipped ? content.length - CAP : 0,
+      toolCalls: (m.toolCalls || []).map((t) => t.name)
+    };
+  });
+
+  return { type: 'internals', model, window, total, contributors, events, assembled, toolCount: tools ? tools.length : 0, skillSelect: skillSelect || null };
+}
 
 /**
  * Register all IPC handlers. Each channel maps to a repo call.
@@ -77,9 +141,30 @@ function registerIpc() {
   ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
   ipcMain.handle('projects:setPreferredModel', (_e, { id, model }) => repo.projects.setPreferredModel(id, model));
 
+  // Agents (authored per-project sub-agent definitions)
+  ipcMain.handle('agents:list', (_e, { projectId }) => repo.agents.listByProject(projectId));
+  ipcMain.handle('agents:create', (_e, input) => repo.agents.create(input));
+  ipcMain.handle('agents:update', (_e, { id, patch }) => repo.agents.update(id, patch));
+  ipcMain.handle('agents:remove', (_e, { id }) => repo.agents.remove(id));
+
   // Settings (small key/value store; project_id null = global)
   ipcMain.handle('settings:get', (_e, { key, projectId = null }) => repo.settings.get(key, projectId));
   ipcMain.handle('settings:set', (_e, { key, value, projectId = null }) => repo.settings.set(key, value, projectId));
+
+  // Meta-evaluator — critique a turn's context engineering with a chosen model.
+  ipcMain.handle('evaluate:run', async (_e, { providerId, model, digest }) => {
+    const provider = repo.providers.get(providerId);
+    if (!provider) return { error: 'Evaluator connection no longer exists.', findings: [] };
+    if (!provider.enabled) return { error: `${provider.label || provider.type} is disabled.`, findings: [] };
+    const key = repo.providers.reveal(providerId);
+    if (!key) return { error: `No API key stored for ${provider.label || provider.type}.`, findings: [] };
+    try {
+      const connector = getConnector(provider, key);
+      return await runEvaluator({ connector, model: model || provider.default_model, digest });
+    } catch (e) {
+      return { error: e && e.message ? e.message : 'evaluation failed', findings: [] };
+    }
+  });
 
   // Chats & messages
   ipcMain.handle('chats:list', (_e, { projectId }) => repo.chats.listByProject(projectId));
@@ -263,17 +348,45 @@ function registerIpc() {
       const connector = getConnector(provider, key);
       const chosenModel = model || provider.default_model;
       const fastModel = provider.fast_model || chosenModel;
+      const emitProgress = (ev) => { try { _e.sender.send('chat:progress', ev); } catch {} };
 
-      // Prepend enabled project skills as system guidance so they steer the model.
+      // Skills: enabled = candidate. Always show a cheap MENU; load full definitions
+      // only for the skills a selection ACTION picks for this prompt. Small libraries
+      // are inlined directly (selection isn't worth an extra call).
       let base = messages;
       const projectId = payload?.projectId;
+      let skillSelect = null;
       if (projectId) {
         try {
           const es = repo.skills.listEnabledForProject(projectId);
           if (es.length) {
-            const sys = 'Project skills are available to you. Apply the relevant ones when appropriate:\n\n'
-              + es.map((s) => `## ${s.name}\n${s.definition || s.description || ''}`).join('\n\n');
+            const fullTokens = estimateTokens(es.map((s) => ({ content: s.definition || s.description || '' })));
+            const SKILL_INLINE_CAP = 6000; // below this, just inline everything
+            let toLoad = es;
+            if (es.length > 1 && fullTokens > SKILL_INLINE_CAP) {
+              try {
+                const sel = await selectSkills({ connector, model: fastModel, skills: es, userText: text });
+                toLoad = sel.selected;               // may be empty (nothing relevant)
+                skillSelect = { available: es.length, selected: sel.names, fullTokens, error: sel.error };
+              } catch (e) {
+                console.error('[skill-select]', e && e.message);
+                toLoad = [];                          // safe: menu still shown, no bulk dump
+                skillSelect = { available: es.length, selected: [], fullTokens, error: e.message };
+              }
+            } else {
+              skillSelect = { available: es.length, selected: es.map((s) => s.name), fullTokens, inlined: true };
+            }
+            const menu = es.map((s) => `- ${s.name}: ${String(s.description || '').replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
+            const loaded = toLoad.map((s) => `## ${s.name}\n${s.definition || s.description || ''}`).join('\n\n');
+            const loadedTokens = estimateTokens(toLoad.map((s) => ({ content: s.definition || s.description || '' })));
+            if (skillSelect) { skillSelect.loadedTokens = loadedTokens; skillSelect.savedTokens = Math.max(0, fullTokens - loadedTokens); }
+            const sys = 'Project skills — you can use these. Menu (name — when to use):\n' + menu
+              + (loaded ? '\n\nInstructions loaded for this turn:\n\n' + loaded
+                        : '\n\n(No skill instructions loaded this turn. If one of the above is needed, say so.)');
             base = [{ role: 'system', content: sys }, ...messages];
+            if (skillSelect && !skillSelect.inlined) {
+              emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
+            }
           }
         } catch (e) { console.error('[skills inject]', e && e.message); }
       }
@@ -297,20 +410,95 @@ function registerIpc() {
       let toolset = { tools: [], routes: new Map() };
       try { toolset = await mcpManager.buildToolset(); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
 
+      // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
+      // tools only (no `delegate`) so the tree stays one level deep.
+      const rawCallTool = (name, args) => mcpManager.callTool(name, args, toolset.routes);
+
+      // Authored per-project agents the orchestrator can delegate to by name.
+      let authoredAgents = [];
+      try { if (projectId) authoredAgents = repo.agents.listByProject(projectId); } catch (e) { console.error('[agents]', e && e.message); }
+      const roster = authoredAgents.length
+        ? ` Available named agents for this project: ${authoredAgents.map((a) => `"${a.name}"${a.description ? ` — ${a.description}` : ''}`).join('; ')}. Use "auto" for a general sub-agent.`
+        : '';
+      const delegateTool = { ...DELEGATE_TOOL, description: DELEGATE_TOOL.description + roster };
+      const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
+      const orchestratorTools = [delegateTool, assignTool, ...toolset.tools];
+
+      // Resolve a delegate target (authored agent by name, else the general one)
+      // into the concrete {agent, model, tools} a sub-agent run needs.
+      const resolveDelegate = (wanted) => {
+        const authored = wanted && wanted !== 'auto'
+          ? authoredAgents.find((a) => a.name.toLowerCase() === String(wanted).toLowerCase())
+          : null;
+        const agent = authored
+          ? { name: authored.name, system_prompt: authored.system_prompt || DEFAULT_AGENT.system_prompt }
+          : DEFAULT_AGENT;
+        const subTools = (authored && authored.tools && authored.tools.length)
+          ? toolset.tools.filter((t) => authored.tools.includes(t.name))
+          : toolset.tools;
+        return { agent, model: (authored && authored.model) || chosenModel, tools: subTools };
+      };
+      const runOne = async (wanted, task) => {
+        const { agent, model: m, tools: subTools } = resolveDelegate(wanted);
+        return runSubagent({ connector, model: m, fastModel, agent, task: task || '', tools: subTools, callTool: rawCallTool, onEvent: emitProgress });
+      };
+
+      const callTool = async (name, args) => {
+        if (name === 'delegate') {
+          const r = await runOne(args && args.agent, args && args.task);
+          return { text: r.conclusion || '(sub-agent returned no conclusion)' };
+        }
+        if (name === 'assign') {
+          // Assign work in parallel, then merge the results.
+          const tasks = Array.isArray(args && args.tasks) ? args.tasks.filter((t) => t && t.task) : [];
+          if (!tasks.length) return { text: 'assign: no tasks provided', isError: true };
+          const results = await Promise.all(tasks.map(async (t) => {
+            const r = await runOne(t.agent, t.task);
+            return { agent: (resolveDelegate(t.agent).agent.name), task: t.task, conclusion: r.conclusion || '' };
+          }));
+          if (args && args.merge) {
+            const merged = await mergeResults({ connector, model: chosenModel, instruction: args.merge, results, onEvent: emitProgress });
+            return { text: merged || '(merge produced nothing)' };
+          }
+          return { text: results.map((r, i) => `### Result ${i + 1} — ${r.agent}\n${r.conclusion}`).join('\n\n') };
+        }
+        return rawCallTool(name, args);
+      };
+
+      // Emit the pre-call context ledger so the INTERNALS tab can show exactly
+      // what is occupying the window this turn (occupancy, compaction, prompt).
+      try {
+        const tokensBefore = estimateTokens(base);
+        _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect }));
+      } catch (e) { console.error('[internals ledger]', e && e.message); }
+
       let result;
       try {
         result = await runChatLoop({
           chat: (a) => connector.chat(a),
-          callTool: (name, args) => mcpManager.callTool(name, args, toolset.routes),
+          callTool,
           model: chosenModel,
           messages: convo,
-          tools: toolset.tools,
-          onEvent: (ev) => { try { _e.sender.send('chat:progress', ev); } catch {} }
+          tools: orchestratorTools,
+          onEvent: emitProgress
         });
       } catch (e) {
-        console.error(`[chat] ${provider.type}/${chosenModel} error (${toolset.tools.length} tools):`, e && e.message);
+        console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
         throw e;
       }
+
+      // Post-call: report each tool result's size — the raw material for Phase 1
+      // (tool-result trimming) and immediately useful to see what's bloating context.
+      try {
+        const trace = (result.toolTrace || []).map((t) => ({
+          name: t.name,
+          resultTokens: Math.ceil((t.resultChars || 0) / 4),
+          truncated: !!t.truncated,
+          isError: t.ok === false
+        }));
+        if (trace.length) _e.sender.send('chat:progress', { type: 'internals-tools', trace });
+      } catch (e) { console.error('[internals tools]', e && e.message); }
+
       return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed };
     }
 

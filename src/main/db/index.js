@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 let db = null;
 
@@ -97,6 +97,24 @@ function migrate(database) {
   if (current < 6) {
     const cols = database.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
     if (!cols.includes('preferred_model')) database.exec('ALTER TABLE projects ADD COLUMN preferred_model TEXT');
+  }
+
+  // v7: authored per-project sub-agent definitions.
+  if (current < 7) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id            INTEGER PRIMARY KEY,
+        project_id    INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+        name          TEXT NOT NULL,
+        description   TEXT,
+        system_prompt TEXT,
+        model         TEXT,
+        tools_json    TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id);
+    `);
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.
