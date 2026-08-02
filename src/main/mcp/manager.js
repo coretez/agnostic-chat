@@ -120,4 +120,4 @@ async function callTool(namespaced, args, routes) {
 
 function disposeAll() { for (const c of connections.values()) c.close(); connections.clear(); }
 
-module.exports = { buildToolset, callTool, connectAndCache, disposeAll };
+module.exports = { buildToolset, callTool, connectAndCache, disposeAll, sanitize };

@@ -53,6 +53,12 @@ const projects = {
       .prepare("UPDATE projects SET preferred_model = ?, updated_at = datetime('now') WHERE id = ?")
       .run(model || null, id);
     return projects.get(id);
+  },
+  setCheatSheet(id, text) {
+    getDb()
+      .prepare("UPDATE projects SET cheat_sheet = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(text || null, id);
+    return projects.get(id);
   }
 };
 
@@ -234,16 +240,22 @@ const documents = {
 };
 
 // ── Skills + per-project scoping ───────────────────────────────────────────
+// withTools: decorate a raw row with a parsed `.tools` array (or null = unscoped),
+// same shape as agents' `.tools` — lets the orchestrator filter its MCP toolset
+// down to only what a selected skill declares it needs (dynamic tool binding).
+function withTools(row) {
+  return row ? { ...row, tools: row.tools_json ? JSON.parse(row.tools_json) : null } : null;
+}
 const skills = {
-  create({ name, description = null, definition = null }) {
+  create({ name, description = null, definition = null, tools = null }) {
     const db = getDb();
     const info = db
-      .prepare('INSERT INTO skills (name, description, definition) VALUES (?, ?, ?)')
-      .run(name, description, definition);
-    return db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid);
+      .prepare('INSERT INTO skills (name, description, definition, tools_json) VALUES (?, ?, ?, ?)')
+      .run(name, description, definition, tools ? JSON.stringify(tools) : null);
+    return withTools(db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid));
   },
   list() {
-    return getDb().prepare('SELECT * FROM skills ORDER BY name ASC').all();
+    return getDb().prepare('SELECT * FROM skills ORDER BY name ASC').all().map(withTools);
   },
   /**
    * Skills ENABLED for a project — what should actually be in scope.
@@ -258,7 +270,8 @@ const skills = {
          WHERE ps.enabled IS NULL OR ps.enabled = 1
          ORDER BY s.name ASC`
       )
-      .all(projectId);
+      .all(projectId)
+      .map(withTools);
   },
   setForProject({ projectId, skillId, enabled = true }) {
     getDb()
@@ -267,18 +280,19 @@ const skills = {
       )
       .run(projectId, skillId, enabled ? 1 : 0);
   },
-  get(id) { return getDb().prepare('SELECT * FROM skills WHERE id = ?').get(id); },
+  get(id) { return withTools(getDb().prepare('SELECT * FROM skills WHERE id = ?').get(id)); },
   isEnabled(projectId, skillId) {
     // Opt-out: enabled unless an explicit row disables it.
     const row = getDb().prepare('SELECT enabled FROM project_skills WHERE project_id = ? AND skill_id = ?').get(projectId, skillId);
     return row ? !!row.enabled : true;
   },
-  update(id, { name, description, definition }) {
+  update(id, { name, description, definition, tools }) {
     const db = getDb();
     const sets = []; const vals = [];
     if (name !== undefined) { sets.push('name = ?'); vals.push(name); }
     if (description !== undefined) { sets.push('description = ?'); vals.push(description); }
     if (definition !== undefined) { sets.push('definition = ?'); vals.push(definition); }
+    if (tools !== undefined) { sets.push('tools_json = ?'); vals.push(tools ? JSON.stringify(tools) : null); }
     if (!sets.length) return skills.get(id);
     sets.push("updated_at = datetime('now')");
     vals.push(id);
@@ -287,10 +301,14 @@ const skills = {
   },
   remove(id) { getDb().prepare('DELETE FROM skills WHERE id = ?').run(id); },
   /** Insert or update by name (used when importing from an MCP server). */
-  upsertByName({ name, description = null, definition = null }) {
+  upsertByName({ name, description = null, definition = null, tools }) {
     const existing = getDb().prepare('SELECT id FROM skills WHERE name = ?').get(name);
-    if (existing) return skills.update(existing.id, { description, definition });
-    return skills.create({ name, description, definition });
+    // tools left `undefined` (import didn't derive a scope this time) must NOT
+    // clear an existing skill's tools_json — update()'s `!== undefined` guard
+    // preserves whatever's already there (a prior import's scope, or a manual
+    // one authored in the UI). Only an explicit array/null overwrites it.
+    if (existing) return skills.update(existing.id, { description, definition, tools });
+    return skills.create({ name, description, definition, tools: tools ?? null });
   }
 };
 

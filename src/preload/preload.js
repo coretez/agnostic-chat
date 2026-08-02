@@ -42,7 +42,8 @@ contextBridge.exposeInMainWorld('api', {
     archive: (id) => ipcRenderer.invoke('projects:archive', { id }),
     pickWorkingDir: (id) => ipcRenderer.invoke('projects:pickWorkingDir', { id }),
     revealPath: (p) => ipcRenderer.invoke('app:revealPath', p),
-    setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model })
+    setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model }),
+    setCheatSheet: (id, text) => ipcRenderer.invoke('projects:setCheatSheet', { id, text })
   },
 
   // Authored per-project sub-agent definitions.

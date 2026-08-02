@@ -118,8 +118,13 @@ const DELEGATE_TOOL = {
     + 'isolated context window and returns only a distilled conclusion. Use this '
     + 'for heavy work — reading large tool outputs or files, multi-step research, '
     + 'anything that would bloat this conversation — to keep the main thread\'s '
-    + 'context clean. Give complete, standalone instructions; the sub-agent cannot '
-    + 'see this conversation.',
+    + 'context clean. This includes any evidence-gathering, assessment, or posture '
+    + 'workflow that needs several sequential tool calls before you can answer '
+    + '(e.g. compliance/security assessments, multi-source lookups): delegate the '
+    + 'whole workflow up front rather than making those calls yourself and pulling '
+    + 'each raw result into this thread — the sub-agent absorbs the raw evidence '
+    + 'and hands back only the synthesized answer. Give complete, standalone '
+    + 'instructions; the sub-agent cannot see this conversation.',
   inputSchema: {
     type: 'object',
     properties: {

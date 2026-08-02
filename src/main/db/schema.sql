@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS projects (
   description TEXT,
   working_dir TEXT,                          -- folder on disk the project is anchored to
   preferred_model TEXT,                       -- model new chats default to for this project
+  cheat_sheet TEXT,                          -- objectives/rules/mode-of-operation brief the planner reads for orientation
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
   archived_at TEXT
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS skills (
   name        TEXT NOT NULL,
   description TEXT,
   definition  TEXT,                       -- markdown / JSON of the skill
+  tools_json  TEXT,                       -- optional JSON array of MCP tool names this skill needs; null = unscoped (no tool restriction)
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -16,6 +16,7 @@ const el = {
   newProjectBtn: $('new-project-btn'), newProjectForm: $('new-project-form'), newProjectInput: $('new-project-input'),
   ovName: $('ov-name'), ovWdPath: $('ov-wd-path'), ovWdChange: $('ov-wd-change'), ovWdReveal: $('ov-wd-reveal'),
   ovModel: $('ov-model'), ovChats: $('ov-chats'), ovDocs: $('ov-docs'), ovSkills: $('ov-skills'), ovMcp: $('ov-mcp'),
+  ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
   messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'),
@@ -58,7 +59,7 @@ const el = {
   skillsImport: $('skills-import'), skillAdd: $('skill-add'),
   skillsSrcDd: $('skills-src-dd'), skillsSrcBtn: $('skills-src-btn'), skillsSrcLabel: $('skills-src-label'), skillsSrcMenu: $('skills-src-menu'),
   skillEditor: $('skill-editor'), skillEditorTitle: $('skill-editor-title'),
-  sName: $('s-name'), sDesc: $('s-desc'), sDef: $('s-def'),
+  sName: $('s-name'), sDesc: $('s-desc'), sDef: $('s-def'), sTools: $('s-tools'),
   skillCancel: $('skill-cancel'), skillSave: $('skill-save'),
   agentAdd: $('agent-add'), agentsMsg: $('agents-msg'), agentList: $('agent-list'), agentEmpty: $('agent-empty'),
   agentEditor: $('agent-editor'), agentEditorTitle: $('agent-editor-title'),
@@ -397,7 +398,26 @@ function renderOverview() {
   el.ovDocs.textContent = state.documents.length;
   el.ovSkills.textContent = state.skills.length;
   el.ovMcp.textContent = state.mcpServers.filter((s) => s.enabled).length;
+  // Only reset the cheat-sheet textarea on an actual project switch — this fn
+  // also re-runs on unrelated state changes (e.g. model switch) while the
+  // overview page is open, and that must not clobber an in-progress edit.
+  if (el.ovCheat.dataset.projectId !== String(p.id)) {
+    el.ovCheat.value = p.cheat_sheet || '';
+    el.ovCheat.dataset.projectId = String(p.id);
+    el.ovCheatMsg.textContent = '';
+  }
   updateModelSwitch();
+}
+async function saveCheatSheet() {
+  const p = state.projects.find((x) => x.id === state.currentProjectId);
+  if (!p) return;
+  const text = el.ovCheat.value.trim() || null;
+  const updated = await window.api.projects.setCheatSheet(p.id, text);
+  const i = state.projects.findIndex((x) => x.id === p.id);
+  if (i >= 0) state.projects[i] = updated;
+  el.ovCheatMsg.textContent = 'saved';
+  el.ovCheatMsg.className = 'test-result test-result--ok';
+  setTimeout(() => { if (el.ovCheatMsg.textContent === 'saved') el.ovCheatMsg.textContent = ''; }, 1500);
 }
 
 function buildPrefMenu() {
@@ -688,6 +708,7 @@ function renderInternals() {
   addEvt('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(L.total)} tok`, false, true);
   for (const e of (L.events || [])) {
     if (e.type === 'skill-select') addEvt('◇', `Selected skills · ${e.available} available → ${e.selected} loaded`, e.saved ? `−${fmtTok(e.saved)}` : '', false);
+    else if (e.type === 'tool-scope') addEvt('✂', `Tool scope · ${e.bySkills.join(', ')} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, `−${e.totalAvailable - e.scoped} tools`, false);
     else if (e.type === 'compact') addEvt('⚡', `Compacted older history → summary (${fmtTok(e.tokensBefore)} → ${fmtTok(e.tokensAfter)})`, `−${fmtTok(e.saved)}`);
   }
   if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);
@@ -1690,11 +1711,12 @@ function renderSkillList() {
   el.skillEmpty.hidden = state.skillsAll.length > 0;
   for (const s of state.skillsAll) {
     const on = state.skillsEnabledIds.has(s.id);
+    const toolsLabel = s.tools && s.tools.length ? `${s.tools.length} tool${s.tools.length === 1 ? '' : 's'} scoped` : 'unscoped (all tools)';
     const li = document.createElement('li'); li.className = 'conn';
     li.innerHTML = `
       <span class="conn__status${on ? ' conn__status--ok' : ''}"></span>
       <div class="conn__info"><div class="conn__label">${escapeHtml(s.name)}</div><div class="conn__type">skill</div></div>
-      <div class="conn__mid"><div class="conn__url">${escapeHtml(s.description || '')}</div></div>
+      <div class="conn__mid"><div class="conn__url">${escapeHtml(s.description || '')}</div><div class="conn__meta">${escapeHtml(toolsLabel)}</div></div>
       <div class="conn__actions"></div>`;
     const actions = li.querySelector('.conn__actions');
     const toggle = document.createElement('button'); toggle.className = 'toggle' + (on ? ' is-on' : ''); toggle.innerHTML = '<div class="toggle__knob"></div>';
@@ -1712,8 +1734,8 @@ function renderSkillList() {
 }
 function openSkillEditor(id) {
   state.skillEditing = id ?? null;
-  if (id) { const s = state.skillsAll.find((x) => x.id === id); el.skillEditorTitle.textContent = 'EDIT SKILL'; el.sName.value = s.name || ''; el.sDesc.value = s.description || ''; el.sDef.value = s.definition || ''; }
-  else { el.skillEditorTitle.textContent = 'NEW SKILL'; el.sName.value = ''; el.sDesc.value = ''; el.sDef.value = ''; }
+  if (id) { const s = state.skillsAll.find((x) => x.id === id); el.skillEditorTitle.textContent = 'EDIT SKILL'; el.sName.value = s.name || ''; el.sDesc.value = s.description || ''; el.sDef.value = s.definition || ''; el.sTools.value = s.tools ? s.tools.join(', ') : ''; }
+  else { el.skillEditorTitle.textContent = 'NEW SKILL'; el.sName.value = ''; el.sDesc.value = ''; el.sDef.value = ''; el.sTools.value = ''; }
   el.skillEditor.hidden = false;
 }
 function closeSkillEditor() { el.skillEditor.hidden = true; state.skillEditing = null; }
@@ -1780,7 +1802,8 @@ async function saveAgent() {
 async function saveSkill() {
   const name = el.sName.value.trim();
   if (!name) { el.skillsMsg.textContent = 'enter a name'; el.skillsMsg.className = 'test-result test-result--error'; return; }
-  const patch = { name, description: el.sDesc.value.trim() || null, definition: el.sDef.value.trim() || null };
+  const tools = el.sTools.value.split(',').map((t) => t.trim()).filter(Boolean);
+  const patch = { name, description: el.sDesc.value.trim() || null, definition: el.sDef.value.trim() || null, tools: tools.length ? tools : null };
   if (state.skillEditing) await window.api.skills.update(state.skillEditing, patch);
   else await window.api.skills.create(patch);
   closeSkillEditor(); await loadSkills(); renderSkillList();
@@ -1908,6 +1931,7 @@ el.agentAdd.onclick = () => openAgentEditor(null);
 el.agentSave.onclick = saveAgent;
 el.agentCancel.onclick = closeAgentEditor;
 el.railTabs.querySelectorAll('.rail__tab').forEach((b) => { b.onclick = () => showRail(b.dataset.rail); });
+el.ovCheatSave.onclick = saveCheatSheet;
 
 el.newProjectBtn.onclick = () => { el.newProjectForm.hidden = !el.newProjectForm.hidden; if (!el.newProjectForm.hidden) el.newProjectInput.focus(); };
 el.heroNewProject.onclick = openNewProjectForm;

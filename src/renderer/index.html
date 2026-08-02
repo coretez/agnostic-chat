@@ -192,6 +192,13 @@
               </div>
 
               <div class="ovcard">
+                <div class="ovcard__title">PROJECT CHEAT SHEET</div>
+                <div class="ovcard__note">A short brief on this project's objectives, rules, and mode of operation. Kept separate from skills (candidate capabilities) and chat history (past turns) — this is orientation, read by the planner before it decides what's relevant to a task.</div>
+                <textarea class="ovcheat" id="ov-cheat" rows="6" placeholder="e.g. Objective: read-only compliance reporting for one tenant. Rules: never write to Fluency; always cite the report id. Mode of operation: most requests are single-report lookups; multi-tenant comparisons are rare."></textarea>
+                <div class="ovcheat__actions"><div class="spacer"></div><span class="test-result" id="ov-cheat-msg"></span><button class="btn btn--brand btn--sm" id="ov-cheat-save" type="button">SAVE</button></div>
+              </div>
+
+              <div class="ovcard">
                 <div class="ovcard__title">PROPERTIES</div>
                 <div class="ovprops">
                   <div class="ovprop">
@@ -318,6 +325,7 @@
                 <div class="field"><label>Name</label><input id="s-name" placeholder="e.g. Case Investigation" /></div>
                 <div class="field"><label>Description</label><input id="s-desc" placeholder="one line — when to use it" /></div>
                 <div class="field"><label>Definition</label><textarea id="s-def" rows="8" placeholder="skill instructions (markdown)"></textarea></div>
+                <div class="field"><label>Tool scope <span class="opt">optional — comma-separated MCP tool names this skill needs; blank = no restriction (tools stay bound to the full connected toolset when this skill is loaded)</span></label><input id="s-tools" placeholder="e.g. fluency__run_report, fluency__list_cases" /></div>
                 <div class="editor__actions"><div class="spacer"></div><button class="btn btn--ghost btn--sm" id="skill-cancel" type="button">CANCEL</button><button class="btn btn--brand btn--sm" id="skill-save" type="button">SAVE</button></div>
               </div>
             </div>

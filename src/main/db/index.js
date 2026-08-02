@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 11;
 
 let db = null;
 
@@ -138,10 +138,25 @@ function migrate(database) {
     `);
   }
 
-  // v9: task-level timing/tokens + turn duration.
+  // v9: skills.tools_json — optional MCP tool scoping per skill (dynamic tool
+  // binding: only offer the model tools a selected skill actually declares).
   if (current < 9) {
-    const cols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
-    if (!cols.includes('duration_ms')) database.exec('ALTER TABLE turn_metrics ADD COLUMN duration_ms INTEGER');
+    const cols = database.prepare('PRAGMA table_info(skills)').all().map((c) => c.name);
+    if (!cols.includes('tools_json')) database.exec('ALTER TABLE skills ADD COLUMN tools_json TEXT');
+  }
+
+  // v10: projects.cheat_sheet — a short, persistent objectives/rules/mode-of-
+  // operation brief the (future) planner stage reads for project orientation,
+  // separate from skills (candidate capabilities) and history (past turns).
+  if (current < 10) {
+    const cols = database.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+    if (!cols.includes('cheat_sheet')) database.exec('ALTER TABLE projects ADD COLUMN cheat_sheet TEXT');
+  }
+
+  // v11: task-level timing/tokens + turn duration.
+  if (current < 11) {
+    const tcols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
+    if (!tcols.includes('duration_ms')) database.exec('ALTER TABLE turn_metrics ADD COLUMN duration_ms INTEGER');
     database.exec(`
       CREATE TABLE IF NOT EXISTS task_metrics (
         id INTEGER PRIMARY KEY,
@@ -153,6 +168,10 @@ function migrate(database) {
       CREATE INDEX IF NOT EXISTS idx_task_metrics_chat ON task_metrics(chat_id);
       CREATE INDEX IF NOT EXISTS idx_task_metrics_kind ON task_metrics(kind, label);
     `);
+    // Heal DBs that were bumped to v9 under this branch's earlier (task_metrics)
+    // definition of v9, so origin's real v9 (skills.tools_json) never ran here.
+    const scols = database.prepare('PRAGMA table_info(skills)').all().map((c) => c.name);
+    if (!scols.includes('tools_json')) database.exec('ALTER TABLE skills ADD COLUMN tools_json TEXT');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.
