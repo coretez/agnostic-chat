@@ -1,0 +1,15 @@
+{
+  "name": "agnostic-chat",
+  "version": "0.1.0",
+  "description": "An LLM-agnostic, coding-focused desktop chat app with browser access and prompt protection.",
+  "main": "src/main/main.js",
+  "author": "Chris",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0"
+  }
+}

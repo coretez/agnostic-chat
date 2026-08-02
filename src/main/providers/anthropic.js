@@ -1,0 +1,147 @@
+'use strict';
+
+// Connector for the Anthropic (Claude) Messages API. Differs from OpenAI:
+// auth via x-api-key + anthropic-version, system prompt is top-level (not a
+// message), and max_tokens is required. Main-process only.
+
+const ANTHROPIC_VERSION = '2023-06-01';
+
+function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
+
+async function req(url, { key, method = 'GET', body, timeoutMs = 30000 }) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': ANTHROPIC_VERSION,
+        'Content-Type': 'application/json'
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal
+    });
+    const text = await res.text();
+    let json;
+    try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+    if (!res.ok) {
+      const detail = json?.error?.message || json?.message || (text ? text.slice(0, 400) : '');
+      throw new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`);
+    }
+    return json;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Neutral history → Anthropic turns. Tool results must ride in a user turn as
+// tool_result blocks, so consecutive tool outputs are folded into one user msg.
+function toAnthropicTurns(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === 'system') continue;
+    if (m.role === 'user') {
+      out.push({ role: 'user', content: m.content ?? '' });
+    } else if (m.role === 'assistant') {
+      if (m.assistantRaw) { out.push({ role: 'assistant', content: m.assistantRaw }); continue; }
+      const blocks = [];
+      if (m.content) blocks.push({ type: 'text', text: m.content });
+      for (const tc of (m.toolCalls || [])) blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.args || {} });
+      out.push({ role: 'assistant', content: blocks.length ? blocks : (m.content ?? '') });
+    } else if (m.role === 'tool') {
+      const block = { type: 'tool_result', tool_use_id: m.toolCallId, content: String(m.content ?? '') };
+      const last = out[out.length - 1];
+      if (last && last.role === 'user' && Array.isArray(last.content)) last.content.push(block);
+      else out.push({ role: 'user', content: [block] });
+    }
+  }
+  return out;
+}
+
+// Streaming (SSE) for the Messages API. Idle-timeout based.
+async function streamAnthropic(base, key, body, onDelta) {
+  const ctrl = new AbortController();
+  const IDLE = 90000;
+  let idle = setTimeout(() => ctrl.abort(), IDLE);
+  const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
+  let res;
+  try {
+    res = await fetch(`${base}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: ctrl.signal
+    });
+  } catch (e) { clearTimeout(idle); throw new Error(e.name === 'AbortError' ? 'stream stalled (no data)' : `stream connect failed: ${e.message}`); }
+  if (!res.ok) { clearTimeout(idle); const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 400)}`); }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let text = '';
+  const blocks = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bump();
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.type === 'content_block_start') { const b = j.content_block || {}; blocks[j.index] = { type: b.type, id: b.id, name: b.name, text: '', jsonbuf: '' }; }
+        else if (j.type === 'content_block_delta') {
+          const d = j.delta || {}; const b = blocks[j.index] || (blocks[j.index] = { type: 'text', text: '', jsonbuf: '' });
+          if (d.type === 'text_delta') { b.text += d.text; text += d.text; onDelta({ text: d.text }); }
+          else if (d.type === 'input_json_delta') { b.jsonbuf += d.partial_json; }
+        }
+      }
+    }
+  } finally { clearTimeout(idle); }
+
+  const content = []; const toolCalls = [];
+  for (const b of blocks) {
+    if (!b) continue;
+    if (b.type === 'text') content.push({ type: 'text', text: b.text || '' });
+    else if (b.type === 'tool_use') { let input = {}; try { input = JSON.parse(b.jsonbuf || '{}'); } catch {} content.push({ type: 'tool_use', id: b.id, name: b.name, input }); toolCalls.push({ id: b.id, name: b.name, args: input }); }
+  }
+  return { text, toolCalls, assistantRaw: content };
+}
+
+/**
+ * @param {{baseUrl:string, key:string}} conn
+ */
+function anthropic({ baseUrl, key }) {
+  const base = trimSlash(baseUrl);
+  return {
+    async listModels() {
+      const json = await req(`${base}/v1/models`, { key, timeoutMs: 15000 });
+      const data = Array.isArray(json?.data) ? json.data : [];
+      return data.map((m) => m.id).filter(Boolean).sort();
+    },
+    async chat({ model, messages, tools, maxTokens, onDelta }) {
+      const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || undefined;
+      const body = { model, max_tokens: maxTokens || 4096, system, messages: toAnthropicTurns(messages) };
+      if (tools && tools.length) {
+        body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema || { type: 'object' } }));
+      }
+      if (onDelta) return streamAnthropic(base, key, body, onDelta);
+      const json = await req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs: 300000 });
+      const content = Array.isArray(json?.content) ? json.content : [];
+      const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+      const toolCalls = content.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: b.input || {} }));
+      return { text, toolCalls, assistantRaw: content, raw: json };
+    }
+  };
+}
+
+module.exports = { anthropic };

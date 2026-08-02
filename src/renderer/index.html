@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self' blob:; connect-src 'none';"
+    />
+    <title>Agnostic Chat</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- ── Title bar ─────────────────────────────────────────────── -->
+    <header class="titlebar">
+      <span class="brand-sq"></span>
+      <span class="titlebar__name" id="titlebar-name">AGNOSTIC CHAT</span>
+      <span class="titlebar__slug" id="titlebar-slug"></span>
+      <div class="spacer"></div>
+
+      <div class="model" id="model">
+        <button class="model__btn" id="model-btn" type="button">
+          <span class="dot dot--green"></span><span id="model-label">no model</span><span class="caret">▾</span>
+        </button>
+        <div class="menu" id="model-menu" hidden></div>
+      </div>
+      <button class="switch-chip" id="model-switch" type="button" hidden title="Switch to this project's preferred model"></button>
+
+      <button class="chip-btn" id="models-btn" type="button">MODELS</button>
+      <button class="chip-btn" id="mcp-btn" type="button">MCP</button>
+      <button class="chip-btn" id="theme-btn" type="button">LIGHT</button>
+      <button class="kbd kbd--btn" id="palette-btn" type="button">⌘K</button>
+    </header>
+
+    <!-- ── Body: sidebar + main ──────────────────────────────────── -->
+    <div class="body">
+      <aside class="sidebar">
+        <div class="pane__head">
+          <span>PROJECTS</span>
+          <button class="icon-btn" id="new-project-btn" type="button" title="New project (⌘N)">+</button>
+        </div>
+        <form class="inline-form" id="new-project-form" hidden>
+          <input id="new-project-input" placeholder="project-name" />
+        </form>
+        <ul class="list" id="project-list"></ul>
+
+        <div class="pane__head pane__head--mt">
+          <span>CHATS</span>
+          <button class="icon-btn" id="new-chat-btn" type="button" title="New chat" disabled>+</button>
+        </div>
+        <ul class="list list--grow" id="chat-list"></ul>
+      </aside>
+
+      <main class="main">
+        <nav class="tabbar" id="tabbar" hidden>
+          <button class="tab is-active" data-page="chat" type="button">CHAT</button>
+          <button class="tab" data-page="overview" type="button">OVERVIEW</button>
+          <button class="tab" data-page="documents" type="button">DOCUMENTS</button>
+          <button class="tab" data-page="skills" type="button">SKILLS</button>
+          <div class="spacer"></div>
+          <div class="tabbar__note" id="toolbar-note"></div>
+        </nav>
+
+        <div class="pages" id="pages">
+          <!-- First-run -->
+          <section class="page page--center" data-page="firstrun" hidden>
+            <div class="hero">
+              <div class="hero__logo"></div>
+              <div class="hero__title">CREATE YOUR FIRST PROJECT</div>
+              <div class="hero__sub">A project holds its chats, documents, skills and keys together — so nothing gets stranded inside a single conversation. Everything stays on this Mac.</div>
+              <button class="btn btn--brand" id="hero-new-project" type="button">NEW PROJECT</button>
+              <div class="hero__hint">or press ⌘N</div>
+            </div>
+          </section>
+
+          <!-- Chat -->
+          <section class="page" data-page="chat">
+            <div class="chat">
+              <div class="chat__main">
+                <div class="turns" id="messages" aria-live="polite"></div>
+                <div class="composer">
+                  <div class="composer__box">
+                    <div class="composer__attach" id="composer-attach" hidden></div>
+                    <textarea id="input" class="composer__input" rows="1" placeholder="Ask anything… (⌘↩ to send)"></textarea>
+                    <div class="composer__row">
+                      <button class="icon-btn icon-btn--bordered" id="attach-btn" type="button" title="Attach files">📎</button>
+                      <input id="attach-input" type="file" multiple hidden />
+                      <span class="composer__meta" id="composer-scope"></span>
+                      <div class="spacer"></div>
+                      <button class="btn btn--brand btn--sm" id="send" type="button" disabled>SEND</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <aside class="rail">
+                <div class="rail__tabs" id="rail-tabs">
+                  <button class="rail__tab is-active" data-rail="docs" type="button">DOCS</button>
+                  <button class="rail__tab" data-rail="plan" type="button">PLAN</button>
+                  <button class="rail__tab" data-rail="scope" type="button">SCOPE</button>
+                </div>
+                <div class="rail__body">
+                  <div class="rail__panel" data-rail="docs">
+                    <div class="rail__head"><span>PROJECT DOCUMENTS</span><button class="icon-btn" id="rail-add-doc" type="button">+</button></div>
+                    <ul class="raillist" id="rail-doc-list"></ul>
+                    <div class="rail__note">Documents belong to the project, not the chat. Every conversation here retrieves from them.</div>
+                  </div>
+                  <div class="rail__panel" data-rail="plan" hidden>
+                    <div class="rail__head"><span>ACTIVITY</span><span class="spacer"></span><span id="plan-elapsed" class="plan-elapsed"></span></div>
+                    <ul class="planlist" id="plan-list"></ul>
+                    <div class="rail__note" id="plan-note">The agent's live steps appear here while it works.</div>
+                  </div>
+                  <div class="rail__panel" data-rail="scope" hidden>
+                    <div class="rail__head"><span id="scope-skills-head">SKILLS · 0 ENABLED</span><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
+                    <div class="rail__note" id="scope-skills-note">No skills enabled for this project yet.</div>
+                    <div class="rail__head"><span id="scope-mcp-head">MCP SERVERS · 0</span><button class="icon-btn" id="scope-mcp-add" type="button" title="Manage MCP servers">+</button></div>
+                    <ul class="raillist" id="scope-mcp-list"></ul>
+                    <div class="rail__note" id="scope-mcp-note">No MCP servers configured.</div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <!-- MCP servers (app-global) -->
+          <section class="page page--scroll" data-page="mcp" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">MCP SERVERS</div>
+                  <div class="mscreen__sub">Connect Model Context Protocol tool servers (stdio or http) to give the assistant tools. Any env vars or tokens are encrypted on this Mac.</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn--ghost btn--sm" id="mcp-done" type="button">DONE</button>
+                <button class="btn btn--brand btn--sm" id="mcp-add" type="button">+ ADD SERVER</button>
+              </div>
+
+              <ul class="connlist" id="mcp-list"></ul>
+              <div class="mscreen__empty" id="mcp-empty" hidden>No MCP servers yet. Add one to give the assistant tools.</div>
+
+              <div class="editor" id="mcp-editor" hidden>
+                <div class="editor__title" id="mcp-editor-title">ADD SERVER</div>
+                <div class="field"><label>Name</label><input id="m-name" placeholder="e.g. filesystem" /></div>
+                <div class="field">
+                  <label>Transport</label>
+                  <div class="dropdown" id="m-transport-dd">
+                    <button class="dropdown__btn" id="m-transport-btn" type="button"><span id="m-transport-label">stdio (local process)</span><span class="caret">▾</span></button>
+                    <div class="dropdown__menu" id="m-transport-menu" hidden></div>
+                  </div>
+                </div>
+                <div id="m-stdio-fields">
+                  <div class="field"><label>Command</label><input id="m-command" placeholder="npx" /></div>
+                  <div class="field"><label>Arguments</label><input id="m-args" placeholder="-y @modelcontextprotocol/server-filesystem /path" /><div class="field__hint">Space-separated. Quoting is not parsed.</div></div>
+                  <div class="field"><label>Environment <span class="opt">optional</span></label><textarea id="m-env" rows="3" placeholder="KEY=VALUE per line"></textarea></div>
+                </div>
+                <div id="m-http-fields" hidden>
+                  <div class="field"><label>URL</label><input id="m-url" placeholder="https://host/mcp" /></div>
+                  <div class="field"><label>Bearer token <span class="opt">optional</span></label><input id="m-token" type="password" placeholder="token" /></div>
+                </div>
+                <div class="editor__actions">
+                  <button class="btn btn--ghost btn--sm" id="mcp-connect" type="button">CONNECT</button>
+                  <span class="test-result" id="mcp-result"></span>
+                  <div class="spacer"></div>
+                  <button class="btn btn--ghost btn--sm" id="mcp-cancel" type="button">CANCEL</button>
+                  <button class="btn btn--brand btn--sm" id="mcp-save" type="button">SAVE</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Overview — the project home -->
+          <section class="page page--scroll" data-page="overview" hidden>
+            <div class="overview">
+              <div class="overview__head">
+                <div class="overview__eyebrow">PROJECT</div>
+                <div class="overview__name" id="ov-name">PROJECT</div>
+              </div>
+
+              <div class="ovcard ovcard--wd">
+                <div class="ovcard__title">WORKING DIRECTORY</div>
+                <div class="ovwd">
+                  <span class="ovwd__glyph">📁</span>
+                  <span class="ovwd__path" id="ov-wd-path" title="">Not set</span>
+                  <div class="spacer"></div>
+                  <button class="chip-btn" id="ov-wd-reveal" type="button" title="Reveal in Finder" hidden>⤴ FINDER</button>
+                  <button class="btn btn--ghost btn--sm" id="ov-wd-change" type="button">SET DIRECTORY</button>
+                </div>
+                <div class="ovcard__note">Where this project's files live on disk. The assistant reads and writes here — it's the one folder every chat in this project shares.</div>
+              </div>
+
+              <div class="ovcard">
+                <div class="ovcard__title">PROPERTIES</div>
+                <div class="ovprops">
+                  <div class="ovprop">
+                    <span class="ovprop__k">Preferred model <span class="ovprop__hint">new chats start here</span></span>
+                    <div class="dropdown ovprop__dd" id="ov-pref-dd">
+                      <button class="dropdown__btn" id="ov-pref-btn" type="button"><span id="ov-pref-label">None</span><span class="caret">▾</span></button>
+                      <div class="dropdown__menu" id="ov-pref-menu" hidden></div>
+                    </div>
+                  </div>
+                  <div class="ovprop"><span class="ovprop__k">Current model</span><span class="ovprop__v" id="ov-model">—</span></div>
+                  <div class="ovprop"><span class="ovprop__k">Chats</span><span class="ovprop__v" id="ov-chats">0</span></div>
+                  <div class="ovprop"><span class="ovprop__k">Documents</span><span class="ovprop__v" id="ov-docs">0</span></div>
+                  <div class="ovprop"><span class="ovprop__k">Skills enabled</span><span class="ovprop__v" id="ov-skills">0</span></div>
+                  <div class="ovprop"><span class="ovprop__k">MCP servers</span><span class="ovprop__v" id="ov-mcp">0</span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="page page--center" data-page="documents" hidden>
+            <div class="placeholder"><div class="placeholder__title">DOCUMENTS</div><div class="placeholder__sub">The library + reader + details view is a later phase. For now, documents show in the Chat rail.</div></div>
+          </section>
+
+          <!-- Skills (per-project scoping + import from MCP) -->
+          <section class="page page--scroll" data-page="skills" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">SKILLS</div>
+                  <div class="mscreen__sub">Enabled skills are injected as guidance for the current project's chats. Import a library from a connected MCP server, or author your own.</div>
+                </div>
+                <div class="spacer"></div>
+                <div class="dropdown skills-src" id="skills-src-dd">
+                  <button class="dropdown__btn" id="skills-src-btn" type="button"><span id="skills-src-label">import source…</span><span class="caret">▾</span></button>
+                  <div class="dropdown__menu" id="skills-src-menu" hidden></div>
+                </div>
+                <button class="btn btn--ghost btn--sm" id="skills-import" type="button">IMPORT</button>
+                <button class="btn btn--brand btn--sm" id="skill-add" type="button">+ NEW SKILL</button>
+              </div>
+              <div class="test-result" id="skills-msg"></div>
+              <ul class="connlist" id="skill-list"></ul>
+              <div class="mscreen__empty" id="skill-empty" hidden>No skills yet — import from MCP, or create one.</div>
+              <div class="editor" id="skill-editor" hidden>
+                <div class="editor__title" id="skill-editor-title">NEW SKILL</div>
+                <div class="field"><label>Name</label><input id="s-name" placeholder="e.g. Case Investigation" /></div>
+                <div class="field"><label>Description</label><input id="s-desc" placeholder="one line — when to use it" /></div>
+                <div class="field"><label>Definition</label><textarea id="s-def" rows="8" placeholder="skill instructions (markdown)"></textarea></div>
+                <div class="editor__actions"><div class="spacer"></div><button class="btn btn--ghost btn--sm" id="skill-cancel" type="button">CANCEL</button><button class="btn btn--brand btn--sm" id="skill-save" type="button">SAVE</button></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Models / connections (app-global) -->
+          <section class="page page--scroll" data-page="models" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">MODEL CONNECTIONS</div>
+                  <div class="mscreen__sub">Connect OpenAI, Claude, Qwen, Kimi and Gemini. Keys are encrypted on this Mac (Keychain) and never leave it except to call the provider.</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn--ghost btn--sm" id="models-help" type="button">ⓘ TOKENS</button>
+                <button class="btn btn--ghost btn--sm" id="models-done" type="button">DONE</button>
+                <button class="btn btn--brand btn--sm" id="conn-add" type="button">+ ADD CONNECTION</button>
+              </div>
+
+              <ul class="connlist" id="conn-list"></ul>
+              <div class="mscreen__empty" id="conn-empty" hidden>No connections yet. Add one to start chatting with a real model.</div>
+
+              <div class="editor" id="conn-editor" hidden>
+                <div class="editor__title" id="editor-title">ADD CONNECTION</div>
+                <div class="field">
+                  <label>Provider</label>
+                  <div class="dropdown" id="type-dd">
+                    <button class="dropdown__btn" id="type-btn" type="button"><span id="type-label">OpenAI</span><span class="caret">▾</span></button>
+                    <div class="dropdown__menu" id="type-menu" hidden></div>
+                  </div>
+                </div>
+                <div class="field"><label>Label</label><input id="f-label" placeholder="e.g. Work" /></div>
+                <div class="field"><label>Base URL</label><input id="f-baseurl" /></div>
+                <div class="field">
+                  <label>API Key <button class="linkbtn" id="key-help" type="button">ⓘ how to get this key ↗</button></label>
+                  <input id="f-secret" type="password" placeholder="paste key" /><div class="field__hint" id="f-secret-hint"></div>
+                </div>
+                <div class="field">
+                  <label>Default model</label>
+                  <div class="dropdown" id="model-dd">
+                    <input id="f-model" class="combo__input" placeholder="run TEST to load models, or type an id" autocomplete="off" />
+                    <span class="combo__caret">▾</span>
+                    <div class="dropdown__menu" id="f-model-menu" hidden></div>
+                  </div>
+                  <div class="field__hint">Pick from the list after TEST, or type any model id.</div>
+                </div>
+                <div class="field"><label>Fast model <span class="opt">optional</span></label><input id="f-fast-model" placeholder="cheap model for summaries — defaults to the model above" /></div>
+                <div class="editor__actions">
+                  <button class="btn btn--ghost btn--sm" id="conn-test" type="button">TEST CONNECTION</button>
+                  <span class="test-result" id="test-result"></span>
+                  <div class="spacer"></div>
+                  <button class="btn btn--ghost btn--sm" id="conn-cancel" type="button">CANCEL</button>
+                  <button class="btn btn--brand btn--sm" id="conn-save" type="button">SAVE</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <div class="splitter" id="splitter" hidden></div>
+
+      <!-- Artifact panel — embedded Chromium preview, split into the layout -->
+      <aside class="artifact" id="artifact" hidden>
+        <div class="artifact__head">
+          <span class="artifact__title" id="artifact-title">REPORT</span>
+          <div class="spacer"></div>
+          <button class="chip-btn" id="artifact-devtools" type="button">DEVTOOLS</button>
+          <button class="chip-btn" id="artifact-refresh" type="button">↻</button>
+          <button class="chip-btn" id="artifact-close" type="button">✕</button>
+        </div>
+        <webview class="artifact__view" id="artifact-view" partition="artifact"></webview>
+        <div class="artifact__console" id="artifact-console"></div>
+      </aside>
+    </div>
+
+    <!-- ── Token help ────────────────────────────────────────────── -->
+    <div class="overlay" id="help" hidden>
+      <div class="helpbox">
+        <div class="helpbox__head">
+          <span id="help-title">GET AN API KEY</span>
+          <div class="spacer"></div>
+          <button class="conn__btn" id="help-close" type="button">✕</button>
+        </div>
+        <div class="helpbox__intro">Each provider issues its own key. Create it in that provider's console, copy it, and paste it into the connection here — Agnostic Chat encrypts it in your macOS Keychain and only ever sends it to that provider.</div>
+        <div class="helpbox__body" id="help-body"></div>
+      </div>
+    </div>
+
+    <!-- ── Command palette ───────────────────────────────────────── -->
+    <div class="overlay" id="palette" hidden>
+      <div class="palette">
+        <div class="palette__head"><span class="glyph">⌕</span><input id="palette-input" placeholder="jump to a project, chat or page…" /><span class="kbd">esc</span></div>
+        <div class="palette__list" id="palette-list"></div>
+      </div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

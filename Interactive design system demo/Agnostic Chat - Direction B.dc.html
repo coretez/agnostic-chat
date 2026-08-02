@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  html, body { margin:0; padding:0; }
+  body { font-family:-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif; -webkit-font-smoothing:antialiased; }
+  a { color:#b3242e; text-decoration:none; }
+  a:hover { color:#8f1c24; }
+  :root {
+    --wall:#0e0f11;
+    --chrome:#141517; --side:#161719; --content:#1a1b1e; --panel:#1e1f23; --card:#1e1f23; --raise:#25262b;
+    --ink:#eceef1; --ink2:#9ba1a9; --ink3:#6b7178;
+    --line:#26282c; --line2:#1f2124;
+    --hov:#232529; --sel:#2a2c31;
+    --brand:#e04452; --brand-deep:#b3242e; --brand-soft:rgba(224,68,82,0.14);
+    --green:#3ec97a; --blue:#5b9bd8;
+    --mono:'IBM Plex Mono', 'SF Mono', ui-monospace, monospace;
+  }
+  :root[data-b-theme="light"] {
+    --wall:#e8e6e1;
+    --chrome:#f2f0ec; --side:#efedE8; --content:#faf9f6; --panel:#f4f2ee; --card:#ffffff; --raise:#ffffff;
+    --ink:#1f2428; --ink2:#5a5f64; --ink3:#8a857c;
+    --line:#e0dcd4; --line2:#eae7e0;
+    --hov:#eeece6; --sel:#e6e3db;
+    --brand:#b3242e; --brand-deep:#8f1c24; --brand-soft:#f8e8eb;
+    --green:#2e9e5b; --blue:#2f73b7;
+  }
+  @keyframes b-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+</style>
+</helmet>
+
+<div style="min-height:100vh; background:var(--wall); padding:40px; display:flex; justify-content:flex-start; align-items:flex-start; box-sizing:border-box; overflow:auto;">
+<div style="width:1320px; height:856px; flex:none; margin:0 auto; background:var(--content); border-radius:10px; box-shadow:0 40px 90px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.06); overflow:hidden; display:flex; flex-direction:column; color:var(--ink); position:relative;">
+
+  <div style="height:38px; flex:none; display:flex; align-items:center; gap:16px; padding:0 12px; background:var(--chrome); border-bottom:1px solid var(--line);">
+    <div style="display:flex; gap:7px; align-items:center; width:184px;">
+      <div style="width:11px; height:11px; border-radius:50%; background:#ff5f57;"></div>
+      <div style="width:11px; height:11px; border-radius:50%; background:#febc2e;"></div>
+      <div style="width:11px; height:11px; border-radius:50%; background:#28c840;"></div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <div style="width:14px; height:14px; border-radius:3px; background:var(--brand);"></div>
+      <div style="font-family:var(--mono); font-size:11px; font-weight:500; letter-spacing:0.4px; text-transform:uppercase;">{{ projectName }}</div>
+      <div style="font-family:var(--mono); font-size:10px; color:var(--ink3);">/ {{ pageSlug }}</div>
+    </div>
+    <div style="flex:1;"></div>
+    <button onClick="{{ toggleModel }}" style="display:flex; align-items:center; gap:7px; height:22px; padding:0 8px; border-radius:4px; border:1px solid var(--line); background:var(--raise); color:var(--ink); font-family:var(--mono); font-size:10.5px; letter-spacing:0.3px; cursor:pointer;" style-hover="border-color:var(--brand)">
+      <span style="width:5px; height:5px; border-radius:50%; background:var(--green);"></span>{{ model }}<span style="color:var(--ink3); font-size:8px;">▼</span>
+    </button>
+    <button onClick="{{ toggleTheme }}" style="height:22px; padding:0 9px; border-radius:4px; border:1px solid var(--line); background:var(--raise); color:var(--ink2); font-family:var(--mono); font-size:10.5px; letter-spacing:0.3px; cursor:pointer;" style-hover="border-color:var(--brand)">{{ themeLabel }}</button>
+    <div style="font-family:var(--mono); font-size:10.5px; color:var(--ink3); border:1px solid var(--line); border-radius:4px; padding:2px 6px;">⌘K</div>
+  </div>
+
+  <sc-if value="{{ modelOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; top:42px; right:150px; width:232px; background:var(--raise); border:1px solid var(--line); border-radius:6px; box-shadow:0 18px 40px rgba(0,0,0,0.45); padding:4px; z-index:60; animation:b-in .1s ease-out;">
+      <div onClick="{{ pickOpus }}" style="display:flex; gap:8px; padding:6px 8px; border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:11px;" style-hover="background:var(--hov)"><span style="color:var(--brand); width:10px;">{{ tickOpus }}</span>claude-opus-4.5<span style="margin-left:auto; color:var(--ink3);">200k</span></div>
+      <div onClick="{{ pickSonnet }}" style="display:flex; gap:8px; padding:6px 8px; border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:11px;" style-hover="background:var(--hov)"><span style="color:var(--brand); width:10px;">{{ tickSonnet }}</span>claude-sonnet-4.5<span style="margin-left:auto; color:var(--ink3);">200k</span></div>
+      <div onClick="{{ pickGpt }}" style="display:flex; gap:8px; padding:6px 8px; border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:11px;" style-hover="background:var(--hov)"><span style="color:var(--brand); width:10px;">{{ tickGpt }}</span>gpt-4o<span style="margin-left:auto; color:var(--ink3);">128k</span></div>
+      <div style="height:1px; background:var(--line); margin:4px 8px;"></div>
+      <div onClick="{{ pickLlama }}" style="display:flex; gap:8px; padding:6px 8px; border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:11px;" style-hover="background:var(--hov)"><span style="color:var(--brand); width:10px;">{{ tickLlama }}</span>llama-3.3-local<span style="margin-left:auto; color:var(--green);">on-device</span></div>
+    </div>
+  </sc-if>
+
+  <div style="flex:1; display:flex; min-height:0;">
+
+    <div style="width:208px; flex:none; background:var(--side); border-right:1px solid var(--line); display:flex; flex-direction:column;">
+      <div style="padding:14px 12px 6px; display:flex; align-items:center;">
+        <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">PROJECTS</div>
+        <div style="flex:1;"></div>
+        <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">04</div>
+      </div>
+      <div style="display:flex; flex-direction:column;">
+        <div onClick="{{ p0 }}" style="display:flex; align-items:center; gap:8px; height:24px; padding:0 12px; font-size:12.5px; cursor:pointer; background: {{ p0bg }}; border-left:2px solid {{ p0bar }}; color: {{ p0fg }};">Ingext Pipeline<span style="margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--ink3);">6</span></div>
+        <div onClick="{{ p1 }}" style="display:flex; align-items:center; gap:8px; height:24px; padding:0 12px; font-size:12.5px; cursor:pointer; background: {{ p1bg }}; border-left:2px solid {{ p1bar }}; color: {{ p1fg }};">SOC Runbooks<span style="margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--ink3);">14</span></div>
+        <div onClick="{{ p2 }}" style="display:flex; align-items:center; gap:8px; height:24px; padding:0 12px; font-size:12.5px; cursor:pointer; background: {{ p2bg }}; border-left:2px solid {{ p2bar }}; color: {{ p2fg }};">Q3 Board Deck<span style="margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--ink3);">3</span></div>
+        <div onClick="{{ p3 }}" style="display:flex; align-items:center; gap:8px; height:24px; padding:0 12px; font-size:12.5px; cursor:pointer; background: {{ p3bg }}; border-left:2px solid {{ p3bar }}; color: {{ p3fg }};">Personal<span style="margin-left:auto; font-family:var(--mono); font-size:9.5px; color:var(--ink3);">9</span></div>
+      </div>
+
+      <div style="padding:20px 12px 6px; display:flex; align-items:center;">
+        <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">CHATS</div>
+        <div style="flex:1;"></div>
+        <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">+</div>
+      </div>
+      <div style="display:flex; flex-direction:column;">
+        <div onClick="{{ c0 }}" style="padding:5px 12px; cursor:pointer; background: {{ c0bg }}; border-left:2px solid {{ c0bar }}; color: {{ c0fg }};">
+          <div style="font-size:12.5px; line-height:16px;">Parser for Falcon EDR</div>
+          <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">opus-4.5 · 2h</div>
+        </div>
+        <div onClick="{{ c1 }}" style="padding:5px 12px; cursor:pointer; background: {{ c1bg }}; border-left:2px solid {{ c1bar }}; color: {{ c1fg }};">
+          <div style="font-size:12.5px; line-height:16px;">Schema review notes</div>
+          <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">sonnet-4.5 · 1d</div>
+        </div>
+        <div onClick="{{ c2 }}" style="padding:5px 12px; cursor:pointer; background: {{ c2bg }}; border-left:2px solid {{ c2bar }}; color: {{ c2fg }};">
+          <div style="font-size:12.5px; line-height:16px;">Throughput benchmarks</div>
+          <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">gpt-4o · 3d</div>
+        </div>
+        <div onClick="{{ c3 }}" style="padding:5px 12px; cursor:pointer; background: {{ c3bg }}; border-left:2px solid {{ c3bar }}; color: {{ c3fg }};">
+          <div style="font-size:12.5px; line-height:16px;">Redaction rules draft</div>
+          <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">llama-3.3 · 5d</div>
+        </div>
+      </div>
+      <div style="flex:1;"></div>
+      <div style="padding:10px 12px; border-top:1px solid var(--line); font-family:var(--mono); font-size:9.5px; color:var(--ink3); display:flex; align-items:center; gap:6px;"><span style="width:5px; height:5px; border-radius:50%; background:var(--green);"></span>LOCAL · 1.4 MB</div>
+    </div>
+
+    <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+
+      <div style="height:34px; flex:none; display:flex; align-items:stretch; border-bottom:1px solid var(--line); background:var(--content);">
+        <button onClick="{{ goChat }}" style="padding:0 16px; border:none; background:transparent; border-bottom:2px solid {{ tChatBar }}; color: {{ tChatFg }}; font-family:var(--mono); font-size:10.5px; letter-spacing:0.8px; cursor:pointer;">CHAT</button>
+        <button onClick="{{ goOverview }}" style="padding:0 16px; border:none; background:transparent; border-bottom:2px solid {{ tOvBar }}; color: {{ tOvFg }}; font-family:var(--mono); font-size:10.5px; letter-spacing:0.8px; cursor:pointer;">OVERVIEW</button>
+        <button onClick="{{ goDocs }}" style="padding:0 16px; border:none; background:transparent; border-bottom:2px solid {{ tDocBar }}; color: {{ tDocFg }}; font-family:var(--mono); font-size:10.5px; letter-spacing:0.8px; cursor:pointer;">DOCUMENTS</button>
+        <div style="flex:1;"></div>
+        <div style="display:flex; align-items:center; padding:0 14px; font-family:var(--mono); font-size:10px; color:var(--ink3);">{{ toolbarNote }}</div>
+      </div>
+
+      <sc-if value="{{ showChat }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:1; display:flex; min-height:0;">
+          <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+            <div style="flex:1; overflow-y:auto; padding:22px 26px 6px; display:flex; flex-direction:column; gap:20px;">
+
+              <div style="display:flex; align-items:center; gap:10px;">
+                <div style="height:1px; flex:1; background:var(--line);"></div>
+                <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1px; color:var(--ink3);">TODAY · RETRIEVAL ON · 6 DOCS IN SCOPE</div>
+                <div style="height:1px; flex:1; background:var(--line);"></div>
+              </div>
+
+              <div style="display:flex; gap:12px;">
+                <div style="width:52px; flex:none; font-family:var(--mono); font-size:9.5px; letter-spacing:0.6px; color:var(--ink3); padding-top:2px;">YOU</div>
+                <div style="flex:1; font-size:13.5px; line-height:20px; color:var(--ink);">The Falcon parser is dropping fields on multi-line detections. What does our schema say the envelope should look like?</div>
+              </div>
+
+              <div style="display:flex; gap:12px; position:relative;">
+                <div style="width:52px; flex:none; font-family:var(--mono); font-size:9.5px; letter-spacing:0.6px; color:var(--brand); padding-top:2px;">OPUS</div>
+                <div style="flex:1; min-width:0;">
+                  <div style="font-size:13.5px; line-height:21px; color:var(--ink2); text-wrap:pretty;">Your schema (v2.3) wraps every detection in an <span style="font-family:var(--mono); font-size:12px; color:var(--ink); background:var(--panel); padding:1px 5px; border-radius:3px;">event.envelope</span> object, and the parser only reads the first line of <span style="font-family:var(--mono); font-size:12px; color:var(--ink); background:var(--panel); padding:1px 5px; border-radius:3px;">raw</span> before emitting.<br><br>Two changes fix it: buffer until the closing brace, then map <span style="font-family:var(--mono); font-size:12px; color:var(--ink); background:var(--panel); padding:1px 5px; border-radius:3px;">behaviors[]</span> onto the envelope rather than flattening it. I drafted the patch as a new document in this project.</div>
+                  <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
+                    <button onClick="{{ toggleSources }}" style="display:flex; align-items:center; gap:6px; height:20px; padding:0 8px; border-radius:3px; border:1px solid {{ srcBorder }}; background: {{ srcBg }}; color: {{ srcFg }}; font-family:var(--mono); font-size:10px; letter-spacing:0.5px; cursor:pointer;">SOURCES 3</button>
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">4.2s · 1,284 tok</div>
+                  </div>
+
+                  <sc-if value="{{ sourcesOpen }}" hint-placeholder-val="{{ true }}">
+                    <div style="margin-top:10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); overflow:hidden; max-width:520px; animation:b-in .12s ease-out;">
+                      <div style="display:flex; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line2); font-family:var(--mono); font-size:9.5px; letter-spacing:1px; color:var(--ink3);">RETRIEVED FROM PROJECT<span style="flex:1;"></span><span onClick="{{ toggleSources }}" style="cursor:pointer;">✕</span></div>
+                      <div onClick="{{ goDocs }}" style="display:flex; gap:12px; padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--line2);" style-hover="background:var(--hov)">
+                        <div style="width:34px; flex:none; font-family:var(--mono); font-size:10px; color:var(--brand);">0.94</div>
+                        <div style="flex:1;"><div style="font-size:12.5px;">Ingext Event Schema v2.3</div><div style="font-size:11.5px; color:var(--ink3); line-height:16px;">Defines the event.envelope contract you asked about.</div></div>
+                        <div style="width:52px; flex:none; height:3px; background:var(--line); border-radius:2px; margin-top:6px;"><div style="width:94%; height:3px; background:var(--brand); border-radius:2px;"></div></div>
+                      </div>
+                      <div onClick="{{ goDocs }}" style="display:flex; gap:12px; padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--line2);" style-hover="background:var(--hov)">
+                        <div style="width:34px; flex:none; font-family:var(--mono); font-size:10px; color:var(--brand);">0.71</div>
+                        <div style="flex:1;"><div style="font-size:12.5px; font-family:var(--mono);">falcon_parser.py</div><div style="font-size:11.5px; color:var(--ink3); line-height:16px;">Contains the single-line read that drops the fields.</div></div>
+                        <div style="width:52px; flex:none; height:3px; background:var(--line); border-radius:2px; margin-top:6px;"><div style="width:71%; height:3px; background:var(--brand); border-radius:2px;"></div></div>
+                      </div>
+                      <div onClick="{{ goDocs }}" style="display:flex; gap:12px; padding:9px 12px; cursor:pointer;" style-hover="background:var(--hov)">
+                        <div style="width:34px; flex:none; font-family:var(--mono); font-size:10px; color:var(--ink3);">0.38</div>
+                        <div style="flex:1;"><div style="font-size:12.5px;">Detection samples (12)</div><div style="font-size:11.5px; color:var(--ink3); line-height:16px;">Two samples show the multi-line shape referenced above.</div></div>
+                        <div style="width:52px; flex:none; height:3px; background:var(--line); border-radius:2px; margin-top:6px;"><div style="width:38%; height:3px; background:var(--ink3); border-radius:2px;"></div></div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </div>
+
+              <div style="display:flex; gap:12px;">
+                <div style="width:52px; flex:none; font-family:var(--mono); font-size:9.5px; letter-spacing:0.6px; color:var(--ink3); padding-top:2px;">YOU</div>
+                <div style="flex:1; font-size:13.5px; line-height:20px;">Save the patch and note it for whoever picks this up next.</div>
+              </div>
+
+              <div style="display:flex; gap:12px;">
+                <div style="width:52px; flex:none; font-family:var(--mono); font-size:9.5px; letter-spacing:0.6px; color:var(--brand); padding-top:2px;">OPUS</div>
+                <div style="flex:1;">
+                  <div style="font-size:13.5px; line-height:21px; color:var(--ink2);">Saved <span style="color:var(--ink);">Falcon parser patch</span> to project documents and appended a handoff note to Overview. Any new chat here starts with that context.</div>
+                  <div style="display:flex; gap:8px; margin-top:9px;">
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--green); border:1px solid var(--line); border-radius:3px; padding:2px 7px;">+ DOC falcon-parser.patch</div>
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--blue); border:1px solid var(--line); border-radius:3px; padding:2px 7px;">↻ HANDOFF UPDATED</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style="flex:none; padding:10px 26px 18px;">
+              <div style="border:1px solid var(--line); background:var(--panel); border-radius:6px; padding:10px 12px; display:flex; flex-direction:column; gap:9px;">
+                <div style="font-size:13.5px; color:var(--ink3); min-height:34px; line-height:19px;">Ask anything… <span style="font-family:var(--mono); font-size:11px;">(⌘↩ to send)</span></div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">6 DOCS · 3 SKILLS · OPUS-4.5</div>
+                  <div style="flex:1;"></div>
+                  <button style="height:24px; padding:0 14px; border:none; border-radius:4px; background:var(--brand); color:#fff; font-family:var(--mono); font-size:10.5px; letter-spacing:0.8px; cursor:pointer;">SEND</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style="width:276px; flex:none; border-left:1px solid var(--line); background:var(--side); display:flex; flex-direction:column; min-height:0;">
+            <div style="flex:none; display:flex; align-items:stretch; border-bottom:1px solid var(--line);">
+              <button onClick="{{ rpDocs }}" style="flex:1; height:28px; border:none; background:transparent; border-bottom:2px solid {{ rDocBar }}; color: {{ rDocFg }}; font-family:var(--mono); font-size:9.5px; letter-spacing:0.9px; cursor:pointer;">DOCS</button>
+              <button onClick="{{ rpPlan }}" style="flex:1; height:28px; border:none; background:transparent; border-bottom:2px solid {{ rPlanBar }}; color: {{ rPlanFg }}; font-family:var(--mono); font-size:9.5px; letter-spacing:0.9px; cursor:pointer;">PLAN</button>
+              <button onClick="{{ rpScope }}" style="flex:1; height:28px; border:none; background:transparent; border-bottom:2px solid {{ rScopeBar }}; color: {{ rScopeFg }}; font-family:var(--mono); font-size:9.5px; letter-spacing:0.9px; cursor:pointer;">SCOPE</button>
+            </div>
+
+            <div style="flex:1; min-height:0; overflow-y:auto;">
+              <sc-if value="{{ rpIsDocs }}" hint-placeholder-val="{{ true }}">
+                <div style="padding:10px 12px 6px; display:flex; align-items:center;">
+                  <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">PROJECT DOCUMENTS</div>
+                  <div style="flex:1;"></div>
+                  <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); cursor:pointer;">+</div>
+                </div>
+                <div style="display:flex; flex-direction:column;">
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px;">Ingext Event Schema v2.3</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">MD · UPLOAD</div></div>
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px; font-family:var(--mono);">falcon_parser.py</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">PY · FROM CHAT</div></div>
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px;">Falcon parser patch</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">DIFF · FROM CHAT</div></div>
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px;">Detection samples (12)</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">JSONL · UPLOAD</div></div>
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px;">Redaction policy</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">MD · WRITTEN</div></div>
+                  <div onClick="{{ goDocs }}" style="padding:6px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12px;">Throughput bench results</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">CSV · FROM CHAT</div></div>
+                </div>
+                <div style="padding:10px 12px; font-size:11px; line-height:15px; color:var(--ink3); text-wrap:pretty;">Documents belong to the project, not the chat. Every conversation here retrieves from them.</div>
+              </sc-if>
+
+              <sc-if value="{{ rpIsPlan }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:10px 12px 8px; display:flex; align-items:center;">
+                  <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">CURRENT PLAN</div>
+                  <div style="flex:1;"></div>
+                  <div style="font-family:var(--mono); font-size:9.5px; color:var(--brand);">2 / 5</div>
+                </div>
+                <div style="padding:0 12px 10px;">
+                  <div style="height:3px; background:var(--line); border-radius:2px; overflow:hidden;"><div style="width:40%; height:3px; background:var(--brand);"></div></div>
+                </div>
+                <div style="display:flex; flex-direction:column;">
+                  <div style="display:flex; gap:9px; padding:7px 12px; border-left:2px solid transparent;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--green); border:1px solid var(--line); border-radius:3px; padding:1px 4px; height:14px; flex:none;">✓</span>
+                    <div style="flex:1;"><div style="font-size:12px; color:var(--ink3); text-decoration:line-through;">Read schema v2.3 envelope contract</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">2 DOCS READ · 0.8s</div></div>
+                  </div>
+                  <div style="display:flex; gap:9px; padding:7px 12px; border-left:2px solid transparent;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--green); border:1px solid var(--line); border-radius:3px; padding:1px 4px; height:14px; flex:none;">✓</span>
+                    <div style="flex:1;"><div style="font-size:12px; color:var(--ink3); text-decoration:line-through;">Locate the flattening read in falcon_parser</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">1 FILE · 1.4s</div></div>
+                  </div>
+                  <div style="display:flex; gap:9px; padding:7px 12px; border-left:2px solid var(--brand); background:var(--brand-soft);">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--brand); border:1px solid var(--brand); border-radius:3px; padding:1px 4px; height:14px; flex:none;">▸</span>
+                    <div style="flex:1;"><div style="font-size:12px;">Draft the buffering patch</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--brand);">RUNNING · 3.1s</div></div>
+                  </div>
+                  <div style="display:flex; gap:9px; padding:7px 12px; border-left:2px solid transparent;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3); border:1px solid var(--line); border-radius:3px; padding:1px 4px; height:14px; flex:none;">·</span>
+                    <div style="flex:1;"><div style="font-size:12px; color:var(--ink2);">Validate against 12 detection samples</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">QUEUED</div></div>
+                  </div>
+                  <div style="display:flex; gap:9px; padding:7px 12px; border-left:2px solid transparent;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3); border:1px solid var(--line); border-radius:3px; padding:1px 4px; height:14px; flex:none;">·</span>
+                    <div style="flex:1;"><div style="font-size:12px; color:var(--ink2);">Write patch to project documents</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">QUEUED</div></div>
+                  </div>
+                </div>
+                <div style="padding:10px 12px; font-size:11px; line-height:15px; color:var(--ink3); text-wrap:pretty;">The plan is editable — reorder or drop a step before it runs.</div>
+              </sc-if>
+
+              <sc-if value="{{ rpIsScope }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:10px 12px 6px; font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">SKILLS · 3 ENABLED</div>
+                <div style="display:flex; flex-direction:column;">
+                  <div style="display:flex; align-items:center; gap:9px; padding:6px 12px;">
+                    <span style="width:5px; height:5px; border-radius:50%; background:var(--green); flex:none;"></span>
+                    <div style="flex:1;"><div style="font-size:12px;">Envelope Linter</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--brand);">THIS PROJECT</div></div>
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">USED 2×</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:9px; padding:6px 12px;">
+                    <span style="width:5px; height:5px; border-radius:50%; background:var(--green); flex:none;"></span>
+                    <div style="flex:1;"><div style="font-size:12px;">Make a doc</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">GLOBAL</div></div>
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">IDLE</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:9px; padding:6px 12px;">
+                    <span style="width:5px; height:5px; border-radius:50%; background:var(--green); flex:none;"></span>
+                    <div style="flex:1;"><div style="font-size:12px;">Handoff to Claude Code</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">GLOBAL</div></div>
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">IDLE</span>
+                  </div>
+                </div>
+
+                <div style="padding:14px 12px 6px; font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">MCP SERVERS · 2 CONNECTED</div>
+                <div style="display:flex; flex-direction:column;">
+                  <div style="padding:7px 12px;">
+                    <div style="display:flex; align-items:center; gap:9px;">
+                      <span style="width:5px; height:5px; border-radius:50%; background:var(--green); flex:none;"></span>
+                      <div style="font-size:12px; flex:1;">fluency-mssp</div>
+                      <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">14 TOOLS</span>
+                    </div>
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); padding-left:14px;">stdio · local · 3 calls this chat</div>
+                  </div>
+                  <div style="padding:7px 12px;">
+                    <div style="display:flex; align-items:center; gap:9px;">
+                      <span style="width:5px; height:5px; border-radius:50%; background:var(--green); flex:none;"></span>
+                      <div style="font-size:12px; flex:1;">filesystem</div>
+                      <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">6 TOOLS</span>
+                    </div>
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); padding-left:14px;">scoped to ~/AgnosticChat/ingext</div>
+                  </div>
+                  <div style="padding:7px 12px; opacity:0.55;">
+                    <div style="display:flex; align-items:center; gap:9px;">
+                      <span style="width:5px; height:5px; border-radius:50%; background:var(--ink3); flex:none;"></span>
+                      <div style="font-size:12px; flex:1;">github</div>
+                      <span style="font-family:var(--mono); font-size:9px; color:var(--ink3);">OFF</span>
+                    </div>
+                    <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); padding-left:14px;">not in scope for this project</div>
+                  </div>
+                </div>
+                <div style="padding:10px 12px; font-size:11px; line-height:15px; color:var(--ink3); text-wrap:pretty;">Scope is per-project. Nothing enabled elsewhere can reach this conversation.</div>
+              </sc-if>
+            </div>
+
+            <div style="flex:none; border-top:1px solid var(--line); background:var(--panel); display:flex; flex-direction:column; height: {{ activityHeight }};">
+              <div onClick="{{ toggleActivity }}" style="flex:none; height:26px; display:flex; align-items:center; gap:7px; padding:0 12px; cursor:pointer;">
+                <span style="width:5px; height:5px; border-radius:50%; background:var(--brand); flex:none;"></span>
+                <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">ACTIVITY</div>
+                <div style="flex:1;"></div>
+                <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">{{ activityChevron }}</div>
+              </div>
+              <sc-if value="{{ activityOpen }}" hint-placeholder-val="{{ true }}">
+                <div style="flex:1; min-height:0; overflow-y:auto; padding:0 12px 10px; display:flex; flex-direction:column; gap:7px;">
+                  <div style="display:flex; gap:8px;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3); width:30px; flex:none; padding-top:1px;">0.8s</span>
+                    <div style="flex:1; min-width:0;"><div style="font-family:var(--mono); font-size:10.5px; color:var(--blue);">read_document</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); line-height:14px;">event-schema-v2.3.md → 4.1 KB</div></div>
+                  </div>
+                  <div style="display:flex; gap:8px;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3); width:30px; flex:none; padding-top:1px;">1.4s</span>
+                    <div style="flex:1; min-width:0;"><div style="font-family:var(--mono); font-size:10.5px; color:var(--blue);">grep</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); line-height:14px;">"for line in stream" → 1 hit, falcon_parser.py:12</div></div>
+                  </div>
+                  <div style="display:flex; gap:8px;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--ink3); width:30px; flex:none; padding-top:1px;">2.2s</span>
+                    <div style="flex:1; min-width:0;"><div style="font-family:var(--mono); font-size:10.5px; color:var(--blue);">mcp · fluency-mssp.getSchema</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--green); line-height:14px;">200 OK · 1 record</div></div>
+                  </div>
+                  <div style="display:flex; gap:8px;">
+                    <span style="font-family:var(--mono); font-size:9px; color:var(--brand); width:30px; flex:none; padding-top:1px;">3.1s</span>
+                    <div style="flex:1; min-width:0;">
+                      <div style="font-family:var(--mono); font-size:10.5px; color:var(--brand);">skill · envelope-linter</div>
+                      <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); line-height:14px;">validating 12 samples… <span style="color:var(--ink2);">7/12</span></div>
+                      <div style="height:2px; background:var(--line); border-radius:2px; margin-top:4px;"><div style="width:58%; height:2px; background:var(--brand); border-radius:2px;"></div></div>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showOverview }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1; overflow-y:auto; padding:24px 28px 30px;">
+          <div style="display:flex; align-items:flex-start; gap:20px; padding-bottom:18px; border-bottom:1px solid var(--line);">
+            <div style="flex:1;">
+              <div style="font-size:24px; font-weight:600; letter-spacing:-0.4px;">{{ projectName }}</div>
+              <div style="font-size:12.5px; color:var(--ink2); margin-top:5px; max-width:520px; line-height:18px;">Normalization and enrichment pipeline for Falcon, Okta and Netskope telemetry feeding the MSSP tenant.</div>
+            </div>
+            <div style="display:flex; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:5px; overflow:hidden;">
+              <div style="background:var(--panel); padding:8px 16px;"><div style="font-family:var(--mono); font-size:17px;">04</div><div style="font-family:var(--mono); font-size:9px; letter-spacing:0.8px; color:var(--ink3);">CHATS</div></div>
+              <div style="background:var(--panel); padding:8px 16px;"><div style="font-family:var(--mono); font-size:17px;">06</div><div style="font-family:var(--mono); font-size:9px; letter-spacing:0.8px; color:var(--ink3);">DOCS</div></div>
+              <div style="background:var(--panel); padding:8px 16px;"><div style="font-family:var(--mono); font-size:17px;">2h</div><div style="font-family:var(--mono); font-size:9px; letter-spacing:0.8px; color:var(--ink3);">ACTIVE</div></div>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:6px; overflow:hidden; margin-top:18px;">
+            <div style="background:var(--card); padding:16px 18px;">
+              <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3); margin-bottom:11px;">PROJECT INDEX <span style="color:var(--ink3); opacity:0.6;">· AUTO · 2H AGO</span></div>
+              <div style="display:flex; flex-direction:column; gap:8px; font-size:12.5px; line-height:17px; color:var(--ink2);">
+                <div><span style="font-family:var(--mono); font-size:10px; color:var(--brand); letter-spacing:0.5px;">GOAL</span><br>Ship v2.3 envelope across all three connectors.</div>
+                <div><span style="font-family:var(--mono); font-size:10px; color:var(--brand); letter-spacing:0.5px;">CONTAINS</span><br>1 schema spec, 2 parsers, 12 samples, redaction policy, bench results.</div>
+                <div><span style="font-family:var(--mono); font-size:10px; color:var(--brand); letter-spacing:0.5px;">STATE</span><br>Falcon patched but unmerged · Okta untouched · Netskope blocked on samples.</div>
+                <div><span style="font-family:var(--mono); font-size:10px; color:var(--brand); letter-spacing:0.5px;">OPEN</span><br>Does redaction run before or after enrichment?</div>
+              </div>
+            </div>
+
+            <div style="background:var(--card); padding:16px 18px;">
+              <div style="display:flex; align-items:center; margin-bottom:11px;">
+                <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">HANDOFF</div>
+                <div style="flex:1;"></div>
+                <div style="font-family:var(--mono); font-size:9.5px; color:var(--brand); cursor:pointer;">START CHAT →</div>
+              </div>
+              <div style="display:flex; flex-direction:column; gap:11px;">
+                <div style="display:flex; gap:10px;"><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); width:34px; flex:none; padding-top:2px;">2h</div><div style="font-size:12.5px; line-height:17px; color:var(--ink2);">Diagnosed dropped fields on multi-line detections; wrote <span style="color:var(--ink);">Falcon parser patch</span>.</div></div>
+                <div style="display:flex; gap:10px;"><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); width:34px; flex:none; padding-top:2px;">1d</div><div style="font-size:12.5px; line-height:17px; color:var(--ink2);">Reviewed schema v2.3; agreed the envelope stays nested.</div></div>
+                <div style="display:flex; gap:10px;"><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); width:34px; flex:none; padding-top:2px;">3d</div><div style="font-size:12.5px; line-height:17px; color:var(--ink2);">Benchmarked the 40k EPS ceiling on the batching branch.</div></div>
+              </div>
+            </div>
+
+            <div style="background:var(--card); padding:16px 18px;">
+              <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3); margin-bottom:11px;">TASKS <span style="opacity:0.6;">· 1 DONE / 1 WIP / 2 TODO</span></div>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div style="display:flex; align-items:center; gap:10px;"><span style="font-family:var(--mono); font-size:9px; color:var(--green); border:1px solid var(--line); border-radius:3px; padding:1px 5px; width:44px; text-align:center;">DONE</span><span style="font-size:12.5px; color:var(--ink3); text-decoration:line-through;">Confirm envelope contract with schema owner</span></div>
+                <div style="display:flex; align-items:center; gap:10px;"><span style="font-family:var(--mono); font-size:9px; color:var(--brand); border:1px solid var(--brand); border-radius:3px; padding:1px 5px; width:44px; text-align:center;">WIP</span><span style="font-size:12.5px;">Merge Falcon parser patch</span></div>
+                <div style="display:flex; align-items:center; gap:10px;"><span style="font-family:var(--mono); font-size:9px; color:var(--ink3); border:1px solid var(--line); border-radius:3px; padding:1px 5px; width:44px; text-align:center;">TODO</span><span style="font-size:12.5px; color:var(--ink2);">Port envelope change to Okta parser</span></div>
+                <div style="display:flex; align-items:center; gap:10px;"><span style="font-family:var(--mono); font-size:9px; color:var(--ink3); border:1px solid var(--line); border-radius:3px; padding:1px 5px; width:44px; text-align:center;">TODO</span><span style="font-size:12.5px; color:var(--ink2);">Request Netskope sample export</span></div>
+              </div>
+            </div>
+
+            <div style="background:var(--card); padding:16px 18px; display:flex; flex-direction:column;">
+              <div style="display:flex; align-items:center; margin-bottom:11px;">
+                <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3);">INBOX</div>
+                <div style="flex:1;"></div>
+                <button onClick="{{ toggleInbox }}" style="font-family:var(--mono); font-size:9.5px; color:var(--brand); background:transparent; border:none; cursor:pointer; letter-spacing:0.5px;">{{ inboxToggleLabel }}</button>
+              </div>
+              <sc-if value="{{ inboxFull }}" hint-placeholder-val="{{ true }}">
+                <div style="border:1px dashed var(--line); border-radius:5px; padding:8px;">
+                  <div style="display:flex; align-items:center; gap:10px; padding:6px 8px;"><span style="font-family:var(--mono); font-size:11.5px; flex:1;">netskope_sample.jsonl</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">1.2 MB</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--brand); cursor:pointer;">ADD</span></div>
+                  <div style="height:1px; background:var(--line2);"></div>
+                  <div style="display:flex; align-items:center; gap:10px; padding:6px 8px;"><span style="font-family:var(--mono); font-size:11.5px; flex:1;">envelope-rfc.md</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">14 KB</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--brand); cursor:pointer;">ADD</span></div>
+                  <div style="height:1px; background:var(--line2);"></div>
+                  <div style="display:flex; align-items:center; gap:10px; padding:6px 8px;"><span style="font-family:var(--mono); font-size:11.5px; flex:1;">bench-2026-07.csv</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">88 KB</span><span style="font-family:var(--mono); font-size:9.5px; color:var(--brand); cursor:pointer;">ADD</span></div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ inboxEmpty }}" hint-placeholder-val="{{ false }}">
+                <div style="flex:1; border:1px dashed var(--line); border-radius:5px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; padding:24px; text-align:center;">
+                  <div style="font-family:var(--mono); font-size:10.5px; letter-spacing:1px; color:var(--ink2);">DROP FILES HERE</div>
+                  <div style="font-size:11.5px; color:var(--ink3); max-width:220px; line-height:16px;">They land in this project and become retrievable by every chat in it.</div>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ showDocs }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1; display:flex; min-height:0;">
+          <div style="width:250px; flex:none; border-right:1px solid var(--line); background:var(--side);">
+            <div style="padding:10px 12px;"><div style="height:22px; border:1px solid var(--line); border-radius:4px; background:var(--panel); display:flex; align-items:center; padding:0 8px; font-family:var(--mono); font-size:10.5px; color:var(--ink3);">⌕ filter…</div></div>
+            <div onClick="{{ d0 }}" style="padding:7px 12px; cursor:pointer; background: {{ d0bg }}; border-left:2px solid {{ d0bar }};"><div style="font-size:12.5px;">Ingext Event Schema v2.3</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">MD · UPLOAD · JUL 28</div></div>
+            <div onClick="{{ d1 }}" style="padding:7px 12px; cursor:pointer; background: {{ d1bg }}; border-left:2px solid {{ d1bar }};"><div style="font-size:12.5px; font-family:var(--mono);">falcon_parser.py</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">PY · FROM CHAT · 2H</div></div>
+            <div onClick="{{ d2 }}" style="padding:7px 12px; cursor:pointer; background: {{ d2bg }}; border-left:2px solid {{ d2bar }};"><div style="font-size:12.5px;">Falcon parser patch</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">DIFF · FROM CHAT · 2H</div></div>
+            <div style="padding:7px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12.5px;">Detection samples (12)</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">JSONL · UPLOAD · JUL 30</div></div>
+            <div style="padding:7px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12.5px;">Redaction policy</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">MD · WRITTEN · JUL 22</div></div>
+            <div style="padding:7px 12px; cursor:pointer; border-left:2px solid transparent;" style-hover="background:var(--hov)"><div style="font-size:12.5px;">Throughput bench results</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">CSV · FROM CHAT · TUE</div></div>
+          </div>
+
+          <div style="flex:1; display:flex; flex-direction:column; min-width:0;">
+            <div style="height:32px; flex:none; display:flex; align-items:center; gap:10px; padding:0 18px; border-bottom:1px solid var(--line);">
+              <div style="font-family:var(--mono); font-size:11px;">{{ docTitle }}</div>
+              <div style="flex:1;"></div>
+              <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); cursor:pointer;">EDIT</div>
+              <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); cursor:pointer;">REVEAL</div>
+            </div>
+            <div style="flex:1; overflow-y:auto; padding:22px 26px; font-size:13.5px; line-height:21px;">{{ docBody }}</div>
+          </div>
+
+          <div style="width:212px; flex:none; border-left:1px solid var(--line); background:var(--side); padding:12px 14px; overflow-y:auto;">
+            <div style="font-family:var(--mono); font-size:9.5px; letter-spacing:1.2px; color:var(--ink3); margin-bottom:10px;">DETAILS</div>
+            <div style="display:flex; flex-direction:column; gap:7px; font-family:var(--mono); font-size:10.5px;">
+              <div style="display:flex; justify-content:space-between;"><span style="color:var(--ink3);">TYPE</span><span>{{ docType }}</span></div>
+              <div style="display:flex; justify-content:space-between;"><span style="color:var(--ink3);">SOURCE</span><span>{{ docSource }}</span></div>
+              <div style="display:flex; justify-content:space-between;"><span style="color:var(--ink3);">CREATED</span><span>{{ docCreated }}</span></div>
+              <div style="display:flex; justify-content:space-between;"><span style="color:var(--ink3);">UPDATED</span><span>{{ docUpdated }}</span></div>
+            </div>
+            <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); margin:12px 0 5px; letter-spacing:1.2px;">ON DISK</div>
+            <div style="font-family:var(--mono); font-size:10px; color:var(--ink2); line-height:15px; word-break:break-all; background:var(--panel); border:1px solid var(--line); padding:6px 7px; border-radius:4px;">~/AgnosticChat/ingext/docs/{{ docFile }}</div>
+            <div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3); margin:14px 0 6px; letter-spacing:1.2px;">REFERENCED BY</div>
+            <div onClick="{{ goChat }}" style="padding:5px 0; cursor:pointer;"><div style="font-size:11.5px;">Parser for Falcon EDR</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">CREATED · 2H</div></div>
+            <div onClick="{{ goChat }}" style="padding:5px 0; cursor:pointer;"><div style="font-size:11.5px;">Schema review notes</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">RETRIEVED · 1D</div></div>
+            <div onClick="{{ goChat }}" style="padding:5px 0; cursor:pointer;"><div style="font-size:11.5px;">Redaction rules draft</div><div style="font-family:var(--mono); font-size:9.5px; color:var(--ink3);">RETRIEVED · MON</div></div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1400,&quot;height&quot;:936}}">
+class Component extends DCLogic {
+  state = { page: 'chat', project: 0, chat: 0, doc: 0, theme: 'light', model: 'claude-opus-4.5', modelOpen: false, sourcesOpen: true, inboxFull: true, rightPane: 'plan', activityOpen: true };
+
+  componentDidMount() { this.sync(); }
+  componentDidUpdate() { this.sync(); }
+  sync() { document.documentElement.setAttribute('data-b-theme', this.state.theme); }
+
+  tab(name) {
+    const on = this.state.page === name;
+    return { bar: on ? 'var(--brand)' : 'transparent', fg: on ? 'var(--ink)' : 'var(--ink3)' };
+  }
+  row(on) { return { bg: on ? 'var(--sel)' : 'transparent', bar: on ? 'var(--brand)' : 'transparent', fg: 'var(--ink)' }; }
+
+  docs() {
+    const mono = { fontFamily: 'var(--mono)', fontSize: 12, lineHeight: '19px', background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 5, padding: '12px 14px', margin: 0, overflowX: 'auto', color: 'var(--ink2)' };
+    const p = { margin: '0 0 14px', color: 'var(--ink2)', fontSize: 13.5, lineHeight: '21px' };
+    return [
+      { title: 'event-schema-v2.3.md', type: 'MARKDOWN', source: 'UPLOAD', created: 'JUL 28', updated: 'JUL 28', file: 'event-schema-v2.3.md',
+        body: React.createElement('div', null,
+          React.createElement('h2', { style: { fontSize: 19, fontWeight: 600, letterSpacing: '-0.2px', margin: '0 0 10px' } }, 'Ingext Event Schema v2.3'),
+          React.createElement('p', { style: p }, 'Every record leaving a connector is wrapped in a single envelope. Connector payloads stay nested — never flattened into the top level.'),
+          React.createElement('pre', { style: mono }, '{\n  "event": {\n    "envelope": {\n      "ts": "2026-07-28T14:02:11Z",\n      "connector": "falcon",\n      "schema": "2.3",\n      "tenant": "acme"\n    },\n    "behaviors": [ { "tactic": "…", "technique": "…" } ],\n    "raw": "<original record, verbatim>"\n  }\n}'),
+          React.createElement('p', { style: { ...p, marginTop: 16 } }, 'behaviors[] is always an array, even for a single behavior. raw is preserved byte-for-byte so downstream re-parsing stays possible.')) },
+      { title: 'falcon_parser.py', type: 'PYTHON', source: 'FROM CHAT', created: 'JUL 30', updated: '2H AGO', file: 'falcon_parser.py',
+        body: React.createElement('pre', { style: mono }, 'def parse(stream):\n    for line in stream:            # reads one line only\n        rec = json.loads(line)\n        yield {\n            "ts": rec["timestamp"],\n            **rec.get("behaviors", [{}])[0],   # flattens\n        }') },
+      { title: 'falcon-parser.patch', type: 'DIFF', source: 'FROM CHAT', created: '2H AGO', updated: '2H AGO', file: 'falcon-parser.patch',
+        body: React.createElement('pre', { style: mono },
+          React.createElement('span', { style: { color: '#e0525f' } }, '-    for line in stream:\n-        rec = json.loads(line)\n'),
+          React.createElement('span', { style: { color: 'var(--green)' } }, '+    for rec in read_objects(stream):   # buffers to closing brace\n+        env = rec["event"]["envelope"]\n'),
+          '     yield {\n',
+          React.createElement('span', { style: { color: 'var(--green)' } }, '+        "envelope": env,\n+        "behaviors": rec["event"]["behaviors"],\n'),
+          '     }') }
+    ];
+  }
+
+  renderVals() {
+    const s = this.state;
+    const names = ['Ingext Pipeline', 'SOC Runbooks', 'Q3 Board Deck', 'Personal'];
+    const d = this.docs()[s.doc];
+    const t1 = this.tab('chat'), t2 = this.tab('overview'), t3 = this.tab('documents');
+    const notes = { chat: 'RETRIEVAL ON · 6 DOCS', overview: 'INDEX SYNCED 2H AGO', documents: '6 DOCS · 1.4 MB' };
+    const v = {
+      projectName: names[s.project], model: s.model, modelOpen: s.modelOpen, sourcesOpen: s.sourcesOpen,
+      pageSlug: s.page, toolbarNote: notes[s.page],
+      showChat: s.page === 'chat', showOverview: s.page === 'overview', showDocs: s.page === 'documents',
+      themeLabel: s.theme === 'dark' ? 'LIGHT' : 'DARK',
+      inboxFull: s.inboxFull, inboxEmpty: !s.inboxFull,
+      inboxToggleLabel: s.inboxFull ? 'EMPTY STATE' : '3 ITEMS',
+      tChatBar: t1.bar, tChatFg: t1.fg, tOvBar: t2.bar, tOvFg: t2.fg, tDocBar: t3.bar, tDocFg: t3.fg,
+      srcBg: s.sourcesOpen ? 'var(--brand-soft)' : 'transparent',
+      srcBorder: s.sourcesOpen ? 'var(--brand)' : 'var(--line)',
+      srcFg: s.sourcesOpen ? 'var(--brand)' : 'var(--ink3)',
+      docTitle: d.title, docType: d.type, docSource: d.source, docCreated: d.created, docUpdated: d.updated, docFile: d.file, docBody: d.body,
+      tickOpus: s.model === 'claude-opus-4.5' ? '›' : '', tickSonnet: s.model === 'claude-sonnet-4.5' ? '›' : '',
+      tickGpt: s.model === 'gpt-4o' ? '›' : '', tickLlama: s.model === 'llama-3.3-local' ? '›' : '',
+      toggleModel: () => this.setState(x => ({ modelOpen: !x.modelOpen })),
+      pickOpus: () => this.setState({ model: 'claude-opus-4.5', modelOpen: false }),
+      pickSonnet: () => this.setState({ model: 'claude-sonnet-4.5', modelOpen: false }),
+      pickGpt: () => this.setState({ model: 'gpt-4o', modelOpen: false }),
+      pickLlama: () => this.setState({ model: 'llama-3.3-local', modelOpen: false }),
+      toggleSources: () => this.setState(x => ({ sourcesOpen: !x.sourcesOpen })),
+      toggleTheme: () => this.setState(x => ({ theme: x.theme === 'dark' ? 'light' : 'dark' })),
+      toggleInbox: () => this.setState(x => ({ inboxFull: !x.inboxFull })),
+      rpIsDocs: s.rightPane === 'docs', rpIsPlan: s.rightPane === 'plan', rpIsScope: s.rightPane === 'scope',
+      rDocBar: s.rightPane === 'docs' ? 'var(--brand)' : 'transparent', rDocFg: s.rightPane === 'docs' ? 'var(--ink)' : 'var(--ink3)',
+      rPlanBar: s.rightPane === 'plan' ? 'var(--brand)' : 'transparent', rPlanFg: s.rightPane === 'plan' ? 'var(--ink)' : 'var(--ink3)',
+      rScopeBar: s.rightPane === 'scope' ? 'var(--brand)' : 'transparent', rScopeFg: s.rightPane === 'scope' ? 'var(--ink)' : 'var(--ink3)',
+      rpDocs: () => this.setState({ rightPane: 'docs' }),
+      rpPlan: () => this.setState({ rightPane: 'plan' }),
+      rpScope: () => this.setState({ rightPane: 'scope' }),
+      activityOpen: s.activityOpen,
+      activityHeight: s.activityOpen ? '186px' : '26px',
+      activityChevron: s.activityOpen ? '▾' : '▴',
+      toggleActivity: () => this.setState(x => ({ activityOpen: !x.activityOpen })),
+      goChat: () => this.setState({ page: 'chat' }), goOverview: () => this.setState({ page: 'overview' }), goDocs: () => this.setState({ page: 'documents' })
+    };
+    [0, 1, 2, 3].forEach(i => {
+      const r = this.row(s.project === i);
+      v['p' + i + 'bg'] = r.bg; v['p' + i + 'bar'] = r.bar; v['p' + i + 'fg'] = r.fg;
+      v['p' + i] = () => this.setState({ project: i });
+      const c = this.row(s.chat === i);
+      v['c' + i + 'bg'] = c.bg; v['c' + i + 'bar'] = c.bar; v['c' + i + 'fg'] = c.fg;
+      v['c' + i] = () => this.setState({ chat: i, page: 'chat' });
+    });
+    [0, 1, 2].forEach(i => {
+      const r = this.row(s.doc === i);
+      v['d' + i + 'bg'] = r.bg; v['d' + i + 'bar'] = r.bar;
+      v['d' + i] = () => this.setState({ doc: i });
+    });
+    return v;
+  }
+}
+</script>
+</body>
+</html>

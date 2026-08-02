@@ -1,0 +1,72 @@
+/*
+ * Agnostic Chat — design tokens (Direction B: terminal / developer).
+ * Extracted verbatim from the interactive prototype:
+ *   Interactive design system demo/Agnostic Chat - Direction B.dc.html
+ * Dark is the default; light is opt-in via data-b-theme="light" on <html>.
+ * Font note: the prototype loads IBM Plex Mono from Google Fonts; the app is
+ * offline/CSP-locked, so --mono falls back to the system mono stack. Bundle
+ * IBM Plex Mono locally later to match exactly.
+ */
+
+:root {
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  --mono: 'IBM Plex Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+
+  /* Dark (default) */
+  --wall: #0e0f11;
+  --chrome: #141517;
+  --side: #161719;
+  --content: #1a1b1e;
+  --panel: #1e1f23;
+  --card: #1e1f23;
+  --raise: #25262b;
+
+  --ink: #eceef1;
+  --ink2: #9ba1a9;
+  --ink3: #6b7178;
+
+  --line: #26282c;
+  --line2: #1f2124;
+  --hov: #232529;
+  --sel: #2a2c31;
+
+  --brand: #e04452;
+  --brand-deep: #b3242e;
+  --brand-soft: rgba(224, 68, 82, 0.14);
+  --green: #3ec97a;
+  --blue: #5b9bd8;
+
+  /* Fixed layout metrics (Direction B) */
+  --h-titlebar: 38px;
+  --h-tabbar: 34px;
+  --w-sidebar: 208px;
+  --w-rail: 276px;
+}
+
+:root[data-b-theme="light"] {
+  --wall: #e8e6e1;
+  --chrome: #f2f0ec;
+  --side: #efedE8;
+  --content: #faf9f6;
+  --panel: #f4f2ee;
+  --card: #ffffff;
+  --raise: #ffffff;
+
+  --ink: #1f2428;
+  --ink2: #5a5f64;
+  --ink3: #8a857c;
+
+  --line: #e0dcd4;
+  --line2: #eae7e0;
+  --hov: #eeece6;
+  --sel: #e6e3db;
+
+  --brand: #b3242e;
+  --brand-deep: #8f1c24;
+  --brand-soft: #f8e8eb;
+  --green: #2e9e5b;
+  --blue: #2f73b7;
+}
+
+@keyframes b-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes ac-fade { from { opacity: 0; } to { opacity: 1; } }
