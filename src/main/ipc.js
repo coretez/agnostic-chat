@@ -26,7 +26,7 @@ function classifyContributor(m) {
   return null; // history/current decided by position
 }
 
-function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelect }) {
+function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelect, toolScope }) {
   const buckets = { system: 0, skills: 0, summary: 0, history: 0, current: 0, tools: 0 };
   const nonSystem = convo.filter((m) => m.role !== 'system');
   const lastNonSystem = nonSystem[nonSystem.length - 1];
@@ -48,6 +48,9 @@ function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelec
   const events = [];
   if (skillSelect && !skillSelect.inlined) {
     events.push({ type: 'skill-select', available: skillSelect.available, selected: (skillSelect.selected || []).length, saved: skillSelect.savedTokens || 0, error: skillSelect.error });
+  }
+  if (toolScope) {
+    events.push({ type: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills });
   }
   if (compressed) {
     const after = estimateTokens(convo);
@@ -99,6 +102,79 @@ function parseSkillsPayload(text) {
   return out.filter((s) => s.name && (s.definition || s.description));
 }
 
+// Minimal frontmatter reader — just enough of YAML for Fluency's SKILL.md
+// shape (plain scalars, `>-`/`>`/`|-`/`|` block scalars, and `key:\n  - a`
+// lists). Nested maps (e.g. `posted:`) are intentionally not parsed: their
+// indented lines simply fail the top-level key regex and get skipped.
+function parseFrontmatter(md) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md || '');
+  if (!m) return { meta: {}, body: md || '' };
+  const lines = m[1].split(/\r?\n/);
+  const meta = {};
+  for (let i = 0; i < lines.length; i++) {
+    const kv = /^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/.exec(lines[i]);
+    if (!kv) continue;
+    const key = kv[1];
+    const rest = kv[2];
+    if (rest === '>-' || rest === '>' || rest === '|-' || rest === '|') {
+      const folded = rest[0] === '>';
+      const block = [];
+      let j = i + 1;
+      while (j < lines.length && /^\s+\S/.test(lines[j])) { block.push(lines[j].replace(/^\s{2}/, '')); j++; }
+      meta[key] = folded ? block.join(' ').trim() : block.join('\n').trim();
+      i = j - 1;
+    } else if (rest === '') {
+      const items = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const li = /^\s*-\s+(.*)$/.exec(lines[j]);
+        if (!li) break;
+        items.push(li[1].trim());
+        j++;
+      }
+      if (items.length) { meta[key] = items; i = j - 1; }
+    } else {
+      meta[key] = rest.trim().replace(/^["']|["']$/g, '');
+    }
+  }
+  return { meta, body: m[2] };
+}
+
+// Fluency's real skills_update shape (what parseSkillsPayload above doesn't
+// understand): { items: [{ name, files: [{ path: 'SKILL.md', content }] }] }.
+// content is a SKILL.md with YAML frontmatter — description and mcp_functions
+// live there. Extracting mcp_functions here is what makes dynamic tool binding
+// (skills.tools_json) populate automatically on import instead of requiring
+// per-skill manual authoring. toolPrefix is the same `<server>__` namespace
+// buildToolset() uses, so the produced names match real tool names exactly.
+function parseFluencySkillItems(text, toolPrefix) {
+  let data; try { data = JSON.parse(text); } catch { return []; }
+  const items = data && Array.isArray(data.items) ? data.items : null;
+  if (!items) return [];
+  const out = [];
+  for (const item of items) {
+    const files = Array.isArray(item.files) ? item.files : [];
+    const file = files.find((f) => /SKILL\.md$/i.test(f.path || '')) || files[0];
+    if (!file || typeof file.content !== 'string') continue;
+    const { meta } = parseFrontmatter(file.content);
+    const name = item.name || meta.name;
+    if (!name) continue;
+    const fns = Array.isArray(meta.mcp_functions) ? meta.mcp_functions : [];
+    const entry = {
+      name,
+      description: meta.description || null,
+      definition: file.content // full SKILL.md (frontmatter + body) — self-documenting
+    };
+    // Omit `tools` entirely (leave undefined) when this skill's frontmatter
+    // doesn't declare mcp_functions — upsertByName treats undefined as "no
+    // signal, don't touch," so a skill with no declared functions doesn't
+    // silently wipe a tool scope someone configured by hand in the UI.
+    if (fns.length && toolPrefix) entry.tools = fns.map((fn) => `${toolPrefix}__${fn}`);
+    out.push(entry);
+  }
+  return out;
+}
+
 // Parse version_check output into a list of skill names.
 // Fluency shape: { skills: { skills_root, count, items: [{name, version, ...}], missing_version } }
 function parseSkillNames(text) {
@@ -140,6 +216,7 @@ function registerIpc() {
   });
   ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
   ipcMain.handle('projects:setPreferredModel', (_e, { id, model }) => repo.projects.setPreferredModel(id, model));
+  ipcMain.handle('projects:setCheatSheet', (_e, { id, text }) => repo.projects.setCheatSheet(id, text));
 
   // Agents (authored per-project sub-agent definitions)
   ipcMain.handle('agents:list', (_e, { projectId }) => repo.agents.listByProject(projectId));
@@ -204,6 +281,11 @@ function registerIpc() {
     const vc = pick('__version_check');
     const su = pick('__skills_update');
     if (!su) return { ok: false, error: 'That MCP server does not expose a skills_update tool (or it is not connected — sign in first).' };
+    // Same `<server>__` namespace buildToolset() uses — needed so mcp_functions
+    // parsed out of each skill's frontmatter become real, matchable tool names.
+    const suServerId = (ts.routes.get(su.name) || {}).serverId;
+    const suServer = suServerId ? repo.mcp.get(suServerId) : null;
+    const toolPrefix = suServer ? mcpManager.sanitize(suServer.name) : null;
 
     // 1) Get the list of available skills (small) via version_check.
     emit({ phase: 'list' });
@@ -226,9 +308,10 @@ function registerIpc() {
         try {
           const r = await mcpManager.callTool(su.name, { skill_names: [name], client: 'claude' }, ts.routes);
           if (i === 0) console.log('[skills import] per-skill skills_update sample (first 500):', (r.text || '').slice(0, 500));
-          const parsed = parseSkillsPayload(r.text);
-          for (const s of parsed) { const nm = s.name || name; repo.skills.upsertByName({ ...s, name: nm }); if (!installed.includes(nm)) installed.push(nm); }
-          if (!parsed.length) installed.push(name), repo.skills.upsertByName({ name, definition: r.text });
+          const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
+          const use = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
+          for (const s of use) { const nm = s.name || name; repo.skills.upsertByName({ ...s, name: nm }); if (!installed.includes(nm)) installed.push(nm); }
+          if (!use.length) installed.push(name), repo.skills.upsertByName({ name, definition: r.text });
         } catch (e) { console.error('[skills import] fetch', name, e && e.message); emit({ phase: 'error', name, error: e.message }); }
       }
     } else {
@@ -237,7 +320,8 @@ function registerIpc() {
       try {
         const r = await mcpManager.callTool(su.name, { client: 'claude' }, ts.routes);
         console.log('[skills import] bulk skills_update (first 500):', (r.text || '').slice(0, 500));
-        const parsed = parseSkillsPayload(r.text);
+        const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
+        const parsed = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
         for (let i = 0; i < parsed.length; i++) { const s = parsed[i]; if (!s.name) continue; emit({ phase: 'install', name: s.name, done: i, total: parsed.length }); repo.skills.upsertByName(s); installed.push(s.name); }
       } catch (e) { return { ok: false, error: e.message }; }
     }
@@ -360,6 +444,7 @@ function registerIpc() {
       let base = messages;
       const projectId = payload?.projectId;
       let skillSelect = null;
+      let loadedSkills = []; // skills actually in scope this turn — drives tool binding below, too
       if (projectId) {
         try {
           const es = repo.skills.listEnabledForProject(projectId);
@@ -391,6 +476,7 @@ function registerIpc() {
             if (skillSelect && !skillSelect.inlined) {
               emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
             }
+            loadedSkills = toLoad;
           }
         } catch (e) { console.error('[skills inject]', e && e.message); }
       }
@@ -414,6 +500,37 @@ function registerIpc() {
       let toolset = { tools: [], routes: new Map() };
       try { toolset = await mcpManager.buildToolset(); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
 
+      // Dynamic tool binding: a skill loaded for this turn (selected or inlined,
+      // see loadedSkills above) can declare the exact MCP tools it needs
+      // (skills.tools_json — same shape/UI as agents' tool scoping). If every
+      // loaded skill declares a scope, the model only sees the union of those
+      // tools instead of the full connected catalog — this is what actually
+      // fixes tool-schema bloat (skill selection alone only trims the *skill
+      // prompt text*, not the tool list). If any loaded skill is unscoped
+      // (tools: null, meaning "may need anything"), or nothing was loaded,
+      // we don't narrow — an unconfigured skill must not silently lose tools.
+      const scopedSkills = loadedSkills.filter((s) => Array.isArray(s.tools) && s.tools.length);
+      const hasUnscopedLoaded = loadedSkills.some((s) => !Array.isArray(s.tools) || !s.tools.length);
+      let scopedTools = toolset.tools;
+      let toolScope = null;
+      if (scopedSkills.length && !hasUnscopedLoaded) {
+        const allowed = new Set(scopedSkills.flatMap((s) => s.tools));
+        const narrowed = toolset.tools.filter((t) => allowed.has(t.name));
+        // A skill's declared tool names are free text (typo, stale rename, wrong
+        // server prefix) — if NONE of them match anything actually connected,
+        // narrowing would silently leave the model with zero real tools
+        // (just delegate/assign) and no indication why. Treat a total miss as
+        // misconfiguration, not "this skill needs nothing": fall back to the
+        // full toolset, same safe-default philosophy as skill-select's error path.
+        if (narrowed.length) {
+          scopedTools = narrowed;
+          toolScope = { totalAvailable: toolset.tools.length, scoped: scopedTools.length, bySkills: scopedSkills.map((s) => s.name) };
+          emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills });
+        } else {
+          console.error('[tool-scope] declared tool names matched nothing connected — ignoring scope for:', scopedSkills.map((s) => s.name).join(', '));
+        }
+      }
+
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
       // tools only (no `delegate`) so the tree stays one level deep.
       const rawCallTool = (name, args) => mcpManager.callTool(name, args, toolset.routes);
@@ -426,7 +543,7 @@ function registerIpc() {
         : '';
       const delegateTool = { ...DELEGATE_TOOL, description: DELEGATE_TOOL.description + roster };
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
-      const orchestratorTools = [delegateTool, assignTool, ...toolset.tools];
+      const orchestratorTools = [delegateTool, assignTool, ...scopedTools];
 
       // Resolve a delegate target (authored agent by name, else the general one)
       // into the concrete {agent, model, tools} a sub-agent run needs.
@@ -439,7 +556,7 @@ function registerIpc() {
           : DEFAULT_AGENT;
         const subTools = (authored && authored.tools && authored.tools.length)
           ? toolset.tools.filter((t) => authored.tools.includes(t.name))
-          : toolset.tools;
+          : scopedTools;
         return { agent, model: (authored && authored.model) || chosenModel, tools: subTools };
       };
       const runOne = async (wanted, task) => {
@@ -476,7 +593,7 @@ function registerIpc() {
       // what is occupying the window this turn (occupancy, compaction, prompt).
       try {
         const tokensBefore = estimateTokens(base);
-        _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect }));
+        _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }));
       } catch (e) { console.error('[internals ledger]', e && e.message); }
 
       let result;

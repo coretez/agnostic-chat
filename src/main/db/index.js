@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 10;
 
 let db = null;
 
@@ -136,6 +136,21 @@ function migrate(database) {
       CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);
       CREATE INDEX IF NOT EXISTS idx_turn_metrics_chat ON turn_metrics(chat_id);
     `);
+  }
+
+  // v9: skills.tools_json — optional MCP tool scoping per skill (dynamic tool
+  // binding: only offer the model tools a selected skill actually declares).
+  if (current < 9) {
+    const cols = database.prepare('PRAGMA table_info(skills)').all().map((c) => c.name);
+    if (!cols.includes('tools_json')) database.exec('ALTER TABLE skills ADD COLUMN tools_json TEXT');
+  }
+
+  // v10: projects.cheat_sheet — a short, persistent objectives/rules/mode-of-
+  // operation brief the (future) planner stage reads for project orientation,
+  // separate from skills (candidate capabilities) and history (past turns).
+  if (current < 10) {
+    const cols = database.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+    if (!cols.includes('cheat_sheet')) database.exec('ALTER TABLE projects ADD COLUMN cheat_sheet TEXT');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.
