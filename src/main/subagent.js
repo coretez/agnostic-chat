@@ -38,6 +38,7 @@ const DEFAULT_AGENT = {
 async function runSubagent({ connector, model, fastModel, agent, task, tools = [], callTool, onEvent }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const a = agent || DEFAULT_AGENT;
+  const t0 = Date.now();
   const started = { agent: a.name, task };
   emit({ type: 'process', kind: 'subagent-start', ...started });
 
@@ -80,14 +81,15 @@ async function runSubagent({ connector, model, fastModel, agent, task, tools = [
   const conclusionTokens = estimateTokens([{ content: conclusion }]);
   // Rough tally of what the sub-agent absorbed that the parent DIDN'T have to.
   const inputTokens = (result.toolTrace || []).reduce((n, t) => n + Math.ceil((t.resultChars || 0) / 4), 0);
+  const durationMs = Date.now() - t0;
 
   emit({
     type: 'process', kind: 'subagent-done', agent: a.name,
     conclusionTokens, inputTokens, iterations: result.iterations,
-    tools: (result.toolTrace || []).length
+    tools: (result.toolTrace || []).length, durationMs
   });
 
-  return { conclusion, conclusionTokens, inputTokens, toolTrace: result.toolTrace, iterations: result.iterations };
+  return { conclusion, conclusionTokens, inputTokens, toolTrace: result.toolTrace, iterations: result.iterations, durationMs };
 }
 
 /**

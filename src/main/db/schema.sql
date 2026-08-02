@@ -120,10 +120,28 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   compaction_saved_tokens  INTEGER,
   delegated                INTEGER,                     -- # sub-agents this turn
   delegate_absorbed_tokens INTEGER,                     -- tokens sub-agents kept out of main
+  duration_ms              INTEGER,                     -- wall-clock for the whole turn
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);
 CREATE INDEX IF NOT EXISTS idx_turn_metrics_chat ON turn_metrics(chat_id);
+
+-- ── Task metrics: per-task duration + tokens (tool calls, sub-agents, …) ─────
+-- Finer than turn_metrics: "how long does the monthly-report task take, and how
+-- many tokens does it use" — aggregatable over time.
+CREATE TABLE IF NOT EXISTS task_metrics (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  chat_id     INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,     -- 'tool' | 'subagent' | 'select' | 'merge' | 'eval'
+  label       TEXT,              -- tool/agent name or task description
+  tokens      INTEGER,           -- tokens attributed to this task
+  duration_ms INTEGER,
+  ok          INTEGER,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_metrics_chat ON task_metrics(chat_id);
+CREATE INDEX IF NOT EXISTS idx_task_metrics_kind ON task_metrics(kind, label);
 
 -- ── Credentials: API keys / tokens, ENCRYPTED at rest ──────────────────────
 -- secret_ciphertext holds safeStorage-encrypted bytes; plaintext never touches disk.

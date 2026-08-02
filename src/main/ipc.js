@@ -353,6 +353,8 @@ function registerIpc() {
       const chosenModel = model || provider.default_model;
       const fastModel = provider.fast_model || chosenModel;
       const emitProgress = (ev) => { try { _e.sender.send('chat:progress', ev); } catch {} };
+      const turnStart = Date.now();
+      const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
 
       // Skills: enabled = candidate. Always show a cheap MENU; load full definitions
       // only for the skills a selection ACTION picks for this prompt. Small libraries
@@ -452,6 +454,7 @@ function registerIpc() {
         if (name === 'delegate') {
           const r = await runOne(args && args.agent, args && args.task);
           delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
+          taskLog.push({ kind: 'subagent', label: (args && args.agent && args.agent !== 'auto') ? args.agent : 'general', tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
           return { text: r.conclusion || '(sub-agent returned no conclusion)' };
         }
         if (name === 'assign') {
@@ -461,6 +464,7 @@ function registerIpc() {
           const results = await Promise.all(tasks.map(async (t) => {
             const r = await runOne(t.agent, t.task);
             delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
+            taskLog.push({ kind: 'subagent', label: (t.agent && t.agent !== 'auto') ? t.agent : String(t.task || '').slice(0, 60), tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
             return { agent: (resolveDelegate(t.agent).agent.name), task: t.task, conclusion: r.conclusion || '' };
           }));
           if (args && args.merge) {
@@ -526,10 +530,18 @@ function registerIpc() {
           skillsUsed: skillSelect ? (skillSelect.selected || []) : [],
           filterSavedTokens: Math.round(filterSaved),
           compactionSavedTokens: compactionSaved,
-          delegated: delegatedCount, delegateAbsorbedTokens: delegateAbsorbed
+          delegated: delegatedCount, delegateAbsorbedTokens: delegateAbsorbed,
+          durationMs: Date.now() - turnStart
         };
         repo.metrics.record(metricRow);
-        _e.sender.send('chat:progress', { type: 'metrics', ...metricRow });
+        // Per-task rows: sub-agents (collected during the loop) + each tool call.
+        for (const t of (result.toolTrace || [])) {
+          taskLog.push({ kind: 'tool', label: t.name, tokens: Math.ceil((t.filteredChars != null ? t.filteredChars : t.resultChars || 0) / 4), durationMs: t.durationMs, ok: t.ok !== false });
+        }
+        try { repo.metrics.recordTasks(taskLog.map((t) => ({ ...t, projectId: projectId || null, chatId: payload?.chatId || null }))); } catch (e) { console.error('[task metrics]', e && e.message); }
+        const cachePct = metricRow.inputTokens ? Math.round((metricRow.cachedTokens / metricRow.inputTokens) * 100) : 0;
+        console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length }));
+        _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
       return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null };

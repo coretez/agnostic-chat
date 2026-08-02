@@ -526,6 +526,7 @@ const CONTRIB = {
   tools:   { label: 'tools',   color: '#7a5cc0' }
 };
 function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
+function fmtDur(ms) { if (ms == null) return ''; return ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : Math.round(ms) + 'ms'; }
 
 function captureInternals(ev) {
   if (!state.currentChatId) return;
@@ -552,6 +553,7 @@ function captureProcess(ev) {
       cur.conclusionTokens = ev.conclusionTokens || 0;
       cur.inputTokens = ev.inputTokens || 0;
       cur.tools = ev.tools != null ? ev.tools : cur.tools;
+      cur.durationMs = ev.durationMs;
     }
   }
   if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
@@ -569,7 +571,7 @@ function captureInternalsToolEnd(ev) {
   rec.toolTurns = rec.toolTurns || [];
   const raw = Math.ceil((ev.resultChars || 0) / 4);
   const tok = Math.ceil((ev.filteredChars != null ? ev.filteredChars : ev.resultChars || 0) / 4); // what enters context
-  rec.toolTurns.push({ name: ev.name, resultTokens: tok, rawTokens: raw, saved: Math.max(0, raw - tok), rules: ev.rules || [], truncated: !!ev.truncated, isError: ev.ok === false });
+  rec.toolTurns.push({ name: ev.name, resultTokens: tok, rawTokens: raw, saved: Math.max(0, raw - tok), rules: ev.rules || [], truncated: !!ev.truncated, isError: ev.ok === false, durationMs: ev.durationMs });
   if (rec.ledger) {
     rec.ledger.total += tok;
     const tb = rec.ledger.contributors.find((c) => c.key === 'tools');
@@ -598,6 +600,7 @@ function renderMeasured(rec) {
   const cachePct = inTok ? Math.round((cached / inTok) * 100) : 0;
   const reductions = (m.skillSavedTokens || 0) + (m.filterSavedTokens || 0) + (m.compactionSavedTokens || 0) + (m.delegateAbsorbedTokens || 0);
 
+  item('turn time', m.durationMs != null ? fmtDur(m.durationMs) : '—');
   item('input tokens', m.measured ? fmtTok(inTok) : '—');
   item('output tokens', m.measured ? fmtTok(outTok) : '—');
   item('cache read', m.measured ? `${fmtTok(cached)} <small>${cachePct}%</small>` : '—', cachePct >= 60 ? 'good' : (cachePct === 0 ? 'warn' : ''));
@@ -691,7 +694,8 @@ function renderInternals() {
   addEvt('⚙', `${L.toolCount || 0} tools offered to the model`, '', false, true);
   for (const t of (rec.toolTurns || [])) {
     const delta = t.saved ? ` · filtered −${fmtTok(t.saved)}` : '';
-    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (elided)' : ''}`, `${fmtTok(t.resultTokens)} tok${delta}`, t.saved > 0);
+    const dur = t.durationMs != null ? ` · ${fmtDur(t.durationMs)}` : '';
+    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (elided)' : ''}`, `${fmtTok(t.resultTokens)} tok${delta}${dur}`, t.saved > 0);
   }
 
   // Assembled prompt viewer.
@@ -778,6 +782,7 @@ function renderProcess(rec) {
       + `<span>absorbed <b>${fmtTok(s.inputTokens || 0)}</b> tok</span>`
       + `<span>returned <b>${fmtTok(s.conclusionTokens || 0)}</b> tok</span>`
       + `<span><b>${s.tools || 0}</b> tool${s.tools === 1 ? '' : 's'}</span>`
+      + (s.durationMs != null ? `<span><b>${fmtDur(s.durationMs)}</b></span>` : '')
       + (saved ? `<span class="thread__win">kept ${fmtTok(saved)} out of main</span>` : '')
       + `</div>`;
     el.intThreads.appendChild(card);

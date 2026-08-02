@@ -64,14 +64,15 @@ const metrics = {
       `INSERT INTO turn_metrics
         (project_id, chat_id, model, measured, input_tokens, output_tokens, cached_tokens, cache_creation_tokens,
          est_input_tokens, window, skills_available, skills_loaded, skill_saved_tokens, skills_used,
-         filter_saved_tokens, compaction_saved_tokens, delegated, delegate_absorbed_tokens)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         filter_saved_tokens, compaction_saved_tokens, delegated, delegate_absorbed_tokens, duration_ms)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       m.projectId ?? null, m.chatId ?? null, m.model ?? null, m.measured ? 1 : 0,
       m.inputTokens ?? null, m.outputTokens ?? null, m.cachedTokens ?? null, m.cacheCreationTokens ?? null,
       m.estInputTokens ?? null, m.window ?? null, m.skillsAvailable ?? null, m.skillsLoaded ?? null,
       m.skillSavedTokens ?? null, m.skillsUsed ? JSON.stringify(m.skillsUsed) : null,
-      m.filterSavedTokens ?? null, m.compactionSavedTokens ?? null, m.delegated ?? null, m.delegateAbsorbedTokens ?? null
+      m.filterSavedTokens ?? null, m.compactionSavedTokens ?? null, m.delegated ?? null, m.delegateAbsorbedTokens ?? null,
+      m.durationMs ?? null
     );
     return info.lastInsertRowid;
   },
@@ -80,6 +81,22 @@ const metrics = {
   },
   listByProject(projectId, limit = 500) {
     return getDb().prepare('SELECT * FROM turn_metrics WHERE project_id = ? ORDER BY id DESC LIMIT ?').all(projectId, limit);
+  },
+  /** Per-task rows (tool calls, sub-agents, …) for one turn. */
+  recordTasks(tasks = []) {
+    if (!tasks.length) return;
+    const stmt = getDb().prepare('INSERT INTO task_metrics (project_id, chat_id, kind, label, tokens, duration_ms, ok) VALUES (?,?,?,?,?,?,?)');
+    for (const t of tasks) stmt.run(t.projectId ?? null, t.chatId ?? null, t.kind, t.label ?? null, t.tokens ?? null, t.durationMs ?? null, t.ok === false ? 0 : 1);
+  },
+  tasksByChat(chatId, limit = 500) {
+    return getDb().prepare('SELECT * FROM task_metrics WHERE chat_id = ? ORDER BY id DESC LIMIT ?').all(chatId, limit);
+  },
+  taskSummary(projectId, limit = 50) {
+    // avg duration + tokens per (kind, label) — "how long does task X take"
+    return getDb().prepare(
+      `SELECT kind, label, COUNT(*) runs, ROUND(AVG(duration_ms)) avg_ms, ROUND(AVG(tokens)) avg_tokens
+       FROM task_metrics WHERE project_id = ? GROUP BY kind, label ORDER BY runs DESC LIMIT ?`
+    ).all(projectId, limit);
   }
 };
 

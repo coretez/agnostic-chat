@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 let db = null;
 
@@ -135,6 +135,23 @@ function migrate(database) {
       );
       CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);
       CREATE INDEX IF NOT EXISTS idx_turn_metrics_chat ON turn_metrics(chat_id);
+    `);
+  }
+
+  // v9: task-level timing/tokens + turn duration.
+  if (current < 9) {
+    const cols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
+    if (!cols.includes('duration_ms')) database.exec('ALTER TABLE turn_metrics ADD COLUMN duration_ms INTEGER');
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS task_metrics (
+        id INTEGER PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+        chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL, label TEXT, tokens INTEGER, duration_ms INTEGER, ok INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_metrics_chat ON task_metrics(chat_id);
+      CREATE INDEX IF NOT EXISTS idx_task_metrics_kind ON task_metrics(kind, label);
     `);
   }
 

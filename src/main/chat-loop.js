@@ -45,18 +45,20 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
     history.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
     for (const call of calls) {
       emit({ type: 'tool-start', name: call.name });
+      const t0 = Date.now();
       let out;
       try { out = await callTool(call.name, call.args); }
       catch (e) { out = { text: `ERROR: ${e.message}`, isError: true }; }
+      const durationMs = Date.now() - t0;
       // Noise filter: strip low-signal bulk before the result re-enters context
       // (RTK-inspired). middle-elide is the backstop for anything still huge.
       const rawLen = (out.text || '').length;
       const filt = filterToolResult(call.name, out.text || '', { cap: 24000 });
       const content = filt.text;
       const truncated = filt.rules.includes('middle-elide');
-      emit({ type: 'tool-end', name: call.name, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated });
+      emit({ type: 'tool-end', name: call.name, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated, durationMs });
       history.push({ role: 'tool', toolCallId: call.id, name: call.name, content });
-      toolTrace.push({ name: call.name, args: call.args, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated });
+      toolTrace.push({ name: call.name, args: call.args, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated, durationMs });
     }
   }
 

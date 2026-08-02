@@ -217,6 +217,19 @@ app.whenReady().then(async () => {
   const mrows = repo.metrics.listByChat(chat.id);
   assert(mrows.length >= 1 && mrows[mrows.length - 1].cached_tokens === 1900 && mrows[mrows.length - 1].measured === 1, 'turn_metrics reads back real usage');
 
+  // Task-level timing/tokens: chat loop times tool calls; sub-agents report duration
+  assert(typeof floop.toolTrace[0].durationMs === 'number', 'chat loop records per-tool duration');
+  const durSub = await runSubagent({ connector: { chat: async () => ({ text: 'C', toolCalls: [] }) }, model: 'm', fastModel: 'm', task: 'x', tools: [], callTool: async () => ({ text: 'r' }), onEvent: () => {} });
+  assert(typeof durSub.durationMs === 'number', 'sub-agent reports its duration');
+  repo.metrics.recordTasks([
+    { projectId: projA.id, chatId: chat.id, kind: 'tool', label: 'fluency__run_report', tokens: 6000, durationMs: 1200, ok: true },
+    { projectId: projA.id, chatId: chat.id, kind: 'subagent', label: 'report-reader', tokens: 74000, durationMs: 4300, ok: true }
+  ]);
+  const trows = repo.metrics.tasksByChat(chat.id);
+  assert(trows.length === 2 && trows.some((t) => t.kind === 'tool' && t.duration_ms === 1200), 'task_metrics records per-task duration + tokens');
+  const tsum = repo.metrics.taskSummary(projA.id);
+  assert(tsum.some((s) => s.label === 'report-reader' && s.avg_ms === 4300), 'task summary aggregates avg duration per task');
+
   // Authored agents: per-project CRUD + name/tool resolution
   const ag = repo.agents.create({ projectId: projA.id, name: 'report-reader', description: 'pulls + distills reports', systemPrompt: 'Read the report and return 3 findings.', tools: ['fluency__run_report'] });
   assert(ag.id && Array.isArray(ag.tools) && ag.tools[0] === 'fluency__run_report', 'agent created with tool allowlist parsed');
