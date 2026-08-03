@@ -1236,6 +1236,22 @@ async function submit() {
   planReset();
   let streamed = '';
   const nearBottom = () => el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
+  // Mid-turn "tool-call limit reached" prompt: let the user grant more steps.
+  function showLimitPrompt(iterations) {
+    status.textContent = '';
+    const prompt = document.createElement('div');
+    prompt.className = 'limitprompt';
+    prompt.innerHTML = `<span class="limitprompt__msg">Reached ${iterations} tool steps without finishing — keep going?</span>`;
+    const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'CONTINUE +10';
+    const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
+    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
+    cont.onclick = () => answer(10);
+    stop.onclick = () => answer(0);
+    prompt.appendChild(cont); prompt.appendChild(stop);
+    body.appendChild(prompt);
+    el.messages.scrollTop = el.messages.scrollHeight;
+  }
+
   const unsub = window.api.onChatProgress((ev) => {
     if (ev.type === 'token') {
       streamed += ev.text;
@@ -1244,6 +1260,7 @@ async function submit() {
       if (stick) el.messages.scrollTop = el.messages.scrollHeight;
     } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
+    else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'internals') { captureInternals(ev); }
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
     else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }

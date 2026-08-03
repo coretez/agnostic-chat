@@ -16,7 +16,7 @@ const { filterToolResult } = require('./filter');
  * @param {number}  [o.maxIters=6]
  * @returns {Promise<{reply:string, toolTrace:Array, iterations:number}>}
  */
-async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 6, onEvent }) {
+async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const history = [...messages];
   const toolTrace = [];
@@ -31,7 +31,19 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
     usage.cacheCreationTokens += u.cacheCreationTokens || 0;
   };
 
-  for (let i = 0; i < maxIters; i++) {
+  let limit = maxIters;
+  let i = 0;
+  for (;;) {
+    // Hit the current tool-call budget. If a handler is wired (the interactive
+    // chat), ask whether to keep going with a fresh budget; otherwise fall
+    // through to the forced wrap-up below. Sub-agents pass no onLimit, so they
+    // simply cap-and-summarize without prompting anyone.
+    if (i >= limit) {
+      let more = 0;
+      if (typeof onLimit === 'function') { try { more = Number(await onLimit({ iterations: i })) || 0; } catch { more = 0; } }
+      if (more > 0) { limit += more; } else { break; }
+    }
+    i++;
     emit({ type: 'model', model });
     const res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
     addUsage(res.usage);
@@ -39,7 +51,7 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
 
     if (calls.length === 0) {
       emit({ type: 'done' });
-      return { reply: res.text || '', toolTrace, iterations: i + 1, usage };
+      return { reply: res.text || '', toolTrace, iterations: i, usage };
     }
 
     history.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
@@ -62,8 +74,26 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
     }
   }
 
+  // Ran out of tool-call iterations without a final answer. Rather than leave the
+  // user with a dangling preamble ("Let me investigate…" and nothing more), force
+  // ONE last tool-less call so the model must write a conclusion from what it has
+  // already gathered. This guarantees every turn ends with a real answer.
+  emit({ type: 'model', model });
+  let wrap;
+  try {
+    wrap = await chat({
+      model,
+      messages: [...history, { role: 'user', content: 'You have reached the tool-call limit — do NOT call any more tools. Using everything you have already gathered above, write your complete final answer now.' }],
+      tools: [],
+      onDelta: (d) => emit({ type: 'token', text: d.text })
+    });
+    addUsage(wrap.usage);
+  } catch (e) { wrap = { text: '' }; }
   emit({ type: 'done' });
-  return { reply: '(stopped after reaching the tool-call limit)', toolTrace, iterations: maxIters, usage };
+  return {
+    reply: wrap.text || '(stopped after reaching the tool-call limit before a final answer could be produced)',
+    toolTrace, iterations: i, usage, cappedTurn: true
+  };
 }
 
 module.exports = { runChatLoop };

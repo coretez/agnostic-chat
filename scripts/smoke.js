@@ -118,6 +118,24 @@ app.whenReady().then(async () => {
   assert(loop.toolTrace.length === 1 && loop.toolTrace[0].name === 'echo', 'chat loop recorded one tool call');
   assert(loop.reply === 'final: echo: hi', 'chat loop fed tool result back and produced final answer');
 
+  // A workflow that never stops calling tools must still END with a real answer:
+  // on hitting the iteration cap, force one tool-less wrap-up call.
+  let wstep = 0;
+  const alwaysTool = async ({ tools }) => (!tools || !tools.length)
+    ? { text: 'FINAL SUMMARY', toolCalls: [] }             // the forced wrap-up call
+    : { text: 'working', toolCalls: [{ id: 'w' + (wstep++), name: 'echo', args: {} }] };
+  const capped = await runChatLoop({ chat: alwaysTool, callTool: async () => ({ text: 'r', isError: false }), model: 'm', messages: [{ role: 'user', content: 'q' }], tools: [{ name: 'echo' }], maxIters: 3 });
+  assert(capped.cappedTurn === true && capped.reply === 'FINAL SUMMARY', 'chat loop forces a final answer when the tool-call limit is hit (no dangling preamble)');
+
+  // Interactive continuation: onLimit can grant a fresh budget; when it declines, wrap up.
+  let asks = 0;
+  const onLimit = async () => (asks++ === 0 ? 5 : 0); // grant +5 the first time, stop the second
+  const extended = await runChatLoop({
+    chat: async ({ tools }) => (!tools || !tools.length) ? { text: 'WRAP', toolCalls: [] } : { text: '', toolCalls: [{ id: 't', name: 'echo', args: {} }] },
+    callTool: async () => ({ text: 'r', isError: false }), model: 'm', messages: [{ role: 'user', content: 'q' }], tools: [{ name: 'echo' }], maxIters: 2, onLimit
+  });
+  assert(asks === 2 && extended.iterations === 7 && extended.cappedTurn && extended.reply === 'WRAP', 'chat loop asks to continue, extends the budget (2+5), then wraps up when declined');
+
   // Sub-agent runtime: delegate → runs its own loop (with a tool) → returns a conclusion
   const { runSubagent } = require('../src/main/subagent');
   let sstep = 0;

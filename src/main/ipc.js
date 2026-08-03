@@ -293,7 +293,6 @@ function registerIpc() {
     if (vc) {
       try {
         const r = await mcpManager.callTool(vc.name, { client: 'claude' }, ts.routes);
-        console.log('[skills import] version_check (first 500):', (r.text || '').slice(0, 500));
         names = parseSkillNames(r.text);
       } catch (e) { console.error('[skills import] version_check', e && e.message); }
     }
@@ -307,7 +306,6 @@ function registerIpc() {
         emit({ phase: 'install', name, done: i, total: names.length });
         try {
           const r = await mcpManager.callTool(su.name, { skill_names: [name], client: 'claude' }, ts.routes);
-          if (i === 0) console.log('[skills import] per-skill skills_update sample (first 500):', (r.text || '').slice(0, 500));
           const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
           const use = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
           for (const s of use) { const nm = s.name || name; repo.skills.upsertByName({ ...s, name: nm }); if (!installed.includes(nm)) installed.push(nm); }
@@ -319,7 +317,6 @@ function registerIpc() {
       emit({ phase: 'bulk' });
       try {
         const r = await mcpManager.callTool(su.name, { client: 'claude' }, ts.routes);
-        console.log('[skills import] bulk skills_update (first 500):', (r.text || '').slice(0, 500));
         const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
         const parsed = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
         for (let i = 0; i < parsed.length; i++) { const s = parsed[i]; if (!s.name) continue; emit({ phase: 'install', name: s.name, done: i, total: parsed.length }); repo.skills.upsertByName(s); installed.push(s.name); }
@@ -589,6 +586,20 @@ function registerIpc() {
         _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }));
       } catch (e) { console.error('[internals ledger]', e && e.message); }
 
+      // Interactive continuation: when the loop hits its tool-call budget, ask the
+      // renderer (Continue / Stop). The handler stays open, awaiting the user's
+      // reply on the one-shot `chat:continue` channel; no reply in 3 min → stop.
+      let resolveLimit = null;
+      const limitListener = (_ev, payload) => { if (resolveLimit) resolveLimit(Number(payload && payload.more) || 0); };
+      ipcMain.on('chat:continue', limitListener);
+      const onLimit = ({ iterations }) => new Promise((resolve) => {
+        let done = false;
+        const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); resolve(n); };
+        resolveLimit = finish;
+        const to = setTimeout(() => finish(0), 180000);
+        emitProgress({ type: 'limit', iterations });
+      });
+
       let result;
       try {
         result = await runChatLoop({
@@ -597,11 +608,14 @@ function registerIpc() {
           model: chosenModel,
           messages: convo,
           tools: orchestratorTools,
-          onEvent: emitProgress
+          onEvent: emitProgress,
+          onLimit
         });
       } catch (e) {
         console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
         throw e;
+      } finally {
+        ipcMain.removeListener('chat:continue', limitListener);
       }
 
       // Post-call: report each tool result's size — the raw material for Phase 1

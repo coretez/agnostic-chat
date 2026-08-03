@@ -71,10 +71,6 @@ class McpConnection {
   async listTools() {
     const r = await this._request('tools/list', {});
     if (r.error) throw new Error(r.error.message || 'tools/list failed');
-    try {
-      const withMeta = (r.result.tools || []).filter((t) => t._meta).slice(0, 3).map((t) => ({ name: t.name, _meta: t._meta }));
-      if (withMeta.length) console.log('[mcp diag] tool _meta sample:', JSON.stringify(withMeta).slice(0, 900));
-    } catch {}
     return shapeTools(r.result);
   }
 
@@ -82,12 +78,6 @@ class McpConnection {
     const r = await this._request('tools/call', { name, arguments: args || {} });
     if (r.error) throw new Error(r.error.message || 'tools/call failed');
     const result = r.result || {};
-    try {
-      const types = (Array.isArray(result.content) ? result.content : []).map((c) => c.type);
-      console.log(`[mcp diag] result ${name} contentTypes=${JSON.stringify(types)} hasMeta=${!!result._meta}${result._meta ? ' meta=' + JSON.stringify(result._meta).slice(0, 400) : ''}`);
-      const nonText = (Array.isArray(result.content) ? result.content : []).filter((c) => c.type !== 'text');
-      if (nonText.length) console.log('[mcp diag] non-text content:', JSON.stringify(nonText).slice(0, 600));
-    } catch {}
     return { text: toText(result), isError: !!result.isError, raw: result };
   }
 
