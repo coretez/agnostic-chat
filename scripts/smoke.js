@@ -155,6 +155,20 @@ app.whenReady().then(async () => {
   const selNone = await selectSkills({ connector: { chat: async () => ({ text: '{"skills":[]}' }) }, model: 'm', skills: [{ name: 'docx', description: 'd' }], userText: 'hi' });
   assert(selNone.names.length === 0, 'skill selector can pick none');
 
+  // Tool selection: narrows a large catalog to the relevant handful
+  const { selectTools } = require('../src/main/tool-select');
+  const bigCatalog = Array.from({ length: 34 }, (_, i) => ({ name: `srv__tool_${i}`, description: `does thing ${i}` }));
+  const toolSel = await selectTools({ connector: { chat: async () => ({ text: 'pick: {"tools":["srv__tool_3","srv__tool_9"]}' }) }, model: 'm', tools: bigCatalog, userText: 'do thing 3 and 9' });
+  assert(toolSel.names.length === 2 && toolSel.names.includes('srv__tool_3'), 'tool selector narrows the catalog to chosen tools');
+
+  // Planner: strategizes a request into steps + merge, then executes deterministically
+  const { makePlan, runPlan } = require('../src/main/planner');
+  const plan = await makePlan({ connector: { chat: async () => ({ text: '{"goal":"compare","steps":[{"task":"A","agent":"auto","parallel":true},{"task":"B","agent":"auto","parallel":true}],"merge":"compare A and B"}' }) }, model: 'm', request: 'compare A and B' });
+  assert(plan.steps.length === 2 && plan.steps[0].parallel && plan.merge === 'compare A and B', 'planner produces a structured, parallel plan');
+  const planConn = { chat: async ({ messages }) => { const u = (messages.find((m) => m.role === 'user') || {}).content || ''; return u.startsWith('You are merging') ? { text: 'MERGED' } : { text: 'C:' + u.slice(0, 6), toolCalls: [] }; } };
+  const planRun = await runPlan({ plan, connector: planConn, model: 'm', fastModel: 'm', resolveAgent: () => ({ agent: { name: 'general', system_prompt: 'x' }, model: 'm', tools: [] }), callTool: async () => ({ text: 'r' }), onEvent: () => {} });
+  assert(planRun.results.length === 2 && planRun.answer === 'MERGED', 'planner executes steps and AI-merges the results');
+
   // Orchestration: assign work in PARALLEL + merge the results (the full round-trip)
   const { runSubagent: rsa, mergeResults } = require('../src/main/subagent');
   const proc = [];

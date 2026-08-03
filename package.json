@@ -7,9 +7,38 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "icon": "electron scripts/make-icon.js",
+    "pack": "electron-builder --mac --dir",
+    "dist": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.fluencysecurity.agnosticchat",
+    "productName": "Agnostic Chat",
+    "copyright": "Copyright © 2026 Chris Jordan",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!src/renderer/preview.html"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ],
+      "identity": null
+    },
+    "dmg": {
+      "title": "${productName} ${version}"
+    }
   },
   "devDependencies": {
-    "electron": "^43.2.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   }
 }

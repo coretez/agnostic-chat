@@ -708,7 +708,7 @@ function renderInternals() {
   addEvt('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(L.total)} tok`, false, true);
   for (const e of (L.events || [])) {
     if (e.type === 'skill-select') addEvt('◇', `Selected skills · ${e.available} available → ${e.selected} loaded`, e.saved ? `−${fmtTok(e.saved)}` : '', false);
-    else if (e.type === 'tool-scope') addEvt('✂', `Tool scope · ${e.bySkills.join(', ')} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, `−${e.totalAvailable - e.scoped} tools`, false);
+    else if (e.type === 'tool-scope') { const by = (e.bySkills && e.bySkills.length) ? `skills (${e.bySkills.join(', ')})` : 'request relevance'; addEvt('✂', `Tool scope · ${by} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, `−${e.totalAvailable - e.scoped} tools`, false); }
     else if (e.type === 'compact') addEvt('⚡', `Compacted older history → summary (${fmtTok(e.tokensBefore)} → ${fmtTok(e.tokensAfter)})`, `−${fmtTok(e.saved)}`);
   }
   if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);

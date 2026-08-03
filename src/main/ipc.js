@@ -10,6 +10,7 @@ const { runChatLoop } = require('./chat-loop');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectSkills } = require('./skill-select');
+const { selectTools } = require('./tool-select');
 const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT, estimateTokens } = require('./compress');
 
 // ── Context ledger (INTERNALS tab) ──────────────────────────────────────────
@@ -531,6 +532,29 @@ function registerIpc() {
         } else {
           console.error('[tool-scope] declared tool names matched nothing connected — ignoring scope for:', scopedSkills.map((s) => s.name).join(', '));
         }
+      }
+
+      // Request-relevance tool selection. Runs on WHATEVER the tool set is after
+      // skill-based scoping — the full catalog if no skill scoped it, OR a skill's
+      // declared set, which can itself be huge (a compliance skill may declare
+      // dozens of tools). If it's still large, narrow to the tools THIS request
+      // actually needs. This is what finally kills tool-schema bloat; gating it on
+      // `!toolScope` (the old bug) let a broad skill scope sail through unchecked.
+      if (scopedTools.length > 10 && Math.ceil(JSON.stringify(scopedTools).length / 4) > 4000) {
+        const before = scopedTools.length;
+        try {
+          const sel = await selectTools({ connector, model: fastModel, tools: scopedTools, userText: text });
+          const chosen = new Set((sel.names || []).map((n) => n.toLowerCase()));
+          const narrowed = scopedTools.filter((t) => chosen.has(t.name.toLowerCase()));
+          if (narrowed.length) { // safe: empty/failed selection keeps the current set
+            scopedTools = narrowed;
+            toolScope = { totalAvailable: toolset.tools.length, scoped: narrowed.length, bySkills: toolScope ? toolScope.bySkills : null, bySelection: true };
+            emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySelection: true });
+            console.log('[tool-scope]', JSON.stringify({ from: before, to: narrowed.length, ofCatalog: toolset.tools.length }));
+          } else {
+            console.warn('[tool-scope] selector returned nothing (kept', before, 'tools) —', sel.error || 'empty selection; is the fast model a thinking model?');
+          }
+        } catch (e) { console.error('[tool-select]', e && e.message); }
       }
 
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
