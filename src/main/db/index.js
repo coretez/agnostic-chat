@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 let db = null;
 
@@ -172,6 +172,15 @@ function migrate(database) {
     // definition of v9, so origin's real v9 (skills.tools_json) never ran here.
     const scols = database.prepare('PRAGMA table_info(skills)').all().map((c) => c.name);
     if (!scols.includes('tools_json')) database.exec('ALTER TABLE skills ADD COLUMN tools_json TEXT');
+  }
+
+  // v12: whether this turn's context planner failed / fell back to the full
+  // tool catalog — makes the fallback rate observable across turns instead of
+  // only visible one turn at a time in the INTERNALS tab.
+  if (current < 12) {
+    const tcols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
+    if (!tcols.includes('planning_failed')) database.exec('ALTER TABLE turn_metrics ADD COLUMN planning_failed INTEGER');
+    if (!tcols.includes('tool_fell_back')) database.exec('ALTER TABLE turn_metrics ADD COLUMN tool_fell_back INTEGER');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

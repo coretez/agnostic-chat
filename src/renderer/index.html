@@ -209,6 +209,13 @@
                     </div>
                   </div>
                   <div class="ovprop"><span class="ovprop__k">Current model</span><span class="ovprop__v" id="ov-model">—</span></div>
+                  <div class="ovprop">
+                    <span class="ovprop__k">Planning model <span class="ovprop__hint">skill/tool selection, compression, sub-agents</span></span>
+                    <div class="dropdown ovprop__dd" id="ov-fast-dd">
+                      <button class="dropdown__btn" id="ov-fast-btn" type="button"><span id="ov-fast-label">—</span><span class="caret">▾</span></button>
+                      <div class="dropdown__menu" id="ov-fast-menu" hidden></div>
+                    </div>
+                  </div>
                   <div class="ovprop"><span class="ovprop__k">Chats</span><span class="ovprop__v" id="ov-chats">0</span></div>
                   <div class="ovprop"><span class="ovprop__k">Documents</span><span class="ovprop__v" id="ov-docs">0</span></div>
                   <div class="ovprop"><span class="ovprop__k">Skills enabled</span><span class="ovprop__v" id="ov-skills">0</span></div>
@@ -399,7 +406,15 @@
                   </div>
                   <div class="field__hint">Pick from the list after TEST, or type any model id.</div>
                 </div>
-                <div class="field"><label>Fast model <span class="opt">optional</span></label><input id="f-fast-model" placeholder="cheap model for summaries — defaults to the model above" /></div>
+                <div class="field">
+                  <label>Planning model <span class="opt">optional</span></label>
+                  <div class="dropdown" id="fast-model-dd">
+                    <input id="f-fast-model" class="combo__input" placeholder="run TEST to load models, or type an id" autocomplete="off" />
+                    <span class="combo__caret">▾</span>
+                    <div class="dropdown__menu" id="f-fast-model-menu" hidden></div>
+                  </div>
+                  <div class="field__hint">Runs context planning (which skills/tools to load), history compression, and sub-agent defaults — a fast, cheap model, not the one answering. Defaults to the model above if unset. Suggestions are filtered to models that look like fast/small variants; type any id to override.</div>
+                </div>
                 <div class="editor__actions">
                   <button class="btn btn--ghost btn--sm" id="conn-test" type="button">TEST CONNECTION</button>
                   <span class="test-result" id="test-result"></span>

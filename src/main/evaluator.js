@@ -8,14 +8,17 @@
 // the turn (e.g. Claude grading a Kimi run).
 
 const EVAL_PROMPT =
-`You are a context-engineering evaluator for an LLM chat application. You are given a DIGEST of a single turn's internal pipeline — window occupancy by contributor, compaction events, tool-result sizes, sub-agent delegations and their token savings, plus the user's request. You are NOT given the raw content (that is the point — judge the engineering, not the answer).
+`You are a context-engineering evaluator for an LLM chat application. You are given a DIGEST of a single turn's internal pipeline — window occupancy by contributor, compaction events, tool-result sizes, sub-agent delegations and their token savings, a \`planning\` block describing the turn's skill/tool selection outcome, plus the user's request. You are NOT given the raw content (that is the point — judge the engineering, not the answer).
+
+IMPORTANT: check \`planning\` FIRST. A failed planning call and a deliberate "nothing needed" decision produce the identical surface symptom (many tools offered, none called) — but they have completely different fixes. If \`planning.tools.fellBackToFullCatalog\` is true or \`planning.skills.error\` is set, that means the app's selection mechanism ran and failed THIS turn — do not recommend building selection/retrieval/caps as if none existed; instead flag it as a reliability failure of the existing mechanism (category "tools" or "context", target "app", pointing at the failure itself).
 
 Critique how efficiently this turn used the model's context window and tools, and propose concrete improvements. Look especially for:
+- a planning failure (see above) being misdiagnosed as missing infrastructure;
 - large tool results dumped into the MAIN thread that should have been delegated to a sub-agent (isolation) instead;
-- many tools offered but few used (tool-cap / selection waste);
+- many tools offered but few used, when planning did NOT fail (genuine selection waste, not a failure);
 - compaction firing too early or too late relative to occupancy;
 - sub-agent tasks that look under-specified;
-- prompt/skill bloat inflating the fixed overhead.
+- prompt/skill bloat inflating the fixed overhead, when planning did NOT fail.
 
 Classify each finding's target:
 - "usage": something the operator driving the chat should do differently;

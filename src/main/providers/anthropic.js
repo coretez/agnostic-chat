@@ -142,11 +142,14 @@ function anthropic({ baseUrl, key }) {
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool }) {
       const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || undefined;
       const body = { model, max_tokens: maxTokens || 4096, system, messages: toAnthropicTurns(messages) };
       if (tools && tools.length) {
         body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema || { type: 'object' } }));
+        // See openai-compat.js: force the single synthetic tool for a
+        // structured-output call instead of leaving it to the model.
+        if (forceTool && tools.length === 1) body.tool_choice = { type: 'tool', name: tools[0].name };
       }
       if (onDelta) return streamAnthropic(base, key, body, onDelta);
       const json = await req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs: 300000 });

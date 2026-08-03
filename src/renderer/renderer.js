@@ -11,6 +11,7 @@ const el = {
   model: $('model'), modelBtn: $('model-btn'), modelMenu: $('model-menu'), modelLabel: $('model-label'),
   modelSwitch: $('model-switch'),
   ovPrefDd: $('ov-pref-dd'), ovPrefBtn: $('ov-pref-btn'), ovPrefLabel: $('ov-pref-label'), ovPrefMenu: $('ov-pref-menu'),
+  ovFastDd: $('ov-fast-dd'), ovFastBtn: $('ov-fast-btn'), ovFastLabel: $('ov-fast-label'), ovFastMenu: $('ov-fast-menu'),
   themeBtn: $('theme-btn'), paletteBtn: $('palette-btn'), modelsBtn: $('models-btn'),
   projectList: $('project-list'), chatList: $('chat-list'),
   newProjectBtn: $('new-project-btn'), newProjectForm: $('new-project-form'), newProjectInput: $('new-project-input'),
@@ -38,7 +39,8 @@ const el = {
   connList: $('conn-list'), connEmpty: $('conn-empty'), connEditor: $('conn-editor'), editorTitle: $('editor-title'),
   typeDd: $('type-dd'), typeBtn: $('type-btn'), typeLabel: $('type-label'), typeMenu: $('type-menu'),
   fLabel: $('f-label'), fBaseurl: $('f-baseurl'), fSecret: $('f-secret'), fSecretHint: $('f-secret-hint'),
-  modelDd: $('model-dd'), fModel: $('f-model'), fModelMenu: $('f-model-menu'), fFastModel: $('f-fast-model'),
+  modelDd: $('model-dd'), fModel: $('f-model'), fModelMenu: $('f-model-menu'),
+  fastModelDd: $('fast-model-dd'), fFastModel: $('f-fast-model'), fFastModelMenu: $('f-fast-model-menu'),
   connAdd: $('conn-add'), connTest: $('conn-test'), testResult: $('test-result'),
   connCancel: $('conn-cancel'), connSave: $('conn-save'), modelsDone: $('models-done'),
   modelsHelp: $('models-help'), keyHelp: $('key-help'),
@@ -394,6 +396,9 @@ function renderOverview() {
   el.ovWdReveal.hidden = !dir;
   el.ovPrefLabel.textContent = p.preferred_model || 'None';
   el.ovModel.textContent = state.selected?.model || '—';
+  const activeProvider = state.selected && state.providers.find((x) => x.id === state.selected.providerId);
+  el.ovFastLabel.textContent = activeProvider ? (activeProvider.fast_model || 'same as chat model') : '—';
+  el.ovFastBtn.disabled = !activeProvider;
   el.ovChats.textContent = state.chats.length;
   el.ovDocs.textContent = state.documents.length;
   el.ovSkills.textContent = state.skills.length;
@@ -457,6 +462,47 @@ async function setPreferred(model) {
   const i = state.projects.findIndex((p) => p.id === id);
   if (i >= 0) state.projects[i] = updated;
   el.ovPrefMenu.hidden = true;
+  renderOverview();
+}
+
+// Planning model — a property of the CONNECTION behind the current chat model
+// (providers.fast_model), not the project. Quick-access picker so this doesn't
+// stay buried in "Manage connections → Edit"; suggestions are filtered to
+// fast/small-tier ids the same way the connection editor's combo is.
+function buildFastMenu() {
+  el.ovFastMenu.innerHTML = '';
+  const p = state.selected && state.providers.find((x) => x.id === state.selected.providerId);
+  if (!p) return;
+  const cur = p.fast_model || null;
+
+  const none = document.createElement('button');
+  none.className = 'menu__item'; none.type = 'button';
+  none.innerHTML = `<span class="tick">${!cur ? '›' : ''}</span>Same as chat model`;
+  none.onclick = () => setFastModel(p.id, null);
+  el.ovFastMenu.appendChild(none);
+
+  const all = providerModels(p);
+  const fast = all.filter(looksLikeFastModel);
+  const list = fast.length ? fast : all;
+  if (list.length) {
+    const g = document.createElement('div');
+    g.className = 'menu__group'; g.textContent = (p.label || p.type).toUpperCase() + (fast.length ? '' : ' · no obviously-fast id found, showing all');
+    el.ovFastMenu.appendChild(g);
+    for (const m of list) {
+      const b = document.createElement('button');
+      b.className = 'menu__item'; b.type = 'button';
+      b.innerHTML = `<span class="tick">${cur === m ? '›' : ''}</span>${escapeHtml(m)}`;
+      b.onclick = () => setFastModel(p.id, m);
+      el.ovFastMenu.appendChild(b);
+    }
+  }
+}
+
+async function setFastModel(providerId, model) {
+  const updated = await window.api.providers.update(providerId, { fastModel: model });
+  const i = state.providers.findIndex((p) => p.id === providerId);
+  if (i >= 0) state.providers[i] = updated;
+  el.ovFastMenu.hidden = true;
   renderOverview();
 }
 
@@ -707,8 +753,13 @@ function renderInternals() {
   };
   addEvt('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(L.total)} tok`, false, true);
   for (const e of (L.events || [])) {
-    if (e.type === 'skill-select') addEvt('◇', `Selected skills · ${e.available} available → ${e.selected} loaded`, e.saved ? `−${fmtTok(e.saved)}` : '', false);
-    else if (e.type === 'tool-scope') { const by = (e.bySkills && e.bySkills.length) ? `skills (${e.bySkills.join(', ')})` : 'request relevance'; addEvt('✂', `Tool scope · ${by} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, `−${e.totalAvailable - e.scoped} tools`, false); }
+    if (e.type === 'skill-select') {
+      const label = e.error ? `Selected skills · planning failed, 0 of ${e.available} loaded ⚠ ${e.error}` : `Selected skills · ${e.available} available → ${e.selected} loaded`;
+      addEvt('◇', label, e.saved ? `−${fmtTok(e.saved)}` : '', !!e.error);
+    } else if (e.type === 'tool-scope') {
+      const by = e.fellBack ? 'planning failed — fell back to the full catalog' : (e.bySkills && e.bySkills.length) ? `skills (${e.bySkills.join(', ')})` : 'request relevance';
+      addEvt('✂', `Tool scope · ${by} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, e.fellBack ? '' : `−${e.totalAvailable - e.scoped} tools`, !!e.fellBack);
+    }
     else if (e.type === 'compact') addEvt('⚡', `Compacted older history → summary (${fmtTok(e.tokensBefore)} → ${fmtTok(e.tokensAfter)})`, `−${fmtTok(e.saved)}`);
   }
   if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);
@@ -752,28 +803,41 @@ function renderProcess(rec) {
 
   const ss = L.skillSelect;
   const ssDetail = !ss ? 'no skills enabled this turn'
-    : ss.inlined ? `${ss.available} available · all inlined (small)`
+    : ss.error ? `⚠ planning failed, 0 of ${ss.available} loaded — ${ss.error}`
     : `${ss.available} available → ${(ss.selected || []).length} loaded${ss.savedTokens ? ` · saved ${fmtTok(ss.savedTokens)}` : ''}`;
+  // Tool-scope isn't a top-level ledger field — it rides on L.events (same
+  // source the pipeline timeline reads), so pull it out here too.
+  const ts = (L.events || []).find((e) => e.type === 'tool-scope');
+  const tsDetail = !ts ? 'no tools connected this turn'
+    : ts.fellBack ? `⚠ planning failed — fell back to the full catalog (${ts.scoped}/${ts.totalAvailable} tools)`
+    : (ts.bySkills && ts.bySkills.length) ? `${ts.totalAvailable} available → ${ts.scoped} scoped (by skill: ${ts.bySkills.join(', ')})`
+    : `${ts.totalAvailable} available → ${ts.scoped} selected by request relevance`;
   const filterSaved = (rec.toolTurns || []).reduce((n, t) => n + (t.saved || 0), 0);
+  // 'done' = ran this turn. 'active' = running now. 'idle' = a real, built
+  // capability that simply wasn't needed this turn (still shown plainly, not
+  // muted). 'warn' = the stage ran but planning failed and fell back.
+  // 'planned' is reserved for capabilities that don't exist yet — don't use
+  // it to mean "not used this turn" or "failed this turn".
   const stages = [
     { name: 'Assemble', detail: `${L.assembled.length} messages`, state: 'done' },
-    { name: 'Select skills', detail: ssDetail, state: 'done' },
-    { name: 'Select mode', detail: 'planned — modes not built yet', state: 'planned' },
-    { name: 'Compact', detail: compacted ? 'summarized older history' : 'not needed this turn', state: compacted ? 'done' : 'done' },
+    { name: 'Select skills', detail: ssDetail, state: ss && ss.error ? 'warn' : 'done' },
+    { name: 'Select tools', detail: tsDetail, state: ts && ts.fellBack ? 'warn' : 'done' },
+    { name: 'Compact', detail: compacted ? 'summarized older history' : 'not needed this turn', state: 'done' },
     { name: 'Route', detail: L.model || '', state: 'done' },
-    { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: nTools ? 'done' : 'done' },
+    { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: 'done' },
     { name: 'Filter / trim', detail: nTools ? `${nTools} tool result${nTools === 1 ? '' : 's'} filtered · saved ${fmtTok(filterSaved)}` : 'no tool output to filter', state: 'done' },
-    { name: 'Delegate', detail: subs.length ? `${subs.length} sub-agent${subs.length === 1 ? '' : 's'}${subs.length > 1 ? ' (parallel)' : ''}` : 'none this turn', state: subs.length ? 'done' : 'planned' },
-    { name: 'Merge', detail: rec.merge ? (rec.merge.status === 'done' ? `merged ${subs.length} results → ${fmtTok(rec.merge.tokens || 0)} tok` : 'merging…') : (subs.length ? 'returned separately (no merge)' : '—'), state: rec.merge ? (rec.merge.status === 'done' ? 'done' : 'active') : (subs.length ? 'done' : 'planned') },
+    { name: 'Delegate', detail: subs.length ? `${subs.length} sub-agent${subs.length === 1 ? '' : 's'}${subs.length > 1 ? ' (parallel)' : ''}` : 'not needed this turn', state: subs.length ? 'done' : 'idle' },
+    { name: 'Merge', detail: rec.merge ? (rec.merge.status === 'done' ? `merged ${subs.length} results → ${fmtTok(rec.merge.tokens || 0)} tok` : 'merging…') : (subs.length ? 'returned separately (no merge)' : 'not needed this turn'), state: rec.merge ? (rec.merge.status === 'done' ? 'done' : 'active') : (subs.length ? 'done' : 'idle') },
     { name: 'Persist', detail: 'saved to chat', state: 'done' }
   ];
+  const STAGE_TAG = { planned: 'planned', idle: 'not used this turn' };
   el.intStages.innerHTML = '';
   for (const s of stages) {
     const li = document.createElement('li');
     li.className = 'stage stage--' + s.state;
     li.innerHTML = `<span class="stage__dot"></span><span class="stage__name">${escapeHtml(s.name)}</span>`
       + `<span class="stage__detail">${escapeHtml(s.detail)}</span>`
-      + (s.state === 'planned' ? '<span class="stage__tag">planned</span>' : '');
+      + (STAGE_TAG[s.state] ? `<span class="stage__tag">${STAGE_TAG[s.state]}</span>` : '');
     el.intStages.appendChild(li);
   }
 
@@ -898,6 +962,8 @@ function setEvaluator(model) {
 function buildDigest(rec) {
   const L = rec.ledger;
   const cur = (L.assembled || []).find((m) => m.contributor === 'current');
+  const skillEvt = (L.events || []).find((e) => e.type === 'skill-select');
+  const toolEvt = (L.events || []).find((e) => e.type === 'tool-scope');
   return {
     chatModel: L.model,
     window: L.window,
@@ -905,6 +971,14 @@ function buildDigest(rec) {
     occupancyPct: L.window ? Math.round((L.total / L.window) * 100) : 0,
     contributors: L.contributors,
     compaction: (L.events || []).filter((e) => e.type === 'compact'),
+    // Without this, a failed planning call and a deliberate "nothing needed"
+    // decision look identical from the outside (both end up N tools offered,
+    // 0 called) — the evaluator would otherwise diagnose a missing feature
+    // when the actual cause was this turn's planning call failing.
+    planning: {
+      skills: skillEvt ? { available: skillEvt.available, loaded: skillEvt.selected, error: skillEvt.error || null } : null,
+      tools: toolEvt ? { available: toolEvt.totalAvailable, scoped: toolEvt.scoped, fellBackToFullCatalog: !!toolEvt.fellBack, boundedBySkill: toolEvt.bySkills || null } : null
+    },
     tools: {
       offered: L.toolCount || 0,
       results: (rec.toolTurns || []).map((t) => ({ name: String(t.name).split('__').pop(), tokens: t.resultTokens, truncated: !!t.truncated }))
@@ -1100,9 +1174,44 @@ function renderAttachChips() {
 }
 function flashComposer(msg) { el.composerScope.textContent = msg; setTimeout(updateComposerMeta, 2500); }
 
+// What's needed before a turn can actually reach a model: an assigned model
+// and (since agents/tools operate relative to it) a project working directory.
+// Returns [] when ready to send.
+function missingPrereqs() {
+  const missing = [];
+  if (!state.selected?.providerId || !state.selected?.model) missing.push('model');
+  const proj = state.projects.find((p) => p.id === state.currentProjectId);
+  if (!proj || !proj.working_dir) missing.push('workingDir');
+  return missing;
+}
+function showSetupNotice(missing) {
+  const note = document.createElement('div');
+  note.className = 'turn turn--setup';
+  const items = [];
+  if (missing.includes('model')) items.push('<div>No model is assigned to this chat.<button type="button" class="linkbtn" data-fix="model">Choose a model</button></div>');
+  if (missing.includes('workingDir')) items.push('<div>This project has no working directory set.<button type="button" class="linkbtn" data-fix="dir">Set working directory</button></div>');
+  note.innerHTML = `<div class="turn__body"><div class="setup__title">SETUP NEEDED</div>${items.join('')}</div>`;
+  el.messages.appendChild(note);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  const modelBtn = note.querySelector('[data-fix="model"]');
+  if (modelBtn) modelBtn.onclick = () => toggleModelMenu(true);
+  const dirBtn = note.querySelector('[data-fix="dir"]');
+  if (dirBtn) dirBtn.onclick = async () => {
+    if (!state.currentProjectId) return;
+    const r = await window.api.projects.pickWorkingDir(state.currentProjectId);
+    if (r && r.ok) {
+      const i = state.projects.findIndex((p) => p.id === state.currentProjectId);
+      if (i >= 0) state.projects[i] = r.project;
+      renderOverview();
+    }
+  };
+}
+
 async function submit() {
   const text = el.input.value.trim();
   if ((!text && !state.attachments.length) || !state.currentChatId) return;
+  const missing = missingPrereqs();
+  if (missing.length) { showSetupNotice(missing); return; }
   const attached = state.attachments.slice();
   state.attachments = []; renderAttachChips();
   const userTurn = turn(text || '📎 (attached files)', 'user');
@@ -1339,6 +1448,35 @@ function buildModelSuggest() {
 }
 function openModelSuggest() { buildModelSuggest(); if (el.fModelMenu.children.length) el.fModelMenu.hidden = false; }
 function closeModelSuggest() { el.fModelMenu.hidden = true; }
+
+// Planning-model combobox — same list as the default-model combo, but filtered
+// to ids that look like a fast/small tier (mini, flash, haiku, lite, ...). This
+// is the model that runs context planning (skill/tool selection), history
+// compression, and sub-agent defaults — it should be cheap, not "any model
+// this account can reach". Falls back to the full list when nothing matches
+// (an account with no obviously-fast id shouldn't leave the field stuck empty).
+const FAST_MODEL_HINT = /(?:^|[-_ ])(mini|flash|lite|nano|haiku|turbo|instant|small|fast)(?:[-_ ]|$)|[-_]\d{1,2}b(?:[-_]|$)/i;
+function looksLikeFastModel(id) { return FAST_MODEL_HINT.test(id); }
+function fastModelOptions() {
+  const fast = state.modelOptions.filter(looksLikeFastModel);
+  return fast.length ? fast : state.modelOptions;
+}
+function buildFastModelSuggest() {
+  const q = el.fFastModel.value.trim().toLowerCase();
+  const pool = fastModelOptions();
+  const opts = pool.filter((m) => m.toLowerCase().includes(q));
+  el.fFastModelMenu.innerHTML = '';
+  for (const m of opts.slice(0, 60)) {
+    const b = document.createElement('button');
+    b.className = 'dropdown__item'; b.type = 'button';
+    b.innerHTML = `<span class="tick">${el.fFastModel.value === m ? '›' : ''}</span>${escapeHtml(m)}`;
+    b.onmousedown = (e) => { e.preventDefault(); el.fFastModel.value = m; closeFastModelSuggest(); };
+    el.fFastModelMenu.appendChild(b);
+  }
+  if (!opts.length) el.fFastModelMenu.hidden = true;
+}
+function openFastModelSuggest() { buildFastModelSuggest(); if (el.fFastModelMenu.children.length) el.fFastModelMenu.hidden = false; }
+function closeFastModelSuggest() { el.fFastModelMenu.hidden = true; }
 
 function openEditor(id) {
   state.editing = id ?? null;
@@ -1904,6 +2042,7 @@ el.modelSwitch.onclick = () => {
   if (r.providerId) selectModel(r.providerId, pref);
 };
 el.ovPrefBtn.onclick = (e) => { e.stopPropagation(); const show = el.ovPrefMenu.hidden; if (show) buildPrefMenu(); el.ovPrefMenu.hidden = !show; };
+el.ovFastBtn.onclick = (e) => { e.stopPropagation(); if (el.ovFastBtn.disabled) return; const show = el.ovFastMenu.hidden; if (show) buildFastMenu(); el.ovFastMenu.hidden = !show; };
 el.ctxMeter.onclick = () => showPage('internals');
 el.intLenstabs.querySelectorAll('.lenstab').forEach((b) => {
   b.onclick = () => { state.internalsLens = b.dataset.lens; renderInternals(); };
@@ -1914,9 +2053,11 @@ document.addEventListener('click', (e) => {
   if (!el.model.contains(e.target)) toggleModelMenu(false);
   if (!el.typeDd.contains(e.target)) toggleTypeMenu(false);
   if (!el.modelDd.contains(e.target)) closeModelSuggest();
+  if (!el.fastModelDd.contains(e.target)) closeFastModelSuggest();
   if (!el.mTransportDd.contains(e.target)) toggleTransportMenu(false);
   if (el.skillsSrcDd && !el.skillsSrcDd.contains(e.target)) el.skillsSrcMenu.hidden = true;
   if (el.ovPrefDd && !el.ovPrefDd.contains(e.target)) el.ovPrefMenu.hidden = true;
+  if (el.ovFastDd && !el.ovFastDd.contains(e.target)) el.ovFastMenu.hidden = true;
   if (el.intEvalDd && !el.intEvalDd.contains(e.target)) el.intEvalMenu.hidden = true;
 });
 
@@ -1968,6 +2109,9 @@ el.typeBtn.onclick = (e) => { e.stopPropagation(); toggleTypeMenu(); };
 el.fModel.addEventListener('focus', openModelSuggest);
 el.fModel.addEventListener('click', openModelSuggest);
 el.fModel.addEventListener('input', () => { buildModelSuggest(); if (el.fModelMenu.children.length) el.fModelMenu.hidden = false; });
+el.fFastModel.addEventListener('focus', openFastModelSuggest);
+el.fFastModel.addEventListener('click', openFastModelSuggest);
+el.fFastModel.addEventListener('input', () => { buildFastModelSuggest(); if (el.fFastModelMenu.children.length) el.fFastModelMenu.hidden = false; });
 el.modelsHelp.onclick = () => openHelp();
 el.keyHelp.onclick = () => openHelp(state.editorType);
 el.helpClose.onclick = closeHelp;

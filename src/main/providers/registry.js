@@ -41,7 +41,7 @@ const PROVIDERS = {
       'Copy the key — it starts with sk-ant-… and is shown only once.',
       'Paste it here; it is encrypted in your Keychain and never leaves this Mac except to call Anthropic.'
     ],
-    fallbackModels: ['claude-sonnet-4-5', 'claude-opus-4-1']
+    fallbackModels: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5']
   },
   qwen: {
     label: 'Qwen (DashScope)',

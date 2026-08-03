@@ -11,9 +11,14 @@ const connections = new Map(); // serverId -> McpConnection
 
 function sanitize(s) { return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_'); }
 
-// Cap tools sent to the model. Servers like Fluency Expo expose 200+ tools;
-// sending them all is slow, token-heavy, and exceeds provider function limits.
-const MAX_TOOLS = 32;
+// Sanity ceiling only — NOT the per-turn tool cap. Servers like Fluency Expo
+// expose 200+ tools; buildToolset() returns the full catalog (relevance-based
+// narrowing to what a turn actually needs happens in ipc.js, which has the
+// user's request and can pick tools that fit it wherever they sit in the
+// catalog). This ceiling just bounds the pathological case — an MCP server
+// with an absurd tool count — so the selector's own menu prompt stays sane
+// and a failed selection has a bounded fallback slice.
+const MAX_TOOLS = 300;
 
 // Return a valid bearer token for a server, refreshing an expired OAuth token
 // (and persisting the new one) when possible.
@@ -89,7 +94,7 @@ async function buildToolset() {
     }
   }
   if (tools.length > MAX_TOOLS) {
-    console.warn(`[mcp] ${tools.length} tools available; sending only the first ${MAX_TOOLS} to the model (cap). Per-server tool selection is the proper fix.`);
+    console.warn(`[mcp] ${tools.length} tools available; sending only the first ${MAX_TOOLS} to the model (sanity ceiling).`);
     return { tools: tools.slice(0, MAX_TOOLS), routes, truncated: tools.length };
   }
   return { tools, routes };
@@ -120,4 +125,4 @@ async function callTool(namespaced, args, routes) {
 
 function disposeAll() { for (const c of connections.values()) c.close(); connections.clear(); }
 
-module.exports = { buildToolset, callTool, connectAndCache, disposeAll, sanitize };
+module.exports = { buildToolset, callTool, connectAndCache, disposeAll, sanitize, MAX_TOOLS };

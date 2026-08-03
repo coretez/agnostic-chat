@@ -172,13 +172,18 @@ function openaiCompat({ baseUrl, key }) {
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).filter(isLikelyChatModel).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool }) {
       const body = { model, messages: messages.map(toOpenAiMsg), stream: !!onDelta };
       if (onDelta) body.stream_options = { include_usage: true }; // ask for a final usage chunk
       if (maxTokens) body.max_tokens = maxTokens;
       if (tools && tools.length) {
         body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: sanitizeSchema(t.inputSchema) } }));
-        body.tool_choice = 'auto';
+        // forceTool: for a single synthetic tool used purely as a structured-
+        // output contract (e.g. the context planner), force the call instead
+        // of leaving it to the model's discretion — the provider's own
+        // function-calling layer then guarantees syntactically valid
+        // arguments, instead of hoping a prose completion ends in clean JSON.
+        body.tool_choice = (forceTool && tools.length === 1) ? { type: 'function', function: { name: tools[0].name } } : 'auto';
       }
       if (!onDelta) {
         // Non-streaming path (used for test pings + compression summaries).

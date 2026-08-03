@@ -123,8 +123,13 @@ const DELEGATE_TOOL = {
     + '(e.g. compliance/security assessments, multi-source lookups): delegate the '
     + 'whole workflow up front rather than making those calls yourself and pulling '
     + 'each raw result into this thread — the sub-agent absorbs the raw evidence '
-    + 'and hands back only the synthesized answer. Give complete, standalone '
-    + 'instructions; the sub-agent cannot see this conversation.',
+    + 'and hands back only the synthesized answer. This also covers explore-then-act '
+    + 'patterns — e.g. listing available tables/schemas/fields before running the '
+    + 'actual query, or browsing to find the right identifier before acting on it: '
+    + 'delegate the whole "figure out what to query, then query it" task as one '
+    + 'unit, so the intermediate schema/listing dump never lands in this thread. '
+    + 'Give complete, standalone instructions; the sub-agent cannot see this '
+    + 'conversation.',
   inputSchema: {
     type: 'object',
     properties: {

@@ -70,15 +70,16 @@ const metrics = {
       `INSERT INTO turn_metrics
         (project_id, chat_id, model, measured, input_tokens, output_tokens, cached_tokens, cache_creation_tokens,
          est_input_tokens, window, skills_available, skills_loaded, skill_saved_tokens, skills_used,
-         filter_saved_tokens, compaction_saved_tokens, delegated, delegate_absorbed_tokens, duration_ms)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         filter_saved_tokens, compaction_saved_tokens, delegated, delegate_absorbed_tokens, duration_ms,
+         planning_failed, tool_fell_back)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).run(
       m.projectId ?? null, m.chatId ?? null, m.model ?? null, m.measured ? 1 : 0,
       m.inputTokens ?? null, m.outputTokens ?? null, m.cachedTokens ?? null, m.cacheCreationTokens ?? null,
       m.estInputTokens ?? null, m.window ?? null, m.skillsAvailable ?? null, m.skillsLoaded ?? null,
       m.skillSavedTokens ?? null, m.skillsUsed ? JSON.stringify(m.skillsUsed) : null,
       m.filterSavedTokens ?? null, m.compactionSavedTokens ?? null, m.delegated ?? null, m.delegateAbsorbedTokens ?? null,
-      m.durationMs ?? null
+      m.durationMs ?? null, m.planningFailed ? 1 : 0, m.toolFellBack ? 1 : 0
     );
     return info.lastInsertRowid;
   },

@@ -144,22 +144,86 @@ app.whenReady().then(async () => {
   assert(evalRes.findings.length === 1 && evalRes.findings[0].target === 'usage', 'evaluator returns parsed findings');
   assert(evalRes.assessment === 'tool-heavy turn', 'evaluator returns an assessment');
 
-  // Skill selection: only the chosen skill's full definition is loaded
-  const { selectSkills } = require('../src/main/skill-select');
-  const selConnector = { chat: async () => ({ text: 'sure: {"skills":["docx"]}' }) };
-  const selRes = await selectSkills({ connector: selConnector, model: 'm', skills: [
+  // Context planning: ONE call decides both which skills and which tools to load
+  const { selectContext, applyToolCeiling, truncateForMenu } = require('../src/main/context-select');
+  // Regression: a 160-char hard cut on a real skill description sliced off its
+  // "when to use" sentence one word before the match keyword, silently making
+  // the skill unselectable for the exact requests it was written to trigger on.
+  const caseInvestigationDesc = 'Produce the standard Fluency single-case investigation report as print-ready HTML and PDF. Use when the user names a Fluency case id, behavior key plus day, or asks to investigate, analyze, triage, write up, or decide whether a specific Fluency case is real or benign. The report follows the bundled case-investigation output contract.';
+  const menuLine = truncateForMenu(caseInvestigationDesc, 300, 100);
+  assert(menuLine.includes('asks to investigate'), 'skill menu truncation keeps the full trigger sentence instead of cutting mid-clause');
+  assert(menuLine.endsWith('.'), 'skill menu truncation cuts at a sentence boundary, not an arbitrary character count');
+  assert(truncateForMenu('short one.', 300, 100) === 'short one.', 'skill menu truncation leaves short descriptions untouched');
+  const longRunOn = 'x'.repeat(500); // no sentence boundary at all — must still bound the worst case
+  assert(truncateForMenu(longRunOn, 300, 100).length <= 301, 'skill menu truncation still hard-bounds a description with no sentence boundary');
+  // End-to-end: the actual prompt built for the planner call must carry the
+  // FULL skill description, not a truncated prefix — the skill editor's own
+  // contract for this field is "one line — when to use it", authored
+  // specifically as the trigger signal this call decides on; there is no
+  // routine reason to cut it.
+  const longSkillDesc = caseInvestigationDesc + ' Read-only on Fluency; the final verdict is handed back via record_case_investigation.';
+  let capturedPrompt = '';
+  await selectContext({ connector: { chat: async ({ messages }) => { capturedPrompt = messages[0].content; return { text: '{"skills":[],"tools":[]}' }; } }, model: 'm', skills: [{ name: 'fluency-case-investigation', description: longSkillDesc }], tools: [], userText: 'investigate riley.chen@acmeinc.com' });
+  assert(capturedPrompt.includes('record_case_investigation'), 'the actual planner prompt carries the full skill description end-to-end, not just a truncated prefix');
+  // Primary path: forced tool-calling. This is what actually fixed the
+  // repeated production "context selector JSON parse failed" — a provider
+  // that honors tool_choice returns structured toolCalls, not prose to parse.
+  let capturedForceTool, capturedToolsArg;
+  const ctxToolCallConnector = { chat: async ({ tools, forceTool }) => {
+    capturedForceTool = forceTool; capturedToolsArg = tools;
+    return { toolCalls: [{ id: 't1', name: 'select_context', args: { skills: ['docx'], tools: ['srv__tool_5'] } }] };
+  } };
+  const ctxToolCallRes = await selectContext({ connector: ctxToolCallConnector, model: 'm', skills: [{ name: 'docx', description: 'make Word docs' }], tools: [{ name: 'srv__tool_5', description: 'x' }], userText: 'write a doc' });
+  assert(capturedForceTool === true && capturedToolsArg.length === 1 && capturedToolsArg[0].name === 'select_context', 'context planner forces a single synthetic tool call instead of prompting for freeform JSON');
+  assert(ctxToolCallRes.skillNames.length === 1 && ctxToolCallRes.skillNames[0] === 'docx' && ctxToolCallRes.toolNames[0] === 'srv__tool_5', 'context planner reads structured tool-call arguments directly, no JSON extraction needed');
+  // Regression: some thinking/reasoning providers reject a FORCED tool_choice
+  // outright (HTTP 400 "tool_choice 'specified' is incompatible with thinking
+  // enabled") — must retry with the tool merely offered, not force the whole
+  // call to fail and fall through to "0 skills, full tool catalog".
+  let retryAttempt = 0;
+  const ctxRetryConnector = { chat: async ({ forceTool }) => {
+    retryAttempt++;
+    if (forceTool) throw new Error("HTTP 400: tool_choice 'specified' is incompatible with thinking enabled");
+    return { toolCalls: [{ id: 't2', name: 'select_context', args: { skills: ['docx'], tools: [] } }] };
+  } };
+  const ctxRetryRes = await selectContext({ connector: ctxRetryConnector, model: 'm', skills: [{ name: 'docx', description: 'd' }], tools: [], userText: 'hi' });
+  assert(retryAttempt === 2 && ctxRetryRes.skillNames.length === 1 && !ctxRetryRes.error, 'context planner retries without forcing tool_choice when the provider rejects a forced call outright');
+  const ctxDoubleFailRes = await selectContext({ connector: { chat: async () => { throw new Error('network down'); } }, model: 'm', skills: [{ name: 'docx', description: 'd' }], tools: [], userText: 'hi' });
+  assert(ctxDoubleFailRes.error && ctxDoubleFailRes.error.includes('network down'), 'context planner surfaces a clear error when both the forced and retry attempts fail');
+  let ctxCalls = 0;
+  const ctxConnector = { chat: async () => { ctxCalls++; return { text: 'sure: {"skills":["docx"],"tools":["srv__tool_3","srv__tool_9"]}' }; } };
+  const bigCatalog = Array.from({ length: 34 }, (_, i) => ({ name: `srv__tool_${i}`, description: `does thing ${i}` }));
+  const ctxRes = await selectContext({ connector: ctxConnector, model: 'm', skills: [
     { name: 'docx', description: 'make Word docs', definition: 'X'.repeat(9000) },
     { name: 'security-review', description: 'audit code', definition: 'Y'.repeat(9000) }
-  ], userText: 'write me a word document' });
-  assert(selRes.names.length === 1 && selRes.names[0] === 'docx', 'skill selector picks only the relevant skill');
-  const selNone = await selectSkills({ connector: { chat: async () => ({ text: '{"skills":[]}' }) }, model: 'm', skills: [{ name: 'docx', description: 'd' }], userText: 'hi' });
-  assert(selNone.names.length === 0, 'skill selector can pick none');
+  ], tools: bigCatalog, userText: 'write me a word document and do thing 3 and 9' });
+  assert(ctxCalls === 1, 'context planner makes exactly one call for both skills and tools');
+  assert(ctxRes.skillNames.length === 1 && ctxRes.skillNames[0] === 'docx', 'context planner picks only the relevant skill');
+  assert(ctxRes.toolNames.length === 2 && ctxRes.toolNames.includes('srv__tool_3'), 'context planner narrows the tool catalog to chosen tools');
+  const ctxNone = await selectContext({ connector: { chat: async () => ({ text: '{"skills":[],"tools":[]}' }) }, model: 'm', skills: [{ name: 'docx', description: 'd' }], tools: [], userText: 'hi' });
+  assert(ctxNone.skillNames.length === 0 && !ctxNone.skillMismatch, 'context planner can pick no skills, with no mismatch flagged for a genuinely empty pick');
+  const ctxSkip = await selectContext({ connector: { chat: async () => { throw new Error('should not be called'); } }, model: 'm', skills: [], tools: [], userText: 'hi' });
+  assert(ctxSkip.skillNames.length === 0 && ctxSkip.toolNames.length === 0, 'context planner skips the call entirely when nothing to plan');
+  // A "successful" call that names something matching NOTHING we know (typo,
+  // paraphrase, wrong id) must be distinguishable from a deliberate empty pick —
+  // both end up 0 loaded, but only one is a bug worth surfacing.
+  const ctxMismatch = await selectContext({ connector: { chat: async () => ({ text: '{"skills":["Case Investigation Skill"],"tools":[]}' }) }, model: 'm', skills: [{ name: 'fluency-case-investigation', description: 'd' }], tools: [], userText: 'investigate riley.chen@acmeinc.com' });
+  assert(ctxMismatch.skillNames.length === 0 && ctxMismatch.skillMismatch && ctxMismatch.skillMismatch.includes('Case Investigation Skill'), 'context planner flags a skill-name mismatch instead of silently looking like a deliberate empty pick');
 
-  // Tool selection: narrows a large catalog to the relevant handful
-  const { selectTools } = require('../src/main/tool-select');
-  const bigCatalog = Array.from({ length: 34 }, (_, i) => ({ name: `srv__tool_${i}`, description: `does thing ${i}` }));
-  const toolSel = await selectTools({ connector: { chat: async () => ({ text: 'pick: {"tools":["srv__tool_3","srv__tool_9"]}' }) }, model: 'm', tools: bigCatalog, userText: 'do thing 3 and 9' });
-  assert(toolSel.names.length === 2 && toolSel.names.includes('srv__tool_3'), 'tool selector narrows the catalog to chosen tools');
+  // Tool ceiling: a skill's declared tool scope is a hard restriction, not a hint
+  const allTools = [{ name: 'a' }, { name: 'b' }, { name: 'c' }];
+  const withinCeiling = applyToolCeiling({ loadedSkills: [{ name: 'reporting', tools: ['a', 'b'] }], toolNames: ['a'], allTools });
+  assert(withinCeiling.tools.length === 1 && withinCeiling.tools[0].name === 'a' && withinCeiling.bySkills[0] === 'reporting' && !withinCeiling.fellBack, 'tool ceiling intersects the planner pick with the declared scope');
+  const outsideCeiling = applyToolCeiling({ loadedSkills: [{ name: 'reporting', tools: ['a', 'b'] }], toolNames: ['c'], allTools });
+  assert(outsideCeiling.tools.length === 2 && outsideCeiling.tools.every((t) => ['a', 'b'].includes(t.name)), 'tool ceiling falls back to the declared scope when the planner picks outside it');
+  // No ceiling + nothing picked (planning failed) — default is the FULL catalog,
+  // not an arbitrary slice: seen in production, a 32-of-205 slice happened to
+  // omit every tool the turn actually needed. An explicit fallbackCap still works
+  // for callers that want one, but it's no longer the default.
+  const noCeilingNoPicksDefault = applyToolCeiling({ loadedSkills: [], toolNames: [], allTools: bigCatalog });
+  assert(noCeilingNoPicksDefault.tools.length === bigCatalog.length && noCeilingNoPicksDefault.fellBack && !noCeilingNoPicksDefault.bySkills, 'tool ceiling defaults to the full catalog (not an arbitrary slice) when there is no scope and nothing picked');
+  const noCeilingNoPicksCapped = applyToolCeiling({ loadedSkills: [], toolNames: [], allTools: bigCatalog, fallbackCap: 5 });
+  assert(noCeilingNoPicksCapped.tools.length === 5 && noCeilingNoPicksCapped.fellBack, 'tool ceiling still honors an explicit fallbackCap when one is passed');
 
   // Planner: strategizes a request into steps + merge, then executes deterministically
   const { makePlan, runPlan } = require('../src/main/planner');
@@ -230,6 +294,11 @@ app.whenReady().then(async () => {
   assert(mid > 0, 'turn_metrics row recorded');
   const mrows = repo.metrics.listByChat(chat.id);
   assert(mrows.length >= 1 && mrows[mrows.length - 1].cached_tokens === 1900 && mrows[mrows.length - 1].measured === 1, 'turn_metrics reads back real usage');
+  // Planning-failure rate must be queryable across turns, not just visible
+  // one turn at a time in the INTERNALS tab.
+  repo.metrics.record({ projectId: projA.id, chatId: chat.id, model: 'm', planningFailed: true, toolFellBack: true });
+  const mrows2 = repo.metrics.listByChat(chat.id);
+  assert(mrows2[mrows2.length - 1].planning_failed === 1 && mrows2[mrows2.length - 1].tool_fell_back === 1, 'turn_metrics persists planning-failure and tool-fallback flags for cross-turn observability');
 
   // Task-level timing/tokens: chat loop times tool calls; sub-agents report duration
   assert(typeof floop.toolTrace[0].durationMs === 'number', 'chat loop records per-tool duration');

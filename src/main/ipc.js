@@ -9,8 +9,7 @@ const { runAuthFlow } = require('./mcp/oauth');
 const { runChatLoop } = require('./chat-loop');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
-const { selectSkills } = require('./skill-select');
-const { selectTools } = require('./tool-select');
+const { selectContext, applyToolCeiling } = require('./context-select');
 const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT, estimateTokens } = require('./compress');
 
 // ── Context ledger (INTERNALS tab) ──────────────────────────────────────────
@@ -47,11 +46,11 @@ function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelec
     .map(([key, tokens]) => ({ key, tokens }));
 
   const events = [];
-  if (skillSelect && !skillSelect.inlined) {
+  if (skillSelect) {
     events.push({ type: 'skill-select', available: skillSelect.available, selected: (skillSelect.selected || []).length, saved: skillSelect.savedTokens || 0, error: skillSelect.error });
   }
   if (toolScope) {
-    events.push({ type: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills });
+    events.push({ type: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
   }
   if (compressed) {
     const after = estimateTokens(convo);
@@ -419,7 +418,7 @@ function registerIpc() {
     }
   });
 
-  // Chat — route to the selected provider connection, else fall back to a stub.
+  // Chat — route to the selected provider connection; requires one to be set.
   ipcMain.handle('chat:send', async (_e, payload) => {
     const text = typeof payload?.text === 'string' ? payload.text : '';
     const providerId = payload?.providerId;
@@ -441,46 +440,55 @@ function registerIpc() {
       const turnStart = Date.now();
       const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
 
-      // Skills: enabled = candidate. Always show a cheap MENU; load full definitions
-      // only for the skills a selection ACTION picks for this prompt. Small libraries
-      // are inlined directly (selection isn't worth an extra call).
+      // Gather tools from enabled MCP servers (skips any that fail to connect).
+      // Done before skill handling — the unified context planner below needs
+      // both the skill menu and the tool menu at once.
+      let toolset = { tools: [], routes: new Map() };
+      try { toolset = await mcpManager.buildToolset(); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
+
+      // Skills: enabled = candidate. Tools: gathered above. ONE planning call
+      // (context-select.js) decides both which skills to load in full and
+      // which tools to expose for this turn — always run, not gated on size;
+      // gating on thresholds was exactly what let a turn's fixed overhead
+      // (skills + tool schemas) balloon past what a request actually needed.
       let base = messages;
       const projectId = payload?.projectId;
       let skillSelect = null;
-      let loadedSkills = []; // skills actually in scope this turn — drives tool binding below, too
+      let loadedSkills = []; // skills actually in scope this turn — drives the tool ceiling below
+      let es = [];
       if (projectId) {
+        try { es = repo.skills.listEnabledForProject(projectId); } catch (e) { console.error('[skills]', e && e.message); }
+      }
+
+      let planned = { skillNames: [], toolNames: [] };
+      try {
+        planned = await selectContext({ connector, model: fastModel, skills: es, tools: toolset.tools, userText: text });
+        // A soft failure (unparseable JSON, etc.) is returned, not thrown — log
+        // it here so it's visible in real time, not just reverse-engineered
+        // later from a suspicious "0 skills loaded" turn.
+        if (planned.error) console.warn('[context-select]', planned.error);
+        if (planned.skillMismatch) console.warn('[context-select] mismatch —', planned.skillMismatch);
+        if (planned.toolMismatch) console.warn('[context-select] mismatch —', planned.toolMismatch);
+      } catch (e) {
+        console.error('[context-select]', e && e.message);
+        planned = { skillNames: [], toolNames: [], error: e.message };
+      }
+
+      if (es.length) {
         try {
-          const es = repo.skills.listEnabledForProject(projectId);
-          if (es.length) {
-            const fullTokens = estimateTokens(es.map((s) => ({ content: s.definition || s.description || '' })));
-            const SKILL_INLINE_CAP = 6000; // below this, just inline everything
-            let toLoad = es;
-            if (es.length > 1 && fullTokens > SKILL_INLINE_CAP) {
-              try {
-                const sel = await selectSkills({ connector, model: fastModel, skills: es, userText: text });
-                toLoad = sel.selected;               // may be empty (nothing relevant)
-                skillSelect = { available: es.length, selected: sel.names, fullTokens, error: sel.error };
-              } catch (e) {
-                console.error('[skill-select]', e && e.message);
-                toLoad = [];                          // safe: menu still shown, no bulk dump
-                skillSelect = { available: es.length, selected: [], fullTokens, error: e.message };
-              }
-            } else {
-              skillSelect = { available: es.length, selected: es.map((s) => s.name), fullTokens, inlined: true };
-            }
-            const menu = es.map((s) => `- ${s.name}: ${String(s.description || '').replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
-            const loaded = toLoad.map((s) => `## ${s.name}\n${s.definition || s.description || ''}`).join('\n\n');
-            const loadedTokens = estimateTokens(toLoad.map((s) => ({ content: s.definition || s.description || '' })));
-            if (skillSelect) { skillSelect.loadedTokens = loadedTokens; skillSelect.savedTokens = Math.max(0, fullTokens - loadedTokens); }
-            const sys = 'Project skills — you can use these. Menu (name — when to use):\n' + menu
-              + (loaded ? '\n\nInstructions loaded for this turn:\n\n' + loaded
-                        : '\n\n(No skill instructions loaded this turn. If one of the above is needed, say so.)');
-            base = [{ role: 'system', content: sys }, ...messages];
-            if (skillSelect && !skillSelect.inlined) {
-              emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
-            }
-            loadedSkills = toLoad;
-          }
+          const fullTokens = estimateTokens(es.map((s) => ({ content: s.definition || s.description || '' })));
+          const chosenNames = new Set(planned.skillNames.map((n) => n.toLowerCase()));
+          const toLoad = es.filter((s) => chosenNames.has(s.name.toLowerCase()));
+          const menu = es.map((s) => `- ${s.name}: ${String(s.description || '').replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
+          const loaded = toLoad.map((s) => `## ${s.name}\n${s.definition || s.description || ''}`).join('\n\n');
+          const loadedTokens = estimateTokens(toLoad.map((s) => ({ content: s.definition || s.description || '' })));
+          skillSelect = { available: es.length, selected: toLoad.map((s) => s.name), fullTokens, loadedTokens, savedTokens: Math.max(0, fullTokens - loadedTokens), error: planned.error || planned.skillMismatch };
+          const sys = 'Project skills — you can use these. Menu (name — when to use):\n' + menu
+            + (loaded ? '\n\nInstructions loaded for this turn:\n\n' + loaded
+                      : '\n\n(No skill instructions loaded this turn. If one of the above is needed, say so.)');
+          base = [{ role: 'system', content: sys }, ...messages];
+          emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
+          loadedSkills = toLoad;
         } catch (e) { console.error('[skills inject]', e && e.message); }
       }
 
@@ -499,62 +507,19 @@ function registerIpc() {
         convo = out.messages; compressed = out.compressed;
       } catch (e) { console.error('[compress]', e && e.message); }
 
-      // Gather tools from enabled MCP servers (skips any that fail to connect).
-      let toolset = { tools: [], routes: new Map() };
-      try { toolset = await mcpManager.buildToolset(); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
-
-      // Dynamic tool binding: a skill loaded for this turn (selected or inlined,
-      // see loadedSkills above) can declare the exact MCP tools it needs
-      // (skills.tools_json — same shape/UI as agents' tool scoping). If every
-      // loaded skill declares a scope, the model only sees the union of those
-      // tools instead of the full connected catalog — this is what actually
-      // fixes tool-schema bloat (skill selection alone only trims the *skill
-      // prompt text*, not the tool list). If any loaded skill is unscoped
-      // (tools: null, meaning "may need anything"), or nothing was loaded,
-      // we don't narrow — an unconfigured skill must not silently lose tools.
-      const scopedSkills = loadedSkills.filter((s) => Array.isArray(s.tools) && s.tools.length);
-      const hasUnscopedLoaded = loadedSkills.some((s) => !Array.isArray(s.tools) || !s.tools.length);
+      // Tool ceiling: enforce any declared skill tool scope over the planner's
+      // picks (context-select.js's applyToolCeiling — a hard restriction the
+      // operator authored on a skill, not just a relevance hint). Falls back
+      // to the full catalog (not an arbitrary slice) if planning produced no
+      // usable picks at all.
       let scopedTools = toolset.tools;
       let toolScope = null;
-      if (scopedSkills.length && !hasUnscopedLoaded) {
-        const allowed = new Set(scopedSkills.flatMap((s) => s.tools));
-        const narrowed = toolset.tools.filter((t) => allowed.has(t.name));
-        // A skill's declared tool names are free text (typo, stale rename, wrong
-        // server prefix) — if NONE of them match anything actually connected,
-        // narrowing would silently leave the model with zero real tools
-        // (just delegate/assign) and no indication why. Treat a total miss as
-        // misconfiguration, not "this skill needs nothing": fall back to the
-        // full toolset, same safe-default philosophy as skill-select's error path.
-        if (narrowed.length) {
-          scopedTools = narrowed;
-          toolScope = { totalAvailable: toolset.tools.length, scoped: scopedTools.length, bySkills: scopedSkills.map((s) => s.name) };
-          emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills });
-        } else {
-          console.error('[tool-scope] declared tool names matched nothing connected — ignoring scope for:', scopedSkills.map((s) => s.name).join(', '));
-        }
-      }
-
-      // Request-relevance tool selection. Runs on WHATEVER the tool set is after
-      // skill-based scoping — the full catalog if no skill scoped it, OR a skill's
-      // declared set, which can itself be huge (a compliance skill may declare
-      // dozens of tools). If it's still large, narrow to the tools THIS request
-      // actually needs. This is what finally kills tool-schema bloat; gating it on
-      // `!toolScope` (the old bug) let a broad skill scope sail through unchecked.
-      if (scopedTools.length > 10 && Math.ceil(JSON.stringify(scopedTools).length / 4) > 4000) {
-        const before = scopedTools.length;
-        try {
-          const sel = await selectTools({ connector, model: fastModel, tools: scopedTools, userText: text });
-          const chosen = new Set((sel.names || []).map((n) => n.toLowerCase()));
-          const narrowed = scopedTools.filter((t) => chosen.has(t.name.toLowerCase()));
-          if (narrowed.length) { // safe: empty/failed selection keeps the current set
-            scopedTools = narrowed;
-            toolScope = { totalAvailable: toolset.tools.length, scoped: narrowed.length, bySkills: toolScope ? toolScope.bySkills : null, bySelection: true };
-            emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySelection: true });
-            console.log('[tool-scope]', JSON.stringify({ from: before, to: narrowed.length, ofCatalog: toolset.tools.length }));
-          } else {
-            console.warn('[tool-scope] selector returned nothing (kept', before, 'tools) —', sel.error || 'empty selection; is the fast model a thinking model?');
-          }
-        } catch (e) { console.error('[tool-select]', e && e.message); }
+      if (toolset.tools.length) {
+        const ceiling = applyToolCeiling({ loadedSkills, toolNames: planned.toolNames, allTools: toolset.tools });
+        scopedTools = ceiling.tools;
+        toolScope = { totalAvailable: toolset.tools.length, scoped: scopedTools.length, bySkills: ceiling.bySkills, fellBack: ceiling.fellBack };
+        if (ceiling.fellBack) console.warn('[context-select] no usable tool picks — falling back to the full catalog' + (planned.error ? ` (${planned.error})` : ''));
+        emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
       }
 
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
@@ -672,7 +637,11 @@ function registerIpc() {
           filterSavedTokens: Math.round(filterSaved),
           compactionSavedTokens: compactionSaved,
           delegated: delegatedCount, delegateAbsorbedTokens: delegateAbsorbed,
-          durationMs: Date.now() - turnStart
+          durationMs: Date.now() - turnStart,
+          // Makes the planner's fallback rate queryable across turns instead
+          // of only visible one turn at a time in the INTERNALS tab.
+          planningFailed: !!(skillSelect && skillSelect.error),
+          toolFellBack: !!(toolScope && toolScope.fellBack)
         };
         repo.metrics.record(metricRow);
         // Per-task rows: sub-agents (collected during the loop) + each tool call.
@@ -681,14 +650,16 @@ function registerIpc() {
         }
         try { repo.metrics.recordTasks(taskLog.map((t) => ({ ...t, projectId: projectId || null, chatId: payload?.chatId || null }))); } catch (e) { console.error('[task metrics]', e && e.message); }
         const cachePct = metricRow.inputTokens ? Math.round((metricRow.cachedTokens / metricRow.inputTokens) * 100) : 0;
-        console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length }));
+        console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length, planningFailed: metricRow.planningFailed, toolFellBack: metricRow.toolFellBack }));
         _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
       return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null };
     }
 
-    return { model: model || 'stub', reply: `(${model || 'stub'} stub) You said: ${text}`, toolTrace: [] };
+    // The renderer should never let a send reach here without a provider (see
+    // missingPrereqs() in renderer.js) — no silent stub echo pretending to be a reply.
+    throw new Error('No model selected for this chat. Choose a model before sending.');
   });
 }
 

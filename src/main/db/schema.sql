@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   delegated                INTEGER,                     -- # sub-agents this turn
   delegate_absorbed_tokens INTEGER,                     -- tokens sub-agents kept out of main
   duration_ms              INTEGER,                     -- wall-clock for the whole turn
+  planning_failed          INTEGER,                     -- 1 = the context planner call errored/mismatched this turn
+  tool_fell_back           INTEGER,                     -- 1 = tool ceiling fell back to the full catalog (no usable picks)
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);

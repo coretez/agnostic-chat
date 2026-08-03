@@ -297,9 +297,10 @@ the command palette).
 - **Storage:** `providers` table (schema v2). API key encrypted via `safeStorage`
   (ciphertext BLOB); `reveal()` is main-only and never exposed over IPC. Repo:
   `repo.providers.*`. IPC: `providers:{registry,list,add,update,remove,test}`.
-- **Chat routing:** `chat:send` now resolves the selected connection, decrypts
-  the key in main, and calls the connector with the full message history; falls
-  back to the local stub echo when no connection is selected.
+- **Chat routing:** `chat:send` resolves the selected connection, decrypts
+  the key in main, and calls the connector with the full message history.
+  The renderer blocks send (with a setup notice) when no model or working
+  directory is set, so `chat:send` itself now requires a provider.
 - **Switcher:** the title-bar model dropdown is built dynamically from enabled
   connections' models, grouped by provider.
 
@@ -327,7 +328,7 @@ on/off · model-specific chat rows · light/dark for all pages.
 | Overview / continuity | ❌ | Index, Handoff, Tasks, Inbox |
 | Skills UI | ❌ (backend scoping ✅) | Skills page + New Skill modal |
 | Model connections | ✅ OpenAI/Claude/Qwen/Kimi/Gemini connectors, Models screen, encrypted keys, test, live model fetch | Streaming; per-project key scoping; usage/cost |
-| LLM routing | ✅ chat:send routes to selected connection (history sent); stub fallback | Streaming tokens; system prompt from project/skills |
+| LLM routing | ✅ chat:send routes to selected connection (history sent); requires model + working dir, else a setup notice | Streaming tokens; system prompt from project/skills |
 
 ---
 
