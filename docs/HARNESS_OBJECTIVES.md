@@ -1,0 +1,134 @@
+# Coding Harness — Objectives (SPEC)
+
+What the Agnostic Chat coding harness must do, derived from studying how the
+current generation of harnesses is designed — Claude Code, Kimi Code CLI,
+OpenCode, Aider — and from delivery-pipeline platforms (Harness.io) whose
+gates/rollback/audit discipline predates all of them. Each objective has an
+ID; design elements and commits cite these IDs. Status reflects feature/code.
+
+The one-line thesis: **supply the hands (tools), the conscience (permissions),
+and the method (lifecycle) — while keeping the glass box** that the other
+harnesses lack.
+
+---
+
+## A. Capability — the hands
+
+**O1. Jailed local capability.** The model can read, search, write, edit, and
+run commands — but every file action resolves inside the project's working
+directory ∪ documents directory, symlink chains included. A shell is
+inherently unjailed, so it is never a "read".
+*Source: every coding harness ships fs/shell/edit as the primary surface;
+the jail is ours.*
+Accept: escape attempts (relative, absolute, symlinked file, symlinked
+parent) are refused before any prompt. **Status: SHIPPED** (coding-tools.js;
+smoke coverage).
+
+**O2. One result contract.** Coding tools return `{text, isError}` exactly
+like MCP calls so filtering, tracing, variable capture, and the glass box
+apply unchanged.
+Accept: no special-casing downstream of `callTool`. **Status: SHIPPED.**
+
+**O3. Live-service grounding.** Unlike any pure coding harness, the agent can
+interrogate connected MCP services (e.g. a SIEM) *while building*, capturing
+real data contracts into working memory — but code it writes can never call
+MCP; that boundary must be stated to the model.
+Accept: CODING MODE note names the boundary. **Status: PARTIAL** (tools
+compose today; boundary sentence lands with O10).
+
+## B. Consent — the conscience
+
+**O4. Hierarchical permissions.** Three levels: (1) scope jail, never
+bypassable; (2) per-action approval for mutations, reads free; (3) bypass
+only where rollback exists (git), enforced in main, revocable and visible.
+*Source: Claude Code permission modes; Harness.io approval stages.*
+Accept: deny mutates nothing and tells the model not to retry; bypass
+ignored without `.git`; standing bypass shows a chip. **Status: SHIPPED.**
+
+**O5. Reviewable approvals.** An approval must show what will actually
+happen — a diff for edits, size/overwrite facts for writes, the verbatim
+command for shell — not a description to rubber-stamp.
+*Source: Aider/Claude Code diff-first UX.*
+Accept: edit_file prompts contain −/+ lines. **Status: THIS CHANGE.**
+
+**O6. No secret leakage into child processes.** Commands get an allowlisted
+env; the app's keys and tokens never cross into the shell.
+Accept: canary env var does not appear in `run_command` output.
+**Status: SHIPPED.**
+
+## C. Method — the lifecycle
+
+**O7. Objectives → design → code, never a race.** When a request sets a
+development direction (platform, stack, structure, distribution) that isn't
+already fixed by KNOWN VALUES, the project brief, or the request itself, the
+planner must return *decisions to make* — options, tradeoffs,
+recommendation — and the turn ends awaiting the user. It must never silently
+pick a direction.
+*Source: the phone-app trace; OpenCode plan mode generalized from "don't
+write yet" to "don't decide yet".*
+Accept: an underdetermined build request yields an alignment reply with zero
+tool calls. **Status: THIS CHANGE** (`align` outcome).
+
+**O8. Decisions are durable.** Ratified user decisions persist as
+`user`-confidence variables — overwrite-protected against model guesses,
+re-injected into every future step and plan.
+Accept: a decision stated by the user reaches the store via the plan's
+`record` field. **Status: THIS CHANGE.**
+
+**O9. The plan is the git history.** Each completed step that mutated the
+working tree commits with its `produces` as the message — the typed plan
+contract becomes traceable increments. Framework bookkeeping, not a
+model-approved action.
+*Source: no harness does this; Harness.io's audit trail says it must exist.*
+Accept: a 3-step mutating plan leaves ≥1 commit per mutating step.
+**Status: THIS CHANGE** (step-commits).
+
+**O10. Plans that write code must verify.** The plan-shape contract: steps
+that create/modify code end with a verification step (tests/build via
+run_command, fix failures); steps may only prescribe what the listed tools
+can do (no pantomime, no MCP-in-app).
+*Source: compiler/tests as ground truth — the harnesses' core advantage;
+Harness.io Continuous Verification.*
+Accept: DERIVE_PROMPT carries the rules; a code-writing plan's last step
+runs verification. **Status: THIS CHANGE** (prompt contract).
+
+**O11. Refinement is bounded and structural.** After verify: parallel
+critique lenses (security, modularization/coupling, efficiency, redundancy)
+anchored by deterministic tools, findings become fix steps, ≤2 cycles,
+unresolved findings surfaced honestly.
+*Source: Chris's methodology; the multi-lens review pattern.*
+Accept: refinement runs as plan steps with authored critic agents.
+**Status: PLANNED** (agents table + `assign` already support authoring
+critics today).
+
+## D. Recovery + measurement — the safety net
+
+**O12. Every loop bounded, every failure lands somewhere safer.** Planner
+failure → flat loop; budget exhaustion → forced wrap-up; stuck → refine ≤3 →
+escalate; STOP → save work; no git → ask. **Status: SHIPPED** (pre-dates the
+harness; preserved by it).
+
+**O13. Rollback is executable, not aspirational.** Auto-checkpoint before a
+bypassed turn's first mutation; one-click revert-turn. O9's step-commits are
+the foundation. **Status: PLANNED.**
+
+**O14. Everything measured, glass box kept.** Approvals, commits, plan
+shape, refinement cycles land in metrics/process events like everything
+else. No invisible context engineering — the differentiator over every
+harness studied. **Status: PARTIAL** (process events shipped; approval rows
+in task_metrics planned).
+
+---
+
+## Traceability
+
+| Objective | Design element | Where |
+|---|---|---|
+| O1, O2, O6 | tool pack + jail + env scrub | `src/main/coding-tools.js`, smoke §coding |
+| O4 | permission hierarchy | `coding-tools.js` gates + `ipc.js` approveAction/askUser + bypass chip |
+| O5 | diff summaries in approvals | `coding-tools.js` call() summaries |
+| O7, O8 | `align` outcome + `record` | `plan-derive.js` submit_plan schema + `ipc.js` align gate |
+| O9 | step-commits | `coding-tools.js` commitStep + `execute.js` onStepComplete |
+| O10 | plan-shape contract | `plan-derive.js` DERIVE_PROMPT coding rules |
+| O11 | refinement loop | planned — authored critic agents + assign |
+| O13 | checkpoint/revert | planned — rides O9 |
