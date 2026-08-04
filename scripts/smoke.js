@@ -445,6 +445,99 @@ app.whenReady().then(async () => {
     assert(new Set(seqs).size === seqs.length, 'seq resumes monotonically after load (no ts collisions)');
   }
 
+  // ── P1: Step executor (plan-and-execute, stuck → re-plan → escalate) ────────
+  const { executeStep, executePlan } = require('../src/main/execute');
+  {
+    // (a) Objective: step 2's tool call is formed ONLY from a value step 1
+    // discovered. Step 1's model lists tenants (result carries tenant_id); the
+    // store captures it; step 2's directive shows it as a KNOWN VALUE and the
+    // mock model reads it FROM THE DIRECTIVE (not from hardcoded knowledge).
+    const store1 = new VariableStore();
+    const calls = [];
+    const mockChat = async ({ messages }) => {
+      const lastUserIdx = messages.map((m) => m.role).lastIndexOf('user');
+      const directive = messages[lastUserIdx].content;
+      // only tool results belonging to THIS step (after its directive) count
+      const toolsThisStep = messages.slice(lastUserIdx + 1).some((m) => m.role === 'tool');
+      if (/CURRENT STEP \(1\)/.test(directive)) {
+        if (!toolsThisStep) return { text: '', toolCalls: [{ id: 't1', name: 'list_tenants', args: {} }] };
+        return { text: 'Found the tenant.', toolCalls: [] };
+      }
+      // step 2: parse tenant_id out of the KNOWN VALUES block in the directive
+      const m = directive.match(/tenant_id = "([^"]+)"/);
+      if (m && !toolsThisStep) return { text: '', toolCalls: [{ id: 't2', name: 'get_tenant_report', args: { tenant_id: m[1] } }] };
+      return { text: 'Report fetched.', toolCalls: [] };
+    };
+    const mockCallTool = async (name, args) => {
+      calls.push({ name, args });
+      if (name === 'list_tenants') return { text: JSON.stringify({ tenants: [{ tenant_id: 'acme-prod' }] }) };
+      return { text: 'ok' };
+    };
+    const s1 = await executeStep({ chat: mockChat, callTool: mockCallTool, model: 'mock', step: { id: 1, task: 'find the tenant' }, tools: [], history: [], store: store1 });
+    assert(!s1.stuck && store1.get('tenant_id') === 'acme-prod', 'step 1 captured tenant_id from the tool result');
+    const s2 = await executeStep({ chat: mockChat, callTool: mockCallTool, model: 'mock', step: { id: 2, task: 'pull the tenant report' }, tools: [], history: s1.history, store: store1 });
+    const rep = calls.find((c) => c.name === 'get_tenant_report');
+    assert(!s2.stuck && rep && rep.args.tenant_id === 'acme-prod', "step 2's tool call formed from step 1's discovered value");
+
+    // set_variable is intercepted (never routed to MCP) and lands in the store
+    const store2 = new VariableStore();
+    const routed = [];
+    const svChat = async ({ messages }) => {
+      const lastTool = messages.filter((m) => m.role === 'tool').pop();
+      if (!lastTool) return { text: '', toolCalls: [{ id: 'v1', name: 'set_variable', args: { key: 'case_id', value: 'C-7' } }] };
+      return { text: 'done', toolCalls: [] };
+    };
+    await executeStep({ chat: svChat, callTool: async (n) => { routed.push(n); return { text: 'x' }; }, model: 'mock', step: { id: 1, task: 't' }, tools: [], history: [], store: store2 });
+    assert(store2.get('case_id') === 'C-7' && routed.length === 0, 'set_variable intercepted into the store, not routed to MCP');
+  }
+
+  {
+    // (b) Objective: a budget-exhausted step reports stuck with a forced partial
+    // conclusion, triggers ≤3 auto re-plans, then escalates with an explanation.
+    const looping = async ({ messages, tools }) => {
+      if (!tools.length) return { text: 'partial: got half the data', toolCalls: [] };  // forced wrap-up
+      return { text: '', toolCalls: [{ id: 'x', name: 'search', args: {} }] };          // never finishes
+    };
+    const noop = async () => ({ text: '{}' });
+
+    const sStuck = await executeStep({ chat: looping, callTool: noop, model: 'mock', step: { id: 1, task: 'endless dig' }, tools: [{ name: 'search', description: '', inputSchema: {} }], history: [], store: new VariableStore(), budget: 2 });
+    assert(sStuck.stuck && sStuck.reason === 'iteration-budget-exhausted', 'budget-exhausted step reports stuck');
+    assert(sStuck.partial.includes('partial'), 'stuck step still forces a partial conclusion');
+
+    // Orchestration: re-plan fires ≤3 times, then onStuck escalates with the
+    // goal + what's stuck; user declines → partial kept for synthesis.
+    let replanCalls = 0; let escalation = null;
+    const out = await executePlan({
+      chat: looping, callTool: noop, model: 'mock',
+      plan: { goal: 'dig everything', steps: [{ id: 1, task: 'endless dig' }] },
+      tools: [{ name: 'search', description: '', inputSchema: {} }],
+      store: new VariableStore(), stepBudget: 1,
+      refinePlan: async ({ stuckStep, reason }) => { replanCalls++; assert(reason === 'iteration-budget-exhausted', 'refinePlan told why the step stuck'); return { steps: [{ id: stuckStep.id, task: stuckStep.task }] }; },
+      onStuck: async ({ goal, stuckStep, replans }) => { escalation = { goal, step: stuckStep.id, replans }; return { continue: false }; }
+    });
+    assert(replanCalls === 3, 'stuck step auto-re-planned exactly REPLAN_BUDGET (3) times');
+    assert(escalation && escalation.goal === 'dig everything' && escalation.replans === 3, 'escalation carries the goal + re-plan count for the user');
+    assert(out.stepResults.length === 1 && out.stepResults[0].incomplete, 'declined escalation keeps the partial for synthesis');
+
+    // A useful re-plan (tail replaced with a completable step) needs no escalation.
+    const healChat = async ({ messages, tools }) => {
+      const directive = messages.filter((m) => m.role === 'user').pop().content;
+      if (/fixed step/.test(directive)) return { text: 'completed via new approach', toolCalls: [] };
+      if (!tools.length) return { text: 'partial', toolCalls: [] };
+      return { text: '', toolCalls: [{ id: 'x', name: 'search', args: {} }] };
+    };
+    let escalated = false;
+    const healed = await executePlan({
+      chat: healChat, callTool: noop, model: 'mock',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'endless dig' }] },
+      tools: [{ name: 'search', description: '', inputSchema: {} }],
+      store: new VariableStore(), stepBudget: 1,
+      refinePlan: async () => ({ steps: [{ id: 1, task: 'fixed step' }] }),
+      onStuck: async () => { escalated = true; return { continue: false }; }
+    });
+    assert(healed.completed && !escalated && healed.replans === 1, 'successful re-plan completes the turn without escalating');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
