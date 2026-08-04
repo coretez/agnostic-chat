@@ -138,14 +138,34 @@ function hasGit(dir) {
   try { return !!dir && fs.existsSync(path.join(dir, '.git')); } catch { return false; }
 }
 
+// Resolve the symlink chain of `abs` even when the leaf doesn't exist yet
+// (writes create files): realpath the deepest EXISTING ancestor, then re-append
+// the untraversed tail. A symlinked parent OR a symlinked leaf both resolve to
+// their true location before the jail check sees them.
+function realResolve(abs) {
+  let dir = abs;
+  const tail = [];
+  for (;;) {
+    try { return tail.length ? path.join(fs.realpathSync(dir), ...tail.reverse()) : fs.realpathSync(dir); }
+    catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) return abs;      // hit the fs root without an existing ancestor
+      tail.push(path.basename(dir));
+      dir = parent;
+    }
+  }
+}
+
 // Level 1 — the scope jail. Resolve against the primary root (working dir);
-// accept only paths that land inside one of the allowed roots.
+// accept only paths that land inside one of the allowed roots. The check runs
+// on REAL paths (symlinks resolved) — a link inside the jail pointing outside
+// is outside. Prefix checks on lexical paths alone are escapable.
 function makeJail(roots) {
-  const bases = roots.filter(Boolean).map((r) => path.resolve(r));
+  const bases = roots.filter(Boolean).map((r) => realResolve(path.resolve(r)));
   const primary = bases[0];
   const inside = (abs) => bases.find((b) => abs === b || abs.startsWith(b + path.sep));
   const resolve = (p) => {
-    const abs = path.resolve(primary, String(p == null || p === '' ? '.' : p));
+    const abs = realResolve(path.resolve(primary, String(p == null || p === '' ? '.' : p)));
     if (!inside(abs)) throw new Error(`path is outside the working and documents directories: ${p}`);
     return abs;
   };
@@ -265,11 +285,22 @@ function grepFilesTool(jail, args) {
   return { text: out.length ? out.join('\n') : `(no matches in ${scanned} files)` };
 }
 
+// Commands do NOT inherit the app's full environment — the Electron process
+// env can carry API keys and tokens that no build/test command needs. Only
+// this allowlist crosses into the shell (the -l login shell still sources the
+// user's own rc files, so PATH managers like nvm keep working).
+const SHELL_ENV_ALLOW = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM'];
+function shellEnv() {
+  const env = {};
+  for (const k of SHELL_ENV_ALLOW) if (process.env[k] != null) env[k] = process.env[k];
+  return env;
+}
+
 function runCommandTool(root, command, timeoutMs) {
   return new Promise((resolve) => {
     let out = '';
     let timedOut = false;
-    const child = spawn('/bin/zsh', ['-lc', command], { cwd: path.resolve(root), env: process.env });
+    const child = spawn('/bin/zsh', ['-lc', command], { cwd: path.resolve(root), env: shellEnv() });
     const add = (chunk) => { if (out.length < MAX_SHELL_OUT) out += chunk.toString('utf8'); };
     child.stdout.on('data', add);
     child.stderr.on('data', add);

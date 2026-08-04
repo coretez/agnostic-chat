@@ -16,6 +16,7 @@ const { connectAndList, McpConnection } = require('../src/main/mcp/client');
 const mcpManager = require('../src/main/mcp/manager');
 const { runChatLoop } = require('../src/main/chat-loop');
 const { maybeCompress } = require('../src/main/compress');
+const { buildCodingTools, hasGit } = require('../src/main/coding-tools');
 
 function assert(cond, msg) {
   if (!cond) throw new Error('ASSERT FAILED: ' + msg);
@@ -711,6 +712,65 @@ app.whenReady().then(async () => {
     });
     assert(planOut.aborted && !planOut.completed, 'planned path: abort marks the run aborted, not completed');
     assert(stepChats === 1 && planOut.stepResults.length === 1 && planOut.stepResults[0].conclusion === 'step one done', 'planned path: completed step kept, remaining steps never call the model');
+  }
+
+  // ── Coding harness: jail (L1), action gating (L2), env scrub, hasGit (L3) ──
+  {
+    const ctRoot = path.join(tmp, 'ct'); // work + docs (allowed) vs outside (not)
+    const work = path.join(ctRoot, 'work'), docsDir = path.join(ctRoot, 'docs'), outside = path.join(ctRoot, 'outside');
+    for (const d of [work, docsDir, outside]) fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside-data');
+
+    const asked = [];
+    let allow = true;
+    const ct = buildCodingTools({ root: work, docsRoot: docsDir, approveAction: async (a) => { asked.push(a.kind); return allow; } });
+
+    // L2: mutations ask; reads don't. L1 runs before L2 ever fires.
+    await ct.call('write_file', { path: 'a.txt', content: 'alpha beta\n' });
+    assert(asked.length === 1 && asked[0] === 'write', 'coding: write_file asks for approval (L2)');
+    const r1 = await ct.call('read_file', { path: 'a.txt' });
+    assert(!r1.isError && r1.text.includes('alpha') && asked.length === 1, 'coding: reads are free — no approval asked');
+    const docAbs = path.join(docsDir, 'report.md');
+    const r2 = await ct.call('write_file', { path: docAbs, content: '# r\n' });
+    assert(!r2.isError && fs.existsSync(docAbs), 'coding: docs dir is a second allowed root (absolute path in-jail)');
+
+    // L1: lexical escapes blocked BEFORE any approval.
+    const before = asked.length;
+    const esc1 = await ct.call('write_file', { path: '../outside/x.txt', content: 'no' });
+    const esc2 = await ct.call('read_file', { path: '/etc/passwd' });
+    assert(esc1.isError && esc2.isError && asked.length === before, 'coding: jail blocks relative + absolute escapes before asking (L1)');
+
+    // L1: symlink escapes — a link inside the jail pointing outside IS outside.
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(work, 'link.txt'));
+    fs.symlinkSync(outside, path.join(work, 'linkdir'));
+    const sym1 = await ct.call('read_file', { path: 'link.txt' });
+    const sym2 = await ct.call('write_file', { path: 'linkdir/evil.txt', content: 'no' });
+    assert(sym1.isError && sym2.isError && !fs.existsSync(path.join(outside, 'evil.txt')), 'coding: symlinked file AND symlinked parent cannot escape the jail');
+
+    // L2 deny: nothing mutates, model told not to retry.
+    allow = false;
+    const den = await ct.call('edit_file', { path: 'a.txt', old_string: 'alpha', new_string: 'gamma' });
+    assert(den.isError && den.text.includes('declined') && fs.readFileSync(path.join(work, 'a.txt'), 'utf8').includes('alpha'), 'coding: denied edit leaves the file untouched');
+    allow = true;
+
+    // edit_file exactness: missing + ambiguous matches refuse cleanly.
+    await ct.call('write_file', { path: 'b.txt', content: 'dup dup\n' });
+    const miss = await ct.call('edit_file', { path: 'b.txt', old_string: 'absent', new_string: 'x' });
+    const ambi = await ct.call('edit_file', { path: 'b.txt', old_string: 'dup', new_string: 'x' });
+    assert(miss.isError && ambi.isError && ambi.text.includes('2 times'), 'coding: edit_file refuses missing and ambiguous matches');
+
+    // Shell: cwd is the working dir; the app env is scrubbed (allowlist only).
+    process.env.SMOKE_LEAK_CANARY = 'should-not-cross';
+    const sh = await ct.call('run_command', { command: 'pwd; echo "C=${SMOKE_LEAK_CANARY:-unset}"' });
+    delete process.env.SMOKE_LEAK_CANARY;
+    assert(!sh.isError && sh.text.includes(fs.realpathSync(work)) && sh.text.includes('C=unset'), 'coding: shell runs in working dir with scrubbed env (no app secrets)');
+    const shFail = await ct.call('run_command', { command: 'exit 3' });
+    assert(shFail.isError && shFail.text.startsWith('exit 3'), 'coding: non-zero exit reported as an error with the code');
+
+    // L3 gate input: hasGit flips when .git appears (dir or worktree file).
+    assert(!hasGit(work), 'coding: hasGit false without a repo');
+    fs.mkdirSync(path.join(work, '.git'));
+    assert(hasGit(work), 'coding: hasGit true with a .git dir');
   }
 
   console.log('\nALL SMOKE TESTS PASSED');
