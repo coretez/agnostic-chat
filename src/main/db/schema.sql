@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS chats (
   project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title       TEXT,
   model       TEXT,                       -- provider/model used for this chat
+  variables_json TEXT,                     -- variable-store snapshot: discovered params/derived values carried across turns
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
   archived_at TEXT

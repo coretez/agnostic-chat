@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 let db = null;
 
@@ -193,6 +193,14 @@ function migrate(database) {
     if (!dcols.includes('doc_type')) database.exec('ALTER TABLE documents ADD COLUMN doc_type TEXT');
     if (!dcols.includes('version')) database.exec('ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
     if (!dcols.includes('properties_json')) database.exec('ALTER TABLE documents ADD COLUMN properties_json TEXT');
+  }
+
+  // v14: per-chat variable store (working memory of discovered tool parameters
+  // and derived values) — carried across a turn's steps and persisted across the
+  // turns of a chat. See docs/PLANNING_ARCHITECTURE.md §5.
+  if (current < 14) {
+    const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
+    if (!ccols.includes('variables_json')) database.exec('ALTER TABLE chats ADD COLUMN variables_json TEXT');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

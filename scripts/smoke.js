@@ -393,6 +393,58 @@ app.whenReady().then(async () => {
   assert(contents[0] && contents[0].text.includes('<h1>'), 'MCP resources/read returns resource contents');
   rc.close();
 
+  // ── P0: Variable store (working memory of discovered parameters) ───────────
+  const { VariableStore, SET_VARIABLE_TOOL } = require('../src/main/variables');
+  {
+    const vs = new VariableStore();
+    vs.set({ key: 'tenant_id', value: 'acme-prod' }, { step: 1, confidence: 'observed' });
+    assert(vs.get('tenant_id') === 'acme-prod', 'variable store: set/get round-trip');
+
+    // auto-capture from tool ARGS: id-like key kept, generic knobs ignored
+    vs.captureFromArgs({ case_id: 'C-10432', limit: 50, query: 'foo' }, { step: 2, source: 'get_case' });
+    assert(vs.get('case_id') === 'C-10432', 'captureFromArgs keeps id-like arg (case_id)');
+    assert(!vs.has('limit') && !vs.has('query'), 'captureFromArgs ignores generic knobs (limit/query)');
+
+    // auto-capture id-like fields from a JSON tool RESULT; skip noise
+    vs.captureFromResult('list_cases', JSON.stringify({ cases: [{ case_id: 'C-10432', account_id: 'A-88', label: 'noise' }] }), { step: 2 });
+    assert(vs.get('account_id') === 'A-88' && !vs.has('label'), 'captureFromResult harvests id-like fields, skips noise');
+
+    // render → the KNOWN VALUES block injected into the prompt
+    const block = vs.render();
+    assert(block.startsWith('KNOWN VALUES') && block.includes('tenant_id = "acme-prod"'), 'render emits KNOWN VALUES block');
+
+    // overwrite protection: an observed rediscovery must NOT clobber a user value
+    vs.set({ key: 'region', value: 'us-east-1' }, { confidence: 'user', step: 1 });
+    vs.set({ key: 'region', value: 'eu-west-9' }, { confidence: 'observed', step: 3 });
+    assert(vs.get('region') === 'us-east-1', 'user-confidence value not clobbered by observed rediscovery');
+
+    // explicit set_variable tool contract
+    assert(SET_VARIABLE_TOOL.name === 'set_variable' && SET_VARIABLE_TOOL.inputSchema.required.includes('key'), 'set_variable tool schema requires a key');
+
+    // deterministic order by turn-relative seq (re-observing a value doesn't reorder)
+    const order = vs.list().map((e) => e.key);
+    assert(order[0] === 'tenant_id' && order.indexOf('case_id') < order.indexOf('account_id'), 'entries ordered by capture sequence');
+  }
+
+  // P0 objective: a value captured in one step survives save→load and is read
+  // back exactly by a later step (persisted via chats.variables_json).
+  {
+    const vChat = repo.chats.create({ projectId: projA.id, title: 'VarStore' });
+    const step1 = new VariableStore();
+    step1.captureFromArgs({ report_path: '/Users/chris/Documents/Agnostic Chat/report.md' }, { step: 1, source: 'save_document' });
+    repo.chats.setVariables(vChat.id, JSON.stringify(step1.toJSON()));
+
+    // …later step (or after an app restart): rebuild from the DB snapshot
+    const step2 = VariableStore.fromJSON(repo.chats.getVariables(vChat.id));
+    assert(step2.get('report_path') === '/Users/chris/Documents/Agnostic Chat/report.md', 'variable survives save→load round-trip');
+    assert(step2.size === step1.size, 'store size preserved across persistence');
+
+    // seq resumes past the persisted max so new captures don't collide
+    step2.set({ key: 'follow_up_id', value: 'F-1' }, { step: 2 });
+    const seqs = step2.list().map((e) => e.ts);
+    assert(new Set(seqs).size === seqs.length, 'seq resumes monotonically after load (no ts collisions)');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

@@ -192,6 +192,15 @@ const chats = {
   },
   archive(id) {
     getDb().prepare("UPDATE chats SET archived_at = datetime('now') WHERE id = ?").run(id);
+  },
+  // Variable store (working memory) persistence — opaque JSON snapshot; the
+  // VariableStore class owns its shape. NULL until a turn captures something.
+  getVariables(id) {
+    const row = getDb().prepare('SELECT variables_json FROM chats WHERE id = ?').get(id);
+    return row ? (row.variables_json || null) : null;
+  },
+  setVariables(id, json) {
+    getDb().prepare("UPDATE chats SET variables_json = ?, updated_at = datetime('now') WHERE id = ?").run(json || null, id);
   }
 };
 
