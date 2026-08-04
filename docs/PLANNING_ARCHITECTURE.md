@@ -454,7 +454,92 @@ is inspectable at every step in the glass box.
 
 ---
 
-## 12. Risks
+## 12. Live validation (2026-08-04) — results & the capability gap
+
+Four live runs of **"Investigate case for taylor.brooks@acneinc.com"** on
+`kimi-k2.6` against the Fluency Expo MCP (205 tools, 30 skills), same chat, on
+the completed P0–P5 build. Every designed mechanism fired in production: plan
+derivation from skill instructions, per-step delegation with isolation, one
+reactive re-plan, honest clarification on a typo'd identity (`acneinc` vs
+`acmeinc` — the planner refused to guess), variable capture + cross-turn
+persistence, and stop-safe telemetry.
+
+**Turn economics across the lineage** (same investigation, successive turns):
+
+| Turn | Input tokens | Cache | Duration | Plan | Notes |
+|---|---|---|---|---|---|
+| A | 787k | 86% | 13.5 min | 6 steps | full investigation, report saved + verdict recorded |
+| B | 233k | 94% | 8.8 min | 7 steps, 1 re-plan | stopped honestly at the identity mismatch |
+| C | ~230k | — | 13.4 min | 6 steps, 3 delegates | 12.4k-char report; main thread at 10% occupancy |
+| D | 142k | 66% | 12.2 min | 4 steps, 2 delegates | **planner reused prior work: "without re-expanding"** |
+
+787k → 142k input (5.5×) for the same investigation lineage — the variable
+store carrying `case_id` / `expansion_status=expanded` across turns let the
+planner skip discovery AND expansion. Kimi's thinking dominates wall clock;
+the token story is where the wins show. Delegation isolation confirmed: a
+delegate absorbed 24k and returned 212 tok ("kept 23k out of main").
+
+### The gap the last run exposed: the plan outruns the runtime's capabilities
+
+Turn D's steps 1 and 4 prescribe things no offered tool can do: *"read
+`references/output-contract.md`"* and *"run `python3
+…/validate_case_report.py`"*. The skill's workflow legitimately calls for
+them — but the toolset has no file-read and no script execution, so those
+sub-steps get improvised around: the step-1 delegate could only call
+`get_instruction_group` twice, and step 4's "validation" is the model
+ASSERTING the report is valid, not the script running. The plan faithfully
+follows the skill; the runtime silently can't honor it.
+
+## 13. Proposed fix: capability-grounded planning + `read_skill_file`
+
+Two halves — one closes the file gap for real, one makes the remaining gap
+honest instead of pantomimed.
+
+### 13a. `read_skill_file` — serve the skill's bundled files we already store
+
+The healed skill envelope in the DB **already contains all bundled files**
+(the Fluency delivery for `fluency-case-investigation` carries 10 files:
+`SKILL.md`, `references/output-contract.md`, the HTML report template, the
+validation scripts). Today we extract only SKILL.md; the rest sits unread in
+`skills.definition`. Plan:
+
+- **skill-content.js**: add `listSkillFiles(definition)` → `[{path, bytes}]`
+  and `readSkillFile(definition, path)` → content, both reading the stored
+  envelope (non-envelope skills expose just their own markdown). No
+  filesystem, no MCP round-trip — main-process lookup of data we already have.
+- **Synthetic tool** `READ_SKILL_FILE_TOOL { skill, path }`, intercepted in
+  `callTool` beside `set_variable`/`save_document`, resolved against the
+  turn's LOADED skills only (a skill that wasn't selected isn't readable —
+  same scoping discipline as everything else).
+- **Advertise the files**: the skill-injection block and `planContext` list
+  each loaded skill's bundled files ("bundled files: references/…, assets/…"),
+  so the planner derives *"read references/output-contract.md via
+  read_skill_file"* as a real, executable step — and the report gets built
+  from the actual output contract instead of the model's memory of it.
+- **Smoke**: envelope → list/read round-trip; unloaded-skill path refused;
+  planner prompt carries the file list.
+
+### 13b. Capability-grounded planning (honest degradation)
+
+Add one hard rule to `DERIVE_PROMPT` / `REFINE_PROMPT`: *"Derive steps ONLY
+for actions the listed tools can perform. If the skill prescribes an action
+with no matching tool (running a script, rendering a PDF), do not emit a step
+that pretends — either adapt it to available tools or state in the step what
+must be skipped and why."* The planner already receives the exact scoped tool
+menu; this makes the boundary explicit, so a validation step degrades to
+*"validation script unavailable in this runtime — flagging unvalidated"*
+instead of asserting success.
+
+### 13c. Script execution — deliberately deferred
+
+Running bundled `validate_*.py` / render scripts is a sandboxing decision
+(exec in the project working_dir? a jailed interpreter? per-run user
+approval?), with real security surface. Deferred until 13a/13b prove out;
+13b keeps the gap honest meanwhile. When we take it on, the natural shape is
+a `run_skill_script` tool gated by per-project approval, executing in the
+project's `working_dir` with no network — decide then, not now.
+
+## 14. Risks
 
 - **Two planning passes add latency and fast-model cost.** Mitigation: the trivial-
   turn gate, single-pass Pass 2 to start, and Pass 1 is already paid for today.
