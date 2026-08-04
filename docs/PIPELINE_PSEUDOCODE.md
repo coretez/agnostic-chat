@@ -222,13 +222,30 @@ L     evaluator: "usage — Pass 1 fell back to full MCP catalog; 12 offered,
       0 used. Consider disabling that server for coding chats."
 
 ────────────────────────────────────────────────────────────────────────
+SHIPPED since first draft (see docs/HARNESS_OBJECTIVES.md for the spec)
+────────────────────────────────────────────────────────────────────────
+  · O5  approval prompts show the change: −/+ diff for edits, size facts
+        for writes, verbatim command for shell
+  · O7  ALIGN gate: Pass 2 may return `decisions` instead of steps —
+        direction-setting requests end the turn awaiting the user
+  · O8  `record`: user-stated decisions persist as user-confidence
+        KNOWN VALUES (overwrite-protected, cross-turn)
+  · O9  step-commits: a completed step that mutated the tree commits
+        with its `produces` as the message — the plan IS the git history
+  · O10 plan-shape contract in DERIVE_PROMPT (coding mode): verify step
+        required for code-writing plans; capability boundary stated
+        (planned code can never call MCP)
+
+────────────────────────────────────────────────────────────────────────
 [PROPOSED] — designed, not yet implemented
 ────────────────────────────────────────────────────────────────────────
-  · approval prompts show a unified DIFF, not a description   (Level 2 upgrade)
-  · auto git checkpoint before a bypassed turn's first mutation
-    → shadow ref on turn_metrics → one-click "revert this turn"  (Level 3 completion)
+  · O11 refinement loop: parallel critic agents (security, coupling,
+        efficiency, redundancy) + deterministic anchors, ≤2 cycles
+  · O13 auto checkpoint before a bypassed turn's first mutation
+    → shadow ref on turn_metrics → one-click "revert this turn"
   · AGENTS.md/CLAUDE.md in working_dir auto-injected beside cheat_sheet
   · per-project check command auto-runs after mutations, result fed to synthesis
   · read_skill_file — serve bundled skill files from skills.definition
   · depth-2 repo map fed to Pass 2 so plans name real files
+  · evaluator code lens: diff summary in the digest when a turn mutated files
 ```
