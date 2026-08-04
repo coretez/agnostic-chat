@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 let db = null;
 
@@ -210,6 +210,13 @@ function migrate(database) {
     if (!tcols.includes('plan_steps')) database.exec('ALTER TABLE turn_metrics ADD COLUMN plan_steps INTEGER');
     if (!tcols.includes('plan_refines')) database.exec('ALTER TABLE turn_metrics ADD COLUMN plan_refines INTEGER');
     if (!tcols.includes('vars_captured')) database.exec('ALTER TABLE turn_metrics ADD COLUMN vars_captured INTEGER');
+  }
+
+  // v16: per-chat coding-harness toggle — enables the jailed file/shell tool
+  // pack (coding-tools.js) rooted at the project's working_dir.
+  if (current < 16) {
+    const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
+    if (!ccols.includes('coding_mode')) database.exec('ALTER TABLE chats ADD COLUMN coding_mode INTEGER');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

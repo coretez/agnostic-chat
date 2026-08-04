@@ -149,7 +149,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .tabbar__note { display: flex; align-items: center; padding: 0 14px; font-family: var(--mono); font-size: 10px; color: var(--ink3); }
 
 .pages { flex: 1; min-height: 0; display: flex; }
-.page { flex: 1; min-height: 0; display: flex; }
+.page { flex: 1; min-height: 0; min-width: 0; display: flex; }
 .page[hidden] { display: none; }
 .page--center { align-items: center; justify-content: center; text-align: center; padding: 0 60px; }
 .page--scroll { display: block; overflow-y: auto; }
@@ -423,10 +423,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .btn--sm { height: 24px; padding: 0 14px; }
 
 /* ── Chat page ─────────────────────────────────────────────────── */
-.chat { flex: 1; display: flex; min-height: 0; }
+.chat { flex: 1; display: flex; min-height: 0; min-width: 0; }
 .chat__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-.turns { flex: 1; overflow-y: auto; padding: 22px 26px 6px; display: flex; flex-direction: column; gap: 20px; }
+.turns { flex: 1; overflow-y: auto; overflow-x: hidden; min-width: 0; padding: 22px 26px 6px; display: flex; flex-direction: column; gap: 20px; }
 .turn { display: flex; gap: 12px; }
 .turn__who { width: 52px; flex: none; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.6px; padding-top: 2px; color: var(--ink3); }
 .turn__who--assistant { color: var(--brand); }
@@ -447,8 +447,16 @@ body { display: flex; flex-direction: column; height: 100vh; }
 
 /* Live activity indicator */
 .turn__status { font-family: var(--mono); font-size: 10px; color: var(--ink3); margin-left: 4px; }
-.limitprompt { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--brand); border-left-width: 2px; border-radius: 6px; background: var(--brand-soft); }
-.limitprompt__msg { font-size: 12.5px; color: var(--ink); }
+.limitprompt { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--brand); border-left-width: 2px; border-radius: 6px; background: var(--brand-soft); min-width: 0; }
+.limitprompt__msg { font-size: 12.5px; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.shellcmd { display: block; flex-basis: 100%; font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
+.limitprompt__msg--dim { font-size: 10.5px; color: var(--ink3); flex-basis: 100%; }
+
+/* Coding-harness toggle (composer) */
+.codebtn { min-width: 30px; height: 22px; padding: 0 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--ink3); font-family: var(--mono); font-size: 10px; letter-spacing: 0.5px; cursor: pointer; }
+.codebtn:hover { color: var(--brand); border-color: var(--brand); }
+.codebtn.is-on { color: var(--brand); border-color: var(--brand); background: var(--brand-soft); }
+.codebtn:disabled { opacity: 0.4; cursor: default; }
 .typing { display: inline-flex; gap: 4px; align-items: center; height: 18px; vertical-align: middle; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); animation: typing 1s infinite ease-in-out; }
 .typing span:nth-child(2) { animation-delay: 0.15s; }
@@ -513,7 +521,7 @@ html.busy, html.busy * { cursor: progress !important; }
 .composer__input:focus { outline: none; }
 .composer__input::placeholder { color: var(--ink3); }
 .composer__row { display: flex; align-items: center; gap: 10px; }
-.composer__meta { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.4px; color: var(--ink3); text-transform: uppercase; }
+.composer__meta { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.4px; color: var(--ink3); text-transform: uppercase; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer__attach { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .attachchip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; color: var(--ink2); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 7px; }
 .attachchip__sz { color: var(--ink3); }

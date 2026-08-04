@@ -21,7 +21,7 @@ const el = {
   ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
-  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'),
+  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), codeToggle: $('code-toggle'),
   ctxMeter: $('ctx-meter'),
   intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
   intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
@@ -603,8 +603,30 @@ function renderScope() {
 }
 function updateComposerMeta() {
   const model = state.selected?.model;
-  el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}`;
+  const chat = state.chats.find((c) => c.id === state.currentChatId);
+  const code = chat && chat.coding_mode ? ' · CODE' : '';
+  el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}${code}`;
 }
+
+// ── Coding-harness toggle (per chat): file/shell tools in the working dir ──
+function updateCodeToggle() {
+  const chat = state.chats.find((c) => c.id === state.currentChatId);
+  el.codeToggle.disabled = !chat;
+  el.codeToggle.classList.toggle('is-on', !!(chat && chat.coding_mode));
+}
+el.codeToggle.onclick = async () => {
+  const chat = state.chats.find((c) => c.id === state.currentChatId);
+  if (!chat) return;
+  const on = chat.coding_mode ? 0 : 1;
+  if (on) {
+    const proj = state.projects.find((p) => p.id === state.currentProjectId);
+    if (!proj || !proj.working_dir) { showSetupNotice(['workingDir']); return; }
+  }
+  await window.api.chats.setCodingMode(chat.id, !!on);
+  chat.coding_mode = on;
+  updateCodeToggle();
+  updateComposerMeta();
+};
 
 // ── Internals: glass-box context inspector ─────────────────────────
 const CONTRIB = {
@@ -1181,14 +1203,16 @@ async function selectProject(id) {
   updateModelSwitch();
 
   if (state.chats.length > 0) selectChat(state.chats[0].id);
-  else { el.messages.innerHTML = ''; turn('NO CHATS YET · HIT + NEXT TO CHATS', 'meta'); el.send.disabled = true; }
+  else { el.messages.innerHTML = ''; turn('NO CHATS YET · HIT + NEXT TO CHATS', 'meta'); el.send.disabled = true; updateCodeToggle(); }
 }
 
 async function selectChat(id) {
   state.currentChatId = id;
   el.send.disabled = false;
   const chat = state.chats.find((c) => c.id === id);
-  if (chat?.model) { state.selected = resolveProvider(chat.model); el.modelLabel.textContent = chat.model; updateComposerMeta(); }
+  if (chat?.model) { state.selected = resolveProvider(chat.model); el.modelLabel.textContent = chat.model; }
+  updateCodeToggle();
+  updateComposerMeta();
   updateModelSwitch();
   updateCtxMeter();
   renderChats();
@@ -1358,6 +1382,38 @@ async function submit() {
     body.appendChild(prompt);
     el.messages.scrollTop = el.messages.scrollHeight;
   }
+  // Coding mode: per-action approval for mutations (writes/edits/shell) over
+  // the same one-shot chat:continue channel. BYPASS (stop asking for this
+  // project) is only offered when the working dir has git — rollback exists.
+  function showActionPrompt(ev) {
+    status.textContent = '';
+    const prompt = document.createElement('div');
+    prompt.className = 'limitprompt';
+    const msg = ev.kind === 'shell'
+      ? 'Run this shell command in the working directory?'
+      : 'Allow this file change?';
+    prompt.innerHTML = `<span class="limitprompt__msg">${msg}</span>`
+      + `<code class="shellcmd">${escapeHtml(String(ev.summary || '').slice(0, 600))}</code>`;
+    const allow = document.createElement('button'); allow.className = 'btn btn--brand btn--sm'; allow.textContent = 'ALLOW';
+    const deny = document.createElement('button'); deny.className = 'btn btn--ghost btn--sm'; deny.textContent = 'DENY';
+    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'action skipped…'; };
+    allow.onclick = () => answer(1);
+    deny.onclick = () => answer(0);
+    prompt.appendChild(allow); prompt.appendChild(deny);
+    if (ev.gitAvailable) {
+      const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS (GIT ROLLBACK)';
+      bypass.title = 'Allow this and stop asking for this project — available because the working directory is a git repo, so changes can be rolled back';
+      bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); };
+      prompt.appendChild(bypass);
+    } else {
+      const note = document.createElement('span');
+      note.className = 'limitprompt__msg limitprompt__msg--dim';
+      note.textContent = 'Bypass unavailable — no git repo in the working directory (needed for rollback).';
+      prompt.appendChild(note);
+    }
+    body.appendChild(prompt);
+    el.messages.scrollTop = el.messages.scrollHeight;
+  }
 
   const unsub = window.api.onChatProgress((ev) => {
     if (ev.type === 'token') {
@@ -1371,6 +1427,7 @@ async function submit() {
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
+    else if (ev.type === 'action-approve') { showActionPrompt(ev); }
     else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
     else if (ev.type === 'internals') { captureInternals(ev); }
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
@@ -1456,6 +1513,7 @@ function planEvent(ev) {
     else if (ev.kind === 'step-stuck') planFinalize(false);
     else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
     else if (ev.kind === 'escalate') planFinalize(false);
+    else if (ev.kind === 'coding-mode') { planAdd(`⌥ coding harness: ${ev.tools || 0} tools${ev.gitAvailable ? ' · git' : ' · no git'}`); planFinalize(true); }
   }
 }
 

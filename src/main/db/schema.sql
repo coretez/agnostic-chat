@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS chats (
   title       TEXT,
   model       TEXT,                       -- provider/model used for this chat
   variables_json TEXT,                     -- variable-store snapshot: discovered params/derived values carried across turns
+  coding_mode INTEGER,                     -- 1 = coding-harness toggle: file/shell tools jailed to the project working_dir
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
   archived_at TEXT

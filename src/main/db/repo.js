@@ -180,10 +180,17 @@ const chats = {
       .run(projectId, title, model);
     return db.prepare('SELECT * FROM chats WHERE id = ?').get(info.lastInsertRowid);
   },
+  get(id) {
+    return getDb().prepare('SELECT * FROM chats WHERE id = ?').get(id);
+  },
   listByProject(projectId) {
     return getDb()
       .prepare('SELECT * FROM chats WHERE project_id = ? AND archived_at IS NULL ORDER BY updated_at DESC')
       .all(projectId);
+  },
+  // Coding-harness toggle: file/shell tools jailed to the project working_dir.
+  setCodingMode(id, on) {
+    getDb().prepare("UPDATE chats SET coding_mode = ?, updated_at = datetime('now') WHERE id = ?").run(on ? 1 : 0, id);
   },
   rename(id, title) {
     getDb().prepare("UPDATE chats SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, id);

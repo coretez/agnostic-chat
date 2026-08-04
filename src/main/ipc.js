@@ -14,6 +14,7 @@ const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
+const { buildCodingTools, hasGit } = require('./coding-tools');
 const docs = require('./documents');
 
 // Tool the model calls to persist a generated deliverable. It supplies semantic
@@ -267,6 +268,7 @@ function registerIpc() {
   ipcMain.handle('chats:create', (_e, input) => repo.chats.create(input));
   ipcMain.handle('chats:rename', (_e, { id, title }) => repo.chats.rename(id, title));
   ipcMain.handle('chats:setModel', (_e, { id, model }) => repo.chats.setModel(id, model));
+  ipcMain.handle('chats:setCodingMode', (_e, { id, on }) => repo.chats.setCodingMode(id, on));
   ipcMain.handle('chats:archive', (_e, { id }) => repo.chats.archive(id));
   ipcMain.handle('messages:list', (_e, { chatId }) => repo.messages.listByChat(chatId));
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
@@ -450,6 +452,7 @@ function registerIpc() {
       const fastModel = provider.fast_model || chosenModel;
       const emitProgress = (ev) => { try { _e.sender.send('chat:progress', ev); } catch {} };
       const turnStart = Date.now();
+      const chatId = payload?.chatId || null;
       const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
 
       // STOP support (abort + save work): the renderer's STOP button fires
@@ -554,9 +557,57 @@ function registerIpc() {
         emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
       }
 
+      // ── Coding harness mode (per-chat toggle) ─────────────────────────────
+      // File + shell tools with a HIERARCHICAL permission model (coding-tools.js):
+      //   1. Scope (hard jail): file actions stay inside working_dir ∪ docs dir.
+      //   2. Action gating: reads free; writes/edits/shell each ask the user
+      //      over the same one-shot chat:continue channel as limit/stuck.
+      //   3. Bypass: the project's coding_bypass setting skips the asking —
+      //      honored ONLY when working_dir is a git repo (rollback exists).
+      // Appended to scopedTools AFTER the ceiling so the planner derives steps
+      // with them, the executor can call them, and sub-agents inherit them —
+      // they are the point of the mode, never subject to relevance selection.
+      const project = projectId ? repo.projects.get(projectId) : null;
+      const chatRow = chatId ? repo.chats.get(chatId) : null;
+      const globalBase = repo.settings.get('documents_base') || docs.defaultBase();
+      const outputDir = docs.resolveOutputDir(project, globalBase);
+      let coding = null;
+      if (chatRow && chatRow.coding_mode) {
+        if (project && project.working_dir) {
+          const gitAvailable = hasGit(project.working_dir);
+          const approveAction = ({ kind, summary }) => new Promise((resolve) => {
+            // Level-3 bypass: only honored with git in the working dir — even
+            // if the setting was somehow set without it, we still ask.
+            try { if (gitAvailable && repo.settings.get('coding_bypass', projectId) === '1') return resolve(true); } catch {}
+            let done = false;
+            const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); clearInterval(iv); resolve(n > 0); };
+            resolveLimit = finish;
+            const to = setTimeout(() => finish(0), 180000);
+            const iv = setInterval(() => { if (isAborted()) finish(0); }, 500);
+            emitProgress({ type: 'action-approve', kind, summary, gitAvailable });
+          });
+          coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
+          scopedTools = [...scopedTools, ...coding.tools];
+          convo = [{
+            role: 'system',
+            content: 'CODING MODE: file and shell tools are available. Allowed directories: the project working directory '
+              + project.working_dir + ' (relative paths resolve here) and the project documents directory ' + outputDir + '. '
+              + 'File actions outside those directories are refused. Reads are free; each write, edit, or shell command may '
+              + 'pause for the user to approve it — if one is declined, continue without it. Read a file before editing it; '
+              + 'edit_file replaces an exact existing string. run_command executes in the working directory.'
+          }, ...convo];
+          emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable });
+        } else {
+          console.warn('[coding-mode] chat has coding mode on but the project has no working_dir — tools not offered');
+        }
+      }
+
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
-      // tools only (no `delegate`) so the tree stays one level deep.
-      const rawCallTool = (name, args) => mcpManager.callTool(name, args, toolset.routes);
+      // tools only (no `delegate`) so the tree stays one level deep. Coding
+      // tools (no `__` namespace) route to the pack; everything else to MCP.
+      const rawCallTool = (name, args) => (coding && coding.names.has(name))
+        ? coding.call(name, args)
+        : mcpManager.callTool(name, args, toolset.routes);
 
       // Authored per-project agents the orchestrator can delegate to by name.
       let authoredAgents = [];
@@ -568,11 +619,8 @@ function registerIpc() {
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
       const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...scopedTools];
 
-      // Resolve the project's document output dir + placement template (both
-      // user-configurable; global defaults from settings).
-      const project = projectId ? repo.projects.get(projectId) : null;
-      const globalBase = repo.settings.get('documents_base') || docs.defaultBase();
-      const outputDir = docs.resolveOutputDir(project, globalBase);
+      // Document placement template (user-configurable; global default).
+      // `project`/`outputDir` were resolved above (coding-mode block).
       const placementTemplate = repo.settings.get('placement_template') || docs.DEFAULT_TEMPLATE;
       const saveDocument = (args) => {
         const meta = { type: args.type, title: args.title, format: args.format, properties: args.properties || {} };
@@ -608,7 +656,6 @@ function registerIpc() {
       // from the chat and saved back after the turn. Captures happen in BOTH
       // paths: the step executor does its own, and the flat loop's are handled
       // by the callTool wrapper below.
-      const chatId = payload?.chatId || null;
       let store = new VariableStore();
       try { if (chatId) store = VariableStore.fromJSON(repo.chats.getVariables(chatId)); } catch (e) { console.error('[variables load]', e && e.message); }
       const varsAtStart = store.size;
