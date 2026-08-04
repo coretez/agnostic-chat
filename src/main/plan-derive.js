@@ -47,8 +47,11 @@ function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents 
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
   if (loadedSkills.length) {
     // The whole point of Pass 2: the SKILL'S OWN INSTRUCTIONS shape the steps.
+    // Generous clip: a real SKILL.md procedure runs ~20k chars (~5k tok) and
+    // cutting mid-procedure yields plans that stop where the clip did; the
+    // planning call is a one-off fast-model call, so completeness wins here.
     parts.push('SKILL INSTRUCTIONS IN PLAY (derive your steps from these):\n\n'
-      + loadedSkills.map((s) => `## ${s.name}\n${clip(s.definition || s.description || '', 6000)}`).join('\n\n'));
+      + loadedSkills.map((s) => `## ${s.name}\n${clip(s.definition || s.description || '', 24000)}`).join('\n\n'));
   }
   if (tools.length) parts.push('AVAILABLE TOOLS:\n' + tools.map((t) => `- ${t.name}`).join('\n'));
   if (agents.length) parts.push('NAMED AGENTS (for parallel steps):\n' + agents.map((a) => `- ${a.name}: ${clip(a.description, 160)}`).join('\n'));
@@ -135,11 +138,11 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
  * Matches the `refinePlan` signature executePlan expects.
  * @returns {Promise<{steps:Array}>} empty steps = "nothing more needed".
  */
-async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, store }) {
+async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store }) {
   try {
     const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents });
     const doneDigest = done.map((d) => `- [step ${d.step}] ${clip(d.task, 160)}: ${clip(d.conclusion, 400)}`).join('\n');
-    const stuck = { task: stuckStep ? stuckStep.task : '', partial: (done.length && done[done.length - 1].incomplete) ? done[done.length - 1].conclusion : '' };
+    const stuck = { task: stuckStep ? stuckStep.task : '', partial: partial || '' };
     const parsed = await callForPlan(connector, model, REFINE_PROMPT(ctx, (plan && plan.goal) || '', doneDigest, stuck, reason || 'stuck', userText || ''));
     if (!parsed) return { steps: [] };
     if (parsed.simple) return { steps: [] };

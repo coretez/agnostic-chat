@@ -607,6 +607,47 @@ app.whenReady().then(async () => {
     assert(single.reply === 'the answer', 'single completed step passes through without an extra model call');
   }
 
+  // ── Read-time skill healing (skill-content.js) ─────────────────────────────
+  const { extractSkill, enrichSkillRow } = require('../src/main/skill-content');
+  {
+    // (a) The stale shape found in production: a raw skills_update delivery
+    // envelope stored as the definition, description NULL.
+    const skillMd = '---\nname: fluency-case-investigation\ndescription: >-\n  Investigate a Fluency case and produce\n  the standard report.\nmcp_functions:\n  - get_case\n  - expand_case\n---\n# Workflow\n1. Resolve the case\n2. Expand and analyze\n3. Produce the report';
+    const envelope = JSON.stringify({ delivery_contract: '1.0.0', items: [{ name: 'fluency-case-investigation', files: [{ path: 'SKILL.md', content: skillMd }, { path: 'references/facets.md', content: 'reference noise' }] }] });
+    const row = enrichSkillRow(
+      { name: 'fluency-case-investigation', description: null, definition: envelope, tools: null },
+      ['fluency__get_case', 'fluency__expand_case', 'fluency__kql_search']
+    );
+    assert(/^# Workflow/.test(row.definition) && !row.definition.includes('delivery_contract'), 'envelope definition healed to the SKILL.md body');
+    assert(/Investigate a Fluency case/.test(row.description), 'NULL description healed from frontmatter');
+    assert(row.tools.length === 2 && row.tools[0] === 'fluency__get_case', 'mcp_functions recovered as a tool scope (suffix-matched to connected tools)');
+
+    // (b) A frontmattered SKILL.md stored directly — body extracted, meta read.
+    const direct = extractSkill(skillMd);
+    assert(/^# Workflow/.test(direct.body) && direct.meta.description.includes('standard report'), 'direct SKILL.md: body + frontmatter meta extracted');
+
+    // (c) Plain text passes through untouched; authored fields never clobbered.
+    const plain = enrichSkillRow({ name: 'x', description: 'authored', definition: 'just instructions', tools: ['t1'] }, ['t1']);
+    assert(plain.definition === 'just instructions' && plain.description === 'authored' && plain.tools[0] === 't1', 'plain/authored rows pass through enrichment unchanged');
+  }
+
+  // Stuck step's partial conclusion reaches the re-planner (desk-check fix).
+  {
+    const looping2 = async ({ tools }) => tools.length
+      ? { text: '', toolCalls: [{ id: 'x', name: 'search', args: {} }] }
+      : { text: 'half the picture', toolCalls: [] };
+    let seenPartial = null;
+    await executePlan({
+      chat: looping2, callTool: async () => ({ text: '{}' }), model: 'mock',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'dig' }] },
+      tools: [{ name: 'search', description: '', inputSchema: {} }],
+      store: new VariableStore(), stepBudget: 1, replanBudget: 1,
+      refinePlan: async ({ partial }) => { seenPartial = partial; return { steps: [] }; },
+      onStuck: async () => ({ continue: false })
+    });
+    assert(seenPartial === 'half the picture', "refinePlan receives the stuck step's partial conclusion");
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

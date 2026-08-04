@@ -10,6 +10,7 @@ const { runChatLoop } = require('./chat-loop');
 const { executePlan, synthesize } = require('./execute');
 const { derivePlan, refinePlan } = require('./plan-derive');
 const { VariableStore, SET_VARIABLE_TOOL } = require('./variables');
+const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
@@ -131,43 +132,8 @@ function parseSkillsPayload(text) {
   return out.filter((s) => s.name && (s.definition || s.description));
 }
 
-// Minimal frontmatter reader — just enough of YAML for Fluency's SKILL.md
-// shape (plain scalars, `>-`/`>`/`|-`/`|` block scalars, and `key:\n  - a`
-// lists). Nested maps (e.g. `posted:`) are intentionally not parsed: their
-// indented lines simply fail the top-level key regex and get skipped.
-function parseFrontmatter(md) {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md || '');
-  if (!m) return { meta: {}, body: md || '' };
-  const lines = m[1].split(/\r?\n/);
-  const meta = {};
-  for (let i = 0; i < lines.length; i++) {
-    const kv = /^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/.exec(lines[i]);
-    if (!kv) continue;
-    const key = kv[1];
-    const rest = kv[2];
-    if (rest === '>-' || rest === '>' || rest === '|-' || rest === '|') {
-      const folded = rest[0] === '>';
-      const block = [];
-      let j = i + 1;
-      while (j < lines.length && /^\s+\S/.test(lines[j])) { block.push(lines[j].replace(/^\s{2}/, '')); j++; }
-      meta[key] = folded ? block.join(' ').trim() : block.join('\n').trim();
-      i = j - 1;
-    } else if (rest === '') {
-      const items = [];
-      let j = i + 1;
-      while (j < lines.length) {
-        const li = /^\s*-\s+(.*)$/.exec(lines[j]);
-        if (!li) break;
-        items.push(li[1].trim());
-        j++;
-      }
-      if (items.length) { meta[key] = items; i = j - 1; }
-    } else {
-      meta[key] = rest.trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return { meta, body: m[2] };
-}
+// Frontmatter reading lives in skill-content.js (shared with read-time skill
+// healing); `enrichSkillRow`/`parseFrontmatter` are imported at the top.
 
 // Fluency's real skills_update shape (what parseSkillsPayload above doesn't
 // understand): { items: [{ name, files: [{ path: 'SKILL.md', content }] }] }.
@@ -504,6 +470,15 @@ function registerIpc() {
       let es = [];
       if (projectId) {
         try { es = repo.skills.listEnabledForProject(projectId); } catch (e) { console.error('[skills]', e && e.message); }
+        // Read-time healing (skill-content.js): rows imported before the
+        // Fluency envelope parser existed hold the raw delivery JSON and a
+        // NULL description — extract the embedded SKILL.md body, frontmatter
+        // description, and declared mcp_functions so selection, planning and
+        // injection all see real instructions regardless of import vintage.
+        try {
+          const toolNames = toolset.tools.map((t) => t.name);
+          es = es.map((s) => enrichSkillRow(s, toolNames));
+        } catch (e) { console.error('[skills enrich]', e && e.message); }
       }
 
       let planned = { skillNames: [], toolNames: [] };

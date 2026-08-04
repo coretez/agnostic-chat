@@ -185,7 +185,9 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
         replans += 1;
         emit({ type: 'process', kind: 'replan', attempt: replans, step: step.id, reason: r.reason });
         let revised;
-        try { revised = await refinePlan({ plan, done: stepResults, stuckStep: step, reason: r.reason, store }); }
+        // r.partial rides along so the re-planner sees what the stuck step
+        // half-found, not just that it stuck.
+        try { revised = await refinePlan({ plan, done: stepResults, stuckStep: step, reason: r.reason, partial: r.partial, store }); }
         catch { revised = null; }
         const tail = revised && Array.isArray(revised.steps) ? revised.steps : [];
         steps = [...steps.slice(0, idx), ...tail];       // keep done prefix; replace remaining
