@@ -466,6 +466,27 @@ function registerIpc() {
       const isAborted = () => aborted;
       const chatAbortable = (a) => connector.chat({ ...a, signal: turnAbort.signal });
 
+      // One-shot user prompts (limit / stuck / action-approve): emit an event,
+      // await the reply on chat:continue. Waiters are a FIFO queue — parallel
+      // sub-agents can each be awaiting an approval, and a single shared slot
+      // would resolve the wrong waiter (the loser hanging to its timeout).
+      // No reply in 180s, or a STOP, resolves 0.
+      const promptWaiters = [];
+      const promptListener = (_ev, payload) => { const w = promptWaiters.shift(); if (w) w(Number(payload && payload.more) || 0); };
+      ipcMain.on('chat:continue', promptListener);
+      const askUser = (event) => new Promise((resolve) => {
+        let done = false;
+        const finish = (n) => {
+          if (done) return; done = true;
+          const i = promptWaiters.indexOf(finish); if (i >= 0) promptWaiters.splice(i, 1);
+          clearTimeout(to); clearInterval(iv); resolve(n);
+        };
+        promptWaiters.push(finish);
+        const to = setTimeout(() => finish(0), 180000);
+        const iv = setInterval(() => { if (isAborted()) finish(0); }, 500);
+        emitProgress(event);
+      });
+
       // Gather tools from enabled MCP servers (skips any that fail to connect).
       // Done before skill handling — the unified context planner below needs
       // both the skill menu and the tool menu at once.
@@ -575,17 +596,12 @@ function registerIpc() {
       if (chatRow && chatRow.coding_mode) {
         if (project && project.working_dir) {
           const gitAvailable = hasGit(project.working_dir);
-          const approveAction = ({ kind, summary }) => new Promise((resolve) => {
+          const approveAction = async ({ kind, summary }) => {
             // Level-3 bypass: only honored with git in the working dir — even
             // if the setting was somehow set without it, we still ask.
-            try { if (gitAvailable && repo.settings.get('coding_bypass', projectId) === '1') return resolve(true); } catch {}
-            let done = false;
-            const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); clearInterval(iv); resolve(n > 0); };
-            resolveLimit = finish;
-            const to = setTimeout(() => finish(0), 180000);
-            const iv = setInterval(() => { if (isAborted()) finish(0); }, 500);
-            emitProgress({ type: 'action-approve', kind, summary, gitAvailable });
-          });
+            try { if (gitAvailable && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
+            return (await askUser({ type: 'action-approve', kind, summary, gitAvailable })) > 0;
+          };
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
           scopedTools = [...scopedTools, ...coding.tools];
           convo = [{
@@ -709,19 +725,9 @@ function registerIpc() {
         _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }));
       } catch (e) { console.error('[internals ledger]', e && e.message); }
 
-      // Interactive continuation: when the loop hits its tool-call budget, ask the
-      // renderer (Continue / Stop). The handler stays open, awaiting the user's
-      // reply on the one-shot `chat:continue` channel; no reply in 3 min → stop.
-      let resolveLimit = null;
-      const limitListener = (_ev, payload) => { if (resolveLimit) resolveLimit(Number(payload && payload.more) || 0); };
-      ipcMain.on('chat:continue', limitListener);
-      const onLimit = ({ iterations }) => new Promise((resolve) => {
-        let done = false;
-        const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); resolve(n); };
-        resolveLimit = finish;
-        const to = setTimeout(() => finish(0), 180000);
-        emitProgress({ type: 'limit', iterations });
-      });
+      // Interactive continuation: when the loop hits its tool-call budget, ask
+      // the renderer (Continue / Stop) via the shared one-shot prompt queue.
+      const onLimit = ({ iterations }) => askUser({ type: 'limit', iterations });
 
       let result;
       let planInfo = null; // {steps, replans, completed} — planner telemetry (v15)
@@ -754,15 +760,9 @@ function registerIpc() {
           const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
-          // explain what's stuck over the same one-shot chat:continue channel
-          // the iteration-limit prompt uses. No reply in 3 min → stop.
-          const onStuck = ({ goal, stuckStep, values, replans }) => new Promise((resolve) => {
-            let done = false;
-            const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); resolve({ continue: n > 0 }); };
-            resolveLimit = finish;
-            const to = setTimeout(() => finish(0), 180000);
-            emitProgress({ type: 'stuck', goal, step: stuckStep && stuckStep.task, values, replans });
-          });
+          // explain what's stuck via the shared one-shot prompt queue.
+          const onStuck = async ({ goal, stuckStep, values, replans }) =>
+            ({ continue: (await askUser({ type: 'stuck', goal, step: stuckStep && stuckStep.task, values, replans })) > 0 });
 
           const exec = await executePlan({
             chat: chatAbortable,
@@ -854,7 +854,7 @@ function registerIpc() {
         console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
         throw e;
       } finally {
-        ipcMain.removeListener('chat:continue', limitListener);
+        ipcMain.removeListener('chat:continue', promptListener);
         ipcMain.removeListener('chat:abort', abortListener);
       }
 
