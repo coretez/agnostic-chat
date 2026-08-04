@@ -50,6 +50,29 @@ app.whenReady().then(async () => {
   // Cross-project isolation
   assert(repo.documents.listByProject(projB.id).length === 0, 'projB sees none of projA docs');
 
+  // Generated-document placement + write + versioning + index
+  const { placementPath, writeDocument, resolveOutputDir } = require('../src/main/documents');
+  assert(
+    placementPath('documents/{type}/{tenant}/{title}-{period}.{ext}', { type: 'monthly-report', title: 'Expo Review', properties: { tenant: 'expo', period: '2026-08' }, format: 'html' }) === 'documents/monthly-report/expo/expo-review-2026-08.html',
+    'placement template fills type/tenant/title/period/ext'
+  );
+  assert(
+    placementPath('documents/{type}/{tenant}/{title}-{period}.{ext}', { type: 'note', title: 'Quick', format: 'md' }) === 'documents/note/quick.md',
+    'placement drops empty tenant/period segments cleanly'
+  );
+  assert(resolveOutputDir({ name: 'Foo' }, '/base') === path.join('/base', 'Foo') && resolveOutputDir({ output_dir: '/x' }, '/base') === '/x', 'resolveOutputDir: explicit output_dir else <base>/<name>');
+  const odir = fs.mkdtempSync(path.join(os.tmpdir(), 'agnostic-docs-'));
+  const w1 = writeDocument({ outputDir: odir, template: 'documents/{type}/{title}.{ext}', meta: { type: 'report', title: 'R', format: 'txt' }, content: 'v1' });
+  assert(fs.existsSync(w1.absPath) && w1.version === 1 && fs.readFileSync(w1.absPath, 'utf8') === 'v1', 'writeDocument writes the file (v1)');
+  const w2 = writeDocument({ outputDir: odir, template: 'documents/{type}/{title}.{ext}', meta: { type: 'report', title: 'R', format: 'txt' }, content: 'v2' });
+  assert(w2.version === 2 && fs.readFileSync(w2.absPath, 'utf8') === 'v2' && fs.existsSync(path.join(path.dirname(w2.absPath), '.versions', 'R.v1.txt')), 'writeDocument versions on resave (prior → .versions/)');
+  const genRow = repo.documents.saveGenerated({ projectId: projA.id, title: 'R', path: w2.absPath, mimeType: 'text/plain', source: 'chat', docType: 'report', version: 2, properties: { tenant: 'expo' } });
+  assert(genRow.doc_type === 'report' && genRow.version === 2 && genRow.properties.tenant === 'expo', 'saveGenerated indexes doc with type + properties');
+  const again = repo.documents.saveGenerated({ projectId: projA.id, title: 'R', path: w2.absPath, version: 3 });
+  assert(repo.documents.listByProject(projA.id).filter((d) => d.path === w2.absPath).length === 1 && again.version === 3, 'saveGenerated re-versions same path (no duplicate index rows)');
+  repo.projects.setOutputDir(projA.id, '/tmp/custom-out');
+  assert(repo.projects.get(projA.id).output_dir === '/tmp/custom-out', 'project output_dir is user-configurable');
+
   // Skills — opt-out per project (ON by default; disable to exclude)
   const skillDocs = repo.skills.create({ name: 'docx', description: 'Word docs' });
   const skillSec = repo.skills.create({ name: 'security-review', description: 'security' });

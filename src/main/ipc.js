@@ -10,6 +10,32 @@ const { runChatLoop } = require('./chat-loop');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
+const docs = require('./documents');
+
+// Tool the model calls to persist a generated deliverable. It supplies semantic
+// metadata; the app derives the on-disk path (placement policy) + indexes it.
+const SAVE_DOCUMENT_TOOL = {
+  name: 'save_document',
+  description:
+    "Save a generated deliverable (report, document, export) to the project's document "
+    + 'library on disk so the user can find it later. Provide the full content plus '
+    + 'metadata: a type (e.g. monthly-report, investigation, compliance-assessment), a '
+    + 'title, a format (html|md|txt|json), and properties like tenant/company and '
+    + 'period/date. The app files it in a consistent, findable location, versions it, '
+    + 'indexes it, and opens it — you get back the path. Prefer this over pasting a long '
+    + 'document only into the chat.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Human-readable title, e.g. "Expo NIST Compliance One-Pager".' },
+      type: { type: 'string', description: 'Document type, e.g. monthly-report | investigation | compliance-assessment.' },
+      format: { type: 'string', description: 'html | md | txt | json.' },
+      properties: { type: 'object', description: 'Metadata: tenant/company, period/date, case_id, framework, tags — whatever applies.' },
+      content: { type: 'string', description: 'The complete document content.' }
+    },
+    required: ['title', 'content']
+  }
+};
 const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT, estimateTokens } = require('./compress');
 
 // ── Context ledger (INTERNALS tab) ──────────────────────────────────────────
@@ -217,6 +243,26 @@ function registerIpc() {
   ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
   ipcMain.handle('projects:setPreferredModel', (_e, { id, model }) => repo.projects.setPreferredModel(id, model));
   ipcMain.handle('projects:setCheatSheet', (_e, { id, text }) => repo.projects.setCheatSheet(id, text));
+  ipcMain.handle('projects:setOutputDir', (_e, { id, dir }) => repo.projects.setOutputDir(id, dir));
+  // The effective output dir (explicit, or the resolved default) — for display.
+  ipcMain.handle('projects:effectiveOutputDir', (_e, { id }) => {
+    const p = repo.projects.get(id);
+    const base = repo.settings.get('documents_base') || docs.defaultBase();
+    return { outputDir: docs.resolveOutputDir(p, base), explicit: !!(p && p.output_dir) };
+  });
+  ipcMain.handle('projects:pickOutputDir', async (_e, { id }) => {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    const p = repo.projects.get(id);
+    const base = repo.settings.get('documents_base') || docs.defaultBase();
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose where generated documents are saved',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: (p && p.output_dir) || docs.resolveOutputDir(p, base)
+    });
+    if (res.canceled || !res.filePaths.length) return { ok: false };
+    return { ok: true, project: repo.projects.setOutputDir(id, res.filePaths[0]) };
+  });
+  ipcMain.handle('documents:remove', (_e, { id }) => repo.documents.remove(id));
 
   // Agents (authored per-project sub-agent definitions)
   ipcMain.handle('agents:list', (_e, { projectId }) => repo.agents.listByProject(projectId));
@@ -531,7 +577,24 @@ function registerIpc() {
         : '';
       const delegateTool = { ...DELEGATE_TOOL, description: DELEGATE_TOOL.description + roster };
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
-      const orchestratorTools = [delegateTool, assignTool, ...scopedTools];
+      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, ...scopedTools];
+
+      // Resolve the project's document output dir + placement template (both
+      // user-configurable; global defaults from settings).
+      const project = projectId ? repo.projects.get(projectId) : null;
+      const globalBase = repo.settings.get('documents_base') || docs.defaultBase();
+      const outputDir = docs.resolveOutputDir(project, globalBase);
+      const placementTemplate = repo.settings.get('placement_template') || docs.DEFAULT_TEMPLATE;
+      const saveDocument = (args) => {
+        const meta = { type: args.type, title: args.title, format: args.format, properties: args.properties || {} };
+        const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: args.content || '' });
+        let row = null;
+        try {
+          row = repo.documents.saveGenerated({ projectId, title: args.title || w.relPath, path: w.absPath, mimeType: w.mime, source: 'chat', docType: args.type || null, version: w.version, properties: args.properties || null });
+        } catch (e) { console.error('[save_document index]', e && e.message); }
+        emitProgress({ type: 'document-saved', id: row && row.id, title: args.title, path: w.absPath, relPath: w.relPath, version: w.version, mime: w.mime });
+        return { text: `Saved "${args.title}" → ${w.relPath} (v${w.version}) in the document library. Full path: ${w.absPath}` };
+      };
 
       // Resolve a delegate target (authored agent by name, else the general one)
       // into the concrete {agent, model, tools} a sub-agent run needs.
@@ -554,6 +617,10 @@ function registerIpc() {
 
       let delegatedCount = 0, delegateAbsorbed = 0; // telemetry: isolation via sub-agents
       const callTool = async (name, args) => {
+        if (name === 'save_document') {
+          try { return saveDocument(args || {}); }
+          catch (e) { console.error('[save_document]', e && e.message); return { text: `save_document failed: ${e.message}`, isError: true }; }
+        }
         if (name === 'delegate') {
           const r = await runOne(args && args.agent, args && args.task);
           delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;

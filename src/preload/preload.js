@@ -47,7 +47,10 @@ contextBridge.exposeInMainWorld('api', {
     pickWorkingDir: (id) => ipcRenderer.invoke('projects:pickWorkingDir', { id }),
     revealPath: (p) => ipcRenderer.invoke('app:revealPath', p),
     setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model }),
-    setCheatSheet: (id, text) => ipcRenderer.invoke('projects:setCheatSheet', { id, text })
+    setCheatSheet: (id, text) => ipcRenderer.invoke('projects:setCheatSheet', { id, text }),
+    pickOutputDir: (id) => ipcRenderer.invoke('projects:pickOutputDir', { id }),
+    setOutputDir: (id, dir) => ipcRenderer.invoke('projects:setOutputDir', { id, dir }),
+    effectiveOutputDir: (id) => ipcRenderer.invoke('projects:effectiveOutputDir', { id })
   },
 
   // Authored per-project sub-agent definitions.
@@ -92,7 +95,8 @@ contextBridge.exposeInMainWorld('api', {
     list: (projectId) => ipcRenderer.invoke('documents:list', { projectId }),
     create: (input) => ipcRenderer.invoke('documents:create', input),
     linkToChat: (input) => ipcRenderer.invoke('documents:linkToChat', input),
-    listByChat: (chatId) => ipcRenderer.invoke('documents:listByChat', { chatId })
+    listByChat: (chatId) => ipcRenderer.invoke('documents:listByChat', { chatId }),
+    remove: (id) => ipcRenderer.invoke('documents:remove', { id })
   },
 
   skills: {

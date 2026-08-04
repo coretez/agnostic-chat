@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 let db = null;
 
@@ -181,6 +181,18 @@ function migrate(database) {
     const tcols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
     if (!tcols.includes('planning_failed')) database.exec('ALTER TABLE turn_metrics ADD COLUMN planning_failed INTEGER');
     if (!tcols.includes('tool_fell_back')) database.exec('ALTER TABLE turn_metrics ADD COLUMN tool_fell_back INTEGER');
+  }
+
+  // v13: generated-document management — per-project output dir + rich document
+  // metadata (type, version, properties: tenant/period/etc.) for a findable, indexed
+  // document library.
+  if (current < 13) {
+    const pcols = database.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+    if (!pcols.includes('output_dir')) database.exec('ALTER TABLE projects ADD COLUMN output_dir TEXT');
+    const dcols = database.prepare('PRAGMA table_info(documents)').all().map((c) => c.name);
+    if (!dcols.includes('doc_type')) database.exec('ALTER TABLE documents ADD COLUMN doc_type TEXT');
+    if (!dcols.includes('version')) database.exec('ALTER TABLE documents ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
+    if (!dcols.includes('properties_json')) database.exec('ALTER TABLE documents ADD COLUMN properties_json TEXT');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

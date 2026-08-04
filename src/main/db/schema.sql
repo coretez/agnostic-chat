@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS projects (
   slug        TEXT UNIQUE,
   description TEXT,
   working_dir TEXT,                          -- folder on disk the project is anchored to
+  output_dir  TEXT,                          -- where generated documents are saved (NULL = <global base>/<name>)
   preferred_model TEXT,                       -- model new chats default to for this project
   cheat_sheet TEXT,                          -- objectives/rules/mode-of-operation brief the planner reads for orientation
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -49,7 +50,10 @@ CREATE TABLE IF NOT EXISTS documents (
   path       TEXT,                        -- location on disk, or NULL if inline
   content    TEXT,                        -- optional inline content
   mime_type  TEXT,
-  source     TEXT,                        -- chat | upload | user
+  source     TEXT,                        -- chat | upload | user | skill:<name> | agent:<name>
+  doc_type   TEXT,                        -- monthly-report | investigation | compliance-assessment | …
+  version    INTEGER NOT NULL DEFAULT 1,  -- bumped on same-location resave (prior → .versions/)
+  properties_json TEXT,                   -- tenant/company, period/date, case_id, framework, tags, …
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

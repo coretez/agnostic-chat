@@ -59,6 +59,12 @@ const projects = {
       .prepare("UPDATE projects SET cheat_sheet = ?, updated_at = datetime('now') WHERE id = ?")
       .run(text || null, id);
     return projects.get(id);
+  },
+  setOutputDir(id, dir) {
+    getDb()
+      .prepare("UPDATE projects SET output_dir = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(dir || null, id);
+    return projects.get(id);
   }
 };
 
@@ -206,6 +212,9 @@ const messages = {
 };
 
 // ── Documents (project-scoped) + chat links ────────────────────────────────
+function withProps(d) {
+  return { ...d, properties: d.properties_json ? (() => { try { return JSON.parse(d.properties_json); } catch { return null; } })() : null };
+}
 const documents = {
   create({ projectId, title, path = null, content = null, mimeType = null, source = 'user' }) {
     const db = getDb();
@@ -219,7 +228,31 @@ const documents = {
   listByProject(projectId) {
     return getDb()
       .prepare('SELECT * FROM documents WHERE project_id = ? ORDER BY updated_at DESC')
-      .all(projectId);
+      .all(projectId)
+      .map(withProps);
+  },
+  get(id) {
+    const d = getDb().prepare('SELECT * FROM documents WHERE id = ?').get(id);
+    return d ? withProps(d) : null;
+  },
+  remove(id) { getDb().prepare('DELETE FROM documents WHERE id = ?').run(id); },
+  /**
+   * Register (or re-version) a generated document in the index. Keyed by
+   * (project, path): re-saving the same location updates the row and bumps the
+   * version rather than creating duplicate index entries.
+   */
+  saveGenerated({ projectId, title, path: p, mimeType = null, source = 'chat', docType = null, version = 1, properties = null }) {
+    const db = getDb();
+    const props = properties ? JSON.stringify(properties) : null;
+    const existing = db.prepare('SELECT id FROM documents WHERE project_id = ? AND path = ?').get(projectId, p);
+    if (existing) {
+      db.prepare("UPDATE documents SET title=?, mime_type=?, source=?, doc_type=?, version=?, properties_json=?, updated_at=datetime('now') WHERE id=?")
+        .run(title, mimeType, source, docType, version, props, existing.id);
+      return documents.get(existing.id);
+    }
+    const info = db.prepare('INSERT INTO documents (project_id, title, path, mime_type, source, doc_type, version, properties_json) VALUES (?,?,?,?,?,?,?,?)')
+      .run(projectId, title, p, mimeType, source, docType, version, props);
+    return documents.get(info.lastInsertRowid);
   },
   /** Link an existing document to a chat (created | referenced | edited). */
   linkToChat({ chatId, documentId, relation = 'referenced' }) {

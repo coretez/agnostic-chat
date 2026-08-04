@@ -16,6 +16,7 @@ const el = {
   projectList: $('project-list'), chatList: $('chat-list'),
   newProjectBtn: $('new-project-btn'), newProjectForm: $('new-project-form'), newProjectInput: $('new-project-input'),
   ovName: $('ov-name'), ovWdPath: $('ov-wd-path'), ovWdChange: $('ov-wd-change'), ovWdReveal: $('ov-wd-reveal'),
+  ovOutPath: $('ov-out-path'), ovOutChange: $('ov-out-change'), ovOutReveal: $('ov-out-reveal'),
   ovModel: $('ov-model'), ovChats: $('ov-chats'), ovDocs: $('ov-docs'), ovSkills: $('ov-skills'), ovMcp: $('ov-mcp'),
   ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
@@ -394,6 +395,7 @@ function renderOverview() {
   el.ovWdPath.classList.toggle('is-empty', !dir);
   el.ovWdChange.textContent = dir ? 'CHANGE' : 'SET DIRECTORY';
   el.ovWdReveal.hidden = !dir;
+  updateOutputDir(p);
   el.ovPrefLabel.textContent = p.preferred_model || 'None';
   el.ovModel.textContent = state.selected?.model || '—';
   const activeProvider = state.selected && state.providers.find((x) => x.id === state.selected.providerId);
@@ -412,6 +414,18 @@ function renderOverview() {
     el.ovCheatMsg.textContent = '';
   }
   updateModelSwitch();
+}
+// The output dir may be an explicit setting or a resolved default — ask main.
+async function updateOutputDir(p) {
+  if (!el.ovOutPath || !p) return;
+  try {
+    const eff = await window.api.projects.effectiveOutputDir(p.id);
+    const dir = eff && eff.outputDir;
+    el.ovOutPath.textContent = dir || '—';
+    el.ovOutPath.title = dir || '';
+    el.ovOutPath.classList.toggle('is-empty', !(eff && eff.explicit));
+    el.ovOutChange.textContent = (eff && eff.explicit) ? 'CHANGE' : 'SET (default shown)';
+  } catch { el.ovOutPath.textContent = '—'; }
 }
 async function saveCheatSheet() {
   const p = state.projects.find((x) => x.id === state.currentProjectId);
@@ -548,6 +562,16 @@ async function archiveChat(c) {
     else { state.currentChatId = null; el.messages.innerHTML = ''; turn('NO CHATS YET · HIT + NEXT TO CHATS', 'meta'); el.send.disabled = true; }
   }
 }
+// A generated document just landed on disk — refresh the project's doc list.
+async function onDocumentSaved(ev) {
+  if (!state.currentProjectId) return;
+  try {
+    state.documents = await window.api.documents.list(state.currentProjectId);
+    renderDocs();
+    if (state.page === 'overview') renderOverview();
+  } catch (e) { /* non-fatal */ }
+}
+
 function renderDocs() {
   el.railDocList.innerHTML = '';
   for (const d of state.documents) {
@@ -1266,6 +1290,7 @@ async function submit() {
     else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
     else if (ev.type === 'process') { captureProcess(ev); }
     else if (ev.type === 'metrics') { captureMetrics(ev); }
+    else if (ev.type === 'document-saved') { onDocumentSaved(ev); }
     planEvent(ev);
   });
 
@@ -2101,6 +2126,17 @@ el.ovWdChange.onclick = async () => {
   if (r && r.ok) { const i = state.projects.findIndex((p) => p.id === state.currentProjectId); if (i >= 0) state.projects[i] = r.project; renderOverview(); }
 };
 el.ovWdReveal.onclick = () => { const p = state.projects.find((x) => x.id === state.currentProjectId); if (p && p.working_dir) window.api.projects.revealPath(p.working_dir); };
+el.ovOutChange.onclick = async () => {
+  if (!state.currentProjectId) return;
+  const r = await window.api.projects.pickOutputDir(state.currentProjectId);
+  if (r && r.ok) { const i = state.projects.findIndex((p) => p.id === state.currentProjectId); if (i >= 0) state.projects[i] = r.project; updateOutputDir(r.project); }
+};
+el.ovOutReveal.onclick = async () => {
+  const p = state.projects.find((x) => x.id === state.currentProjectId);
+  if (!p) return;
+  const eff = await window.api.projects.effectiveOutputDir(p.id);
+  if (eff && eff.outputDir) window.api.projects.revealPath(eff.outputDir);
+};
 el.railAddDoc.onclick = () => { const t = el.input.value.trim() || 'Untitled'; createDocument(t); el.input.value = ''; autosize(); };
 
 el.send.onclick = submit;
