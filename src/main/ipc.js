@@ -452,6 +452,17 @@ function registerIpc() {
       const turnStart = Date.now();
       const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
 
+      // STOP support (abort + save work): the renderer's STOP button fires
+      // chat:abort. The signal kills the in-flight provider HTTP call, and
+      // every loop checks isAborted() at its next boundary — variables,
+      // step results, tool trace, and metrics are all still persisted.
+      let aborted = false;
+      const turnAbort = new AbortController();
+      const abortListener = () => { aborted = true; try { turnAbort.abort(); } catch {} emitProgress({ type: 'process', kind: 'abort' }); };
+      ipcMain.once('chat:abort', abortListener);
+      const isAborted = () => aborted;
+      const chatAbortable = (a) => connector.chat({ ...a, signal: turnAbort.signal });
+
       // Gather tools from enabled MCP servers (skips any that fail to connect).
       // Done before skill handling — the unified context planner below needs
       // both the skill menu and the tool menu at once.
@@ -483,7 +494,7 @@ function registerIpc() {
 
       let planned = { skillNames: [], toolNames: [] };
       try {
-        planned = await selectContext({ connector, model: fastModel, skills: es, tools: toolset.tools, userText: text });
+        planned = await selectContext({ connector: { chat: chatAbortable }, model: fastModel, skills: es, tools: toolset.tools, userText: text });
         // A soft failure (unparseable JSON, etc.) is returned, not thrown — log
         // it here so it's visible in real time, not just reverse-engineered
         // later from a suspicious "0 skills loaded" turn.
@@ -682,7 +693,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -693,7 +704,7 @@ function registerIpc() {
         if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
-          const planDeps = { connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck over the same one-shot chat:continue channel
@@ -707,10 +718,11 @@ function registerIpc() {
           });
 
           const exec = await executePlan({
-            chat: (a) => connector.chat(a),
+            chat: chatAbortable,
             callTool,
             model: chosenModel,
             plan,
+            isAborted,
             // executeStep adds set_variable itself; don't offer it twice.
             tools: orchestratorTools.filter((t) => t.name !== 'set_variable'),
             store,
@@ -745,8 +757,17 @@ function registerIpc() {
           // The bubble has been streaming per-step text; the synthesis is the
           // REAL reply — tell the renderer to start its buffer fresh so the
           // final message isn't a concatenation of every step's conclusion.
-          emitProgress({ type: 'stream-reset' });
-          const syn = await synthesize({ chat: (a) => connector.chat(a), model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
+          // On a user STOP there is no synthesis call: assemble the save-work
+          // reply from what the steps concluded, with zero further model time.
+          let syn;
+          if (exec.aborted) {
+            const digest = exec.stepResults.map((r) => `### Step ${r.step}: ${r.task}${r.incomplete ? ' (incomplete)' : ''}\n${r.conclusion || '(no result)'}`).join('\n\n');
+            emitProgress({ type: 'stream-reset' });
+            syn = { reply: '⏹ Stopped at your request — work so far was saved (values remembered, completed steps below).\n\n' + (digest || '(stopped before any step completed)'), usage: null };
+          } else {
+            emitProgress({ type: 'stream-reset' });
+            syn = await synthesize({ chat: chatAbortable, model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
+          }
           const u = exec.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
           if (syn.usage) {
             u.measured = true; u.calls += 1;
@@ -754,27 +775,30 @@ function registerIpc() {
             u.cachedTokens += syn.usage.cachedTokens || 0; u.cacheCreationTokens += syn.usage.cacheCreationTokens || 0;
           }
           emitProgress({ type: 'done' });
-          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed };
+          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted };
           planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
         } else {
           // ── Flat path (unchanged behavior) — with working memory in front of
           // the model so values discovered in earlier turns stay usable.
           const knownBlock = store.render();
           result = await runChatLoop({
-            chat: (a) => connector.chat(a),
+            chat: chatAbortable,
             callTool,
             model: chosenModel,
             messages: knownBlock ? [{ role: 'system', content: knownBlock }, ...convo] : convo,
             tools: orchestratorTools,
             onEvent: emitProgress,
-            onLimit
+            onLimit,
+            isAborted
           });
+          if (result.aborted && !result.reply) result.reply = '⏹ Stopped at your request — the work above was kept.';
         }
       } catch (e) {
         console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
         throw e;
       } finally {
         ipcMain.removeListener('chat:continue', limitListener);
+        ipcMain.removeListener('chat:abort', abortListener);
       }
 
       // Persist working memory for the next turn (and across restarts).
@@ -834,7 +858,7 @@ function registerIpc() {
         _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
-      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned };
+      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted };
     }
 
     // The renderer should never let a send reach here without a provider (see

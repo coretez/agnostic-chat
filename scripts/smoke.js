@@ -683,6 +683,36 @@ app.whenReady().then(async () => {
     assert(seenPartial === 'half the picture', "refinePlan receives the stuck step's partial conclusion");
   }
 
+  // ── STOP (abort + save work) ───────────────────────────────────────────────
+  {
+    // Flat loop: abort after the first tool round — loop ends without another
+    // model call, tool work retained, aborted flagged.
+    let flatCalls = 0;
+    const flat = await runChatLoop({
+      chat: async () => { flatCalls++; return { text: '', toolCalls: [{ id: 'x', name: 'search', args: {} }] }; },
+      callTool: async () => ({ text: '{}' }),
+      model: 'mock', messages: [{ role: 'user', content: 'dig' }],
+      tools: [{ name: 'search', description: '', inputSchema: {} }],
+      isAborted: () => flatCalls >= 2   // abort lands mid-round 2
+    });
+    assert(flat.aborted && flatCalls === 2, 'flat loop: abort ends the loop without further model calls');
+    assert(flat.toolTrace.length === 1, "flat loop: round 1's tool work kept; round 2's queued tool never runs");
+
+    // Planned path: abort after step 1 completes — the completed step is kept,
+    // the plan is not marked completed, and steps 2/3 never call the model.
+    let stepChats = 0; let stop = false;
+    const planOut = await executePlan({
+      chat: async () => { stepChats++; stop = true; return { text: 'step one done', toolCalls: [] }; },
+      callTool: async () => ({ text: '{}' }),
+      model: 'mock',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'first' }, { id: 2, task: 'second' }, { id: 3, task: 'third' }] },
+      tools: [], store: new VariableStore(),
+      isAborted: () => stop
+    });
+    assert(planOut.aborted && !planOut.completed, 'planned path: abort marks the run aborted, not completed');
+    assert(stepChats === 1 && planOut.stepResults.length === 1 && planOut.stepResults[0].conclusion === 'step one done', 'planned path: completed step kept, remaining steps never call the model');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

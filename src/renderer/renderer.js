@@ -1309,6 +1309,16 @@ async function submit() {
   const dots = document.createElement('span'); dots.className = 'typing'; dots.innerHTML = '<span></span><span></span><span></span>';
   const status = document.createElement('span'); status.className = 'turn__status';
   body.appendChild(dots); body.appendChild(status);
+  // STOP (abort + save work): kills the in-flight model call; the main
+  // process persists variables, step results, and metrics for what ran.
+  const stopBar = document.createElement('div');
+  stopBar.className = 'limitprompt';
+  const stopBtn = document.createElement('button');
+  stopBtn.className = 'btn btn--ghost btn--sm';
+  stopBtn.textContent = '⏹ STOP & SAVE';
+  stopBtn.onclick = () => { window.api.abortChat(); stopBtn.disabled = true; stopBtn.textContent = 'stopping…'; };
+  stopBar.appendChild(stopBtn);
+  thinking.appendChild(stopBar);
 
   const shortTool = (n) => String(n).split('__').pop();
   planReset();
@@ -1386,9 +1396,11 @@ async function submit() {
       el.messages.insertBefore(note, thinking);
     }
     clearTimeout(_streamPending);
+    stopBar.remove();
     // Planned turns: the authoritative reply is the synthesis (res.reply);
     // streamed may hold per-step working text if stream-reset was missed.
-    const finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
+    let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
+    if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
     renderAssistantBody(body, finalText);
     if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
     el.messages.scrollTop = el.messages.scrollHeight;

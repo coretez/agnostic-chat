@@ -53,8 +53,9 @@ function addUsage(usage, u) {
  * @returns {Promise<{result:object, partial:string, history:Array, stuck:boolean,
  *                     reason?:string, usage:object, toolTrace:Array}>}
  */
-async function executeStep({ chat, callTool, model, step, tools = [], history = [], store, budget = DEFAULT_STEP_BUDGET, onEvent }) {
+async function executeStep({ chat, callTool, model, step, tools = [], history = [], store, budget = DEFAULT_STEP_BUDGET, onEvent, isAborted }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
+  const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   const usage = makeUsage();
   const toolTrace = [];
   // The model always gets set_variable on top of the step's real tools.
@@ -64,8 +65,17 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
   emit({ type: 'process', kind: 'step-start', step: step.id, task: step.task });
 
   for (let i = 0; i < budget; i++) {
+    // User STOP: no wrap-up model call (unlike a stuck step) — return what
+    // this step has so far and let the orchestrator save the work.
+    if (stopped()) return { result: { step: step.id, task: step.task, conclusion: '', incomplete: true, usage }, partial: '', history: h, stuck: false, aborted: true, usage, toolTrace };
     emit({ type: 'model', model });
-    const res = await chat({ model, messages: h, tools: stepTools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
+    let res;
+    try {
+      res = await chat({ model, messages: h, tools: stepTools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
+    } catch (e) {
+      if (stopped()) return { result: { step: step.id, task: step.task, conclusion: '', incomplete: true, usage }, partial: '', history: h, stuck: false, aborted: true, usage, toolTrace };
+      throw e;
+    }
     addUsage(usage, res.usage);
     const calls = res.toolCalls || [];
 
@@ -144,8 +154,9 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
  *   digest structurally survives mid-turn compaction — P3)
  * @returns {Promise<{stepResults:Array, history:Array, replans:number, completed:boolean}>}
  */
-async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onEvent }) {
+async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onEvent, isAborted }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
+  const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   let steps = [...((plan && plan.steps) || [])];
   const stepResults = [];
   const toolTrace = [];
@@ -158,6 +169,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
   emit({ type: 'process', kind: 'execute-start', goal: plan && plan.goal, steps: steps.length });
 
   while (idx < steps.length) {
+    if (stopped()) break;   // user STOP: keep completed step results, save work
     const step = steps[idx];
 
     // Parallel steps hand off to the decompose-and-merge sibling (subagent.js)
@@ -175,10 +187,11 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
       idx += 1; continue;
     }
 
-    const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit });
+    const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit, isAborted });
     h = r.history;
     mergeUsage(r.usage);
     toolTrace.push(...(r.toolTrace || []));
+    if (r.aborted) { stepResults.push(r.result); break; }   // partial step kept for the save
     // Between-steps compaction (P3): the injected hook protects the store digest.
     if (typeof compact === 'function') { try { h = await compact(h); } catch {} }
 
@@ -221,9 +234,10 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
     idx += 1;
   }
 
-  const completed = idx >= steps.length;
-  emit({ type: 'process', kind: 'execute-done', steps: stepResults.length, replans, completed });
-  return { stepResults, history: h, replans, completed, usage, toolTrace };
+  const aborted = stopped();
+  const completed = !aborted && idx >= steps.length;
+  emit({ type: 'process', kind: 'execute-done', steps: stepResults.length, replans, completed, aborted });
+  return { stepResults, history: h, replans, completed, usage, toolTrace, aborted };
 }
 
 /**

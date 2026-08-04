@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   /** Answer a mid-turn "tool-call limit reached" prompt: more>0 grants that many
    *  more tool iterations; 0 stops and forces a final wrap-up. */
   continueChat: (more) => ipcRenderer.send('chat:continue', { more }),
+  abortChat: () => ipcRenderer.send('chat:abort'),
 
   /** Open an https link in the user's default browser. */
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),

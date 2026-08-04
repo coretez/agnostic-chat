@@ -6,8 +6,17 @@
 
 function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
 
-async function req(url, { key, method = 'GET', body, timeoutMs = 30000 }) {
+// Chain an external abort signal (the user's STOP) onto a request's internal
+// timeout controller, so a stop kills the in-flight HTTP call immediately.
+function linkSignal(ctrl, signal) {
+  if (!signal) return;
+  if (signal.aborted) { ctrl.abort(); return; }
+  signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+}
+
+async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }) {
   const ctrl = new AbortController();
+  linkSignal(ctrl, signal);
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
@@ -102,8 +111,9 @@ function normalizeUsage(u) {
   };
 }
 
-async function streamChat(base, key, body, onDelta) {
+async function streamChat(base, key, body, onDelta, signal) {
   const ctrl = new AbortController();
+  linkSignal(ctrl, signal);
   const IDLE = 90000;
   let idle = setTimeout(() => ctrl.abort(), IDLE);
   const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
@@ -172,7 +182,7 @@ function openaiCompat({ baseUrl, key }) {
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).filter(isLikelyChatModel).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta, forceTool }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal }) {
       const body = { model, messages: messages.map(toOpenAiMsg), stream: !!onDelta };
       if (onDelta) body.stream_options = { include_usage: true }; // ask for a final usage chunk
       if (maxTokens) body.max_tokens = maxTokens;
@@ -187,12 +197,12 @@ function openaiCompat({ baseUrl, key }) {
       }
       if (!onDelta) {
         // Non-streaming path (used for test pings + compression summaries).
-        const json = await req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000 });
+        const json = await req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000, signal });
         const msg = json?.choices?.[0]?.message || {};
         const toolCalls = (msg.tool_calls || []).map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
         return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage) };
       }
-      return streamChat(base, key, body, onDelta);
+      return streamChat(base, key, body, onDelta, signal);
     }
   };
 }

@@ -16,7 +16,8 @@ const { filterToolResult } = require('./filter');
  * @param {number}  [o.maxIters=6]
  * @returns {Promise<{reply:string, toolTrace:Array, iterations:number}>}
  */
-async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit }) {
+async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit, isAborted }) {
+  const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const history = [...messages];
   const toolTrace = [];
@@ -43,9 +44,20 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
       if (typeof onLimit === 'function') { try { more = Number(await onLimit({ iterations: i })) || 0; } catch { more = 0; } }
       if (more > 0) { limit += more; } else { break; }
     }
+    // User hit STOP: end the loop without another model call. Work done so
+    // far (tool trace, streamed text) is preserved; the caller persists it.
+    if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
     i++;
     emit({ type: 'model', model });
-    const res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
+    let res;
+    try {
+      res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
+    } catch (e) {
+      // The abort signal kills the in-flight HTTP call — surface that as a
+      // clean stop, not an error.
+      if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
+      throw e;
+    }
     addUsage(res.usage);
     const calls = res.toolCalls || [];
 
@@ -56,6 +68,7 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
 
     history.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
     for (const call of calls) {
+      if (stopped()) { emit({ type: 'done' }); return { reply: res.text || '', toolTrace, iterations: i, usage, aborted: true }; }
       emit({ type: 'tool-start', name: call.name });
       const t0 = Date.now();
       let out;

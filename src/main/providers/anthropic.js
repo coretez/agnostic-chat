@@ -8,8 +8,17 @@ const ANTHROPIC_VERSION = '2023-06-01';
 
 function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
 
-async function req(url, { key, method = 'GET', body, timeoutMs = 30000 }) {
+// Chain an external abort signal (the user's STOP) onto a request's internal
+// timeout controller, so a stop kills the in-flight HTTP call immediately.
+function linkSignal(ctrl, signal) {
+  if (!signal) return;
+  if (signal.aborted) { ctrl.abort(); return; }
+  signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+}
+
+async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }) {
   const ctrl = new AbortController();
+  linkSignal(ctrl, signal);
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
@@ -63,8 +72,9 @@ function toAnthropicTurns(messages) {
 }
 
 // Streaming (SSE) for the Messages API. Idle-timeout based.
-async function streamAnthropic(base, key, body, onDelta) {
+async function streamAnthropic(base, key, body, onDelta, signal) {
   const ctrl = new AbortController();
+  linkSignal(ctrl, signal);
   const IDLE = 90000;
   let idle = setTimeout(() => ctrl.abort(), IDLE);
   const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
@@ -142,7 +152,7 @@ function anthropic({ baseUrl, key }) {
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta, forceTool }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal }) {
       const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || undefined;
       const body = { model, max_tokens: maxTokens || 4096, system, messages: toAnthropicTurns(messages) };
       if (tools && tools.length) {
@@ -151,8 +161,8 @@ function anthropic({ baseUrl, key }) {
         // structured-output call instead of leaving it to the model.
         if (forceTool && tools.length === 1) body.tool_choice = { type: 'tool', name: tools[0].name };
       }
-      if (onDelta) return streamAnthropic(base, key, body, onDelta);
-      const json = await req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs: 300000 });
+      if (onDelta) return streamAnthropic(base, key, body, onDelta, signal);
+      const json = await req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs: 300000, signal });
       const content = Array.isArray(json?.content) ? json.content : [];
       const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('');
       const toolCalls = content.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: b.input || {} }));
