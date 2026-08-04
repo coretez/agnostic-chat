@@ -731,6 +731,10 @@ function registerIpc() {
             onEvent: emitProgress
           });
 
+          // The bubble has been streaming per-step text; the synthesis is the
+          // REAL reply — tell the renderer to start its buffer fresh so the
+          // final message isn't a concatenation of every step's conclusion.
+          emitProgress({ type: 'stream-reset' });
           const syn = await synthesize({ chat: (a) => connector.chat(a), model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
           const u = exec.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
           if (syn.usage) {
@@ -819,7 +823,7 @@ function registerIpc() {
         _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
-      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null };
+      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned };
     }
 
     // The renderer should never let a send reach here without a provider (see

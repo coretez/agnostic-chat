@@ -1341,6 +1341,7 @@ async function submit() {
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
+    else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
     else if (ev.type === 'internals') { captureInternals(ev); }
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
     else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
@@ -1365,7 +1366,9 @@ async function submit() {
       el.messages.insertBefore(note, thinking);
     }
     clearTimeout(_streamPending);
-    const finalText = (streamed || res.reply || '(empty response)').trim();
+    // Planned turns: the authoritative reply is the synthesis (res.reply);
+    // streamed may hold per-step working text if stream-reset was missed.
+    const finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
     renderAssistantBody(body, finalText);
     if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
     el.messages.scrollTop = el.messages.scrollHeight;
