@@ -681,7 +681,7 @@ function registerIpc() {
 
         if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
-          emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, steps: plan.steps.map((s) => ({ id: s.id, task: s.task, parallel: s.parallel })) });
+          emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
           const planDeps = { connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,

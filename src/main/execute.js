@@ -29,6 +29,9 @@ function renderStepDirective(step, store) {
   const known = store && typeof store.render === 'function' ? store.render() : '';
   if (known) parts.push(known);
   parts.push(`CURRENT STEP (${step.id}): ${step.task}`);
+  // The plan's declared outputs for this step — tells the model what to
+  // discover AND what to record via set_variable for later steps.
+  if (step.produces) parts.push(`THIS STEP MUST PRODUCE: ${step.produces}\nRecord produced values with set_variable so later steps can use them.`);
   parts.push('Complete this step. When it is done, reply with your result and stop calling tools.');
   return parts.join('\n\n');
 }
@@ -230,8 +233,9 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
  */
 async function synthesize({ chat, model, plan, stepResults = [], store, history = [], onEvent }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
-  if (stepResults.length === 1 && !stepResults[0].incomplete) {
-    // Single completed step — its conclusion IS the answer; no extra call.
+  const mergeInstruction = (plan && typeof plan.merge === 'string' && plan.merge.trim()) ? plan.merge.trim() : '';
+  if (stepResults.length === 1 && !stepResults[0].incomplete && !mergeInstruction) {
+    // Single completed step with no merge contract — its conclusion IS the answer.
     return { reply: stepResults[0].conclusion || '', usage: null };
   }
   const digest = stepResults.map((r) =>
@@ -239,7 +243,11 @@ async function synthesize({ chat, model, plan, stepResults = [], store, history 
   const known = store && typeof store.render === 'function' ? store.render() : '';
   const prompt =
     `All plan steps have finished. Write the complete final answer for the user now — do NOT call any tools.\n\n` +
-    `GOAL: ${(plan && plan.goal) || ''}\n\n${known ? known + '\n\n' : ''}STEP RESULTS:\n${digest}` +
+    `GOAL: ${(plan && plan.goal) || ''}\n\n` +
+    // The plan's own merge contract (how the combined answer should be
+    // structured/presented) — authored at planning time, honored here.
+    (mergeInstruction ? `HOW TO COMBINE THE RESULTS: ${mergeInstruction}\n\n` : '') +
+    `${known ? known + '\n\n' : ''}STEP RESULTS:\n${digest}` +
     (stepResults.some((r) => r.incomplete) ? '\n\nSome steps are incomplete — say clearly what was accomplished and what remains.' : '');
   emit({ type: 'model', model });
   let res;

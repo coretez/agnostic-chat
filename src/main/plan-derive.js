@@ -18,7 +18,7 @@ const { truncateForMenu } = require('./context-select');
 // why forced tool-calling beats prompted JSON here).
 const SUBMIT_PLAN_TOOL = {
   name: 'submit_plan',
-  description: "Report the execution plan for the user's request.",
+  description: "Report the execution plan for the user's request as a structured series of steps plus how to merge their results.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -26,17 +26,20 @@ const SUBMIT_PLAN_TOOL = {
       goal: { type: 'string', description: 'One-line statement of what done looks like.' },
       steps: {
         type: 'array',
-        description: 'Ordered steps. Each is a complete, self-contained instruction. Omit or leave empty when simple=true.',
+        description: 'Ordered steps. Each is a complete, self-contained JSON step object. Omit or leave empty when simple=true.',
         items: {
           type: 'object',
           properties: {
-            task: { type: 'string', description: 'Complete instruction for this step.' },
-            parallel: { type: 'boolean', description: 'true only if this step is independent of its neighbors and can run as an isolated sub-agent.' },
-            agent: { type: 'string', description: 'Named agent to delegate a parallel step to, or "auto".' }
+            task: { type: 'string', description: 'Complete instruction for this step — executable on its own with the values known so far.' },
+            produces: { type: 'string', description: 'What this step must yield for later steps: named values (e.g. "case_id, tenant_id") or an artifact ("the saved report path"). Drives working-memory capture.' },
+            delegate: { type: 'boolean', description: 'true to run this step as an ISOLATED sub-agent: its bulk work stays out of the main context and only its conclusion returns. Use for self-contained research/pulls that would flood the main thread.' },
+            agent: { type: 'string', description: 'For delegated steps: the named agent to use, or "auto" for a general sub-agent.' },
+            parallel: { type: 'boolean', description: 'true only if this step does not depend on values discovered by its neighbors (delegated steps marked parallel may run concurrently).' }
           },
           required: ['task']
         }
-      }
+      },
+      merge: { type: 'string', description: "How to combine the step results into the final answer (structure, emphasis, format). Empty string if the last step's output IS the final answer." }
     },
     required: ['simple', 'goal']
   }
@@ -81,8 +84,9 @@ ${request}
 Guidance:
 - If the request is conversational or trivially answerable, call submit_plan with simple=true and no steps.
 - Otherwise prefer 2–6 concrete, ordered steps. Each step must be a complete instruction that could be executed on its own with the values known so far.
-- Mark a step "parallel" ONLY if it does not depend on values discovered by other steps.
-- Steps that discover identifiers (ids, paths, names) should come before steps that use them.
+- For each step, state what it "produces" — the named values (ids, paths) or artifact later steps will need. Steps that discover identifiers come before steps that use them.
+- DELEGATION: mark a step delegate=true when it is self-contained and would flood the main thread with bulk it doesn't need to keep (pulling a large report, sweeping many records) — an isolated sub-agent does the work and returns only its conclusion. Name a listed agent when one fits, else "auto". Mark delegated steps "parallel" only when they don't depend on each other's discoveries.
+- MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.
 
 Call submit_plan now.`;
 
@@ -120,7 +124,16 @@ async function callForPlan(connector, model, content) {
 function normalizeSteps(steps, startId = 1) {
   return (Array.isArray(steps) ? steps : [])
     .filter((s) => s && typeof s.task === 'string' && s.task.trim())
-    .map((s, i) => ({ id: startId + i, task: s.task.trim(), parallel: !!s.parallel, agent: s.agent || 'auto' }));
+    .map((s, i) => ({
+      id: startId + i,
+      task: s.task.trim(),
+      produces: typeof s.produces === 'string' ? s.produces.trim() : '',
+      // A step runs isolated if the planner asked for delegation OR marked it
+      // parallel (parallel execution requires isolation) — `parallel` stays
+      // the executor's handoff flag for backward compatibility.
+      parallel: !!(s.delegate || s.parallel),
+      agent: s.agent || 'auto'
+    }));
 }
 
 /**
@@ -135,9 +148,10 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
     const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || ''));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     const steps = normalizeSteps(parsed.steps);
+    const merge = typeof parsed.merge === 'string' ? parsed.merge.trim() : '';
     // A 0/1-step plan is the trivial-turn gate: nothing to orchestrate.
-    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps };
-    return { simple: false, goal: parsed.goal || '', steps };
+    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge };
+    return { simple: false, goal: parsed.goal || '', steps, merge };
   } catch (e) {
     return { simple: true, goal: '', steps: [], error: `derivePlan failed: ${e.message}` };
   }

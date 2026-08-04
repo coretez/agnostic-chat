@@ -543,10 +543,21 @@ app.whenReady().then(async () => {
   {
     const mkConnector = (args) => ({ chat: async ({ tools }) => ({ text: '', toolCalls: [{ id: 'p', name: tools[0].name, args }] }) });
     const p1 = await derivePlan({
-      connector: mkConnector({ simple: false, goal: 'monthly report', steps: [{ task: 'find the tenant id' }, { task: 'run the report', parallel: false }] }),
+      connector: mkConnector({
+        simple: false, goal: 'monthly report',
+        steps: [
+          { task: 'find the tenant id', produces: 'tenant_id' },
+          { task: 'pull the raw report', delegate: true, agent: 'report-reader' },
+          { task: 'write the summary', parallel: false }
+        ],
+        merge: 'Present as the standard monthly report: summary table first, then findings.'
+      }),
       model: 'mock', userText: 'make the monthly report', loadedSkills: [{ name: 'reporting', definition: 'steps: find tenant, run report' }], tools: [{ name: 'run_report' }], store: new VariableStore()
     });
-    assert(!p1.simple && p1.steps.length === 2 && p1.steps[0].id === 1 && p1.steps[1].id === 2, 'derivePlan returns a well-formed ordered plan');
+    assert(!p1.simple && p1.steps.length === 3 && p1.steps[0].id === 1 && p1.steps[2].id === 3, 'derivePlan returns a well-formed ordered plan');
+    assert(p1.steps[0].produces === 'tenant_id', 'plan steps carry produces (declared outputs)');
+    assert(p1.steps[1].parallel === true && p1.steps[1].agent === 'report-reader', 'delegate=true marks the step for isolated sub-agent handoff with its agent');
+    assert(/summary table first/.test(p1.merge), 'plan carries the merge instruction');
 
     const p2 = await derivePlan({ connector: mkConnector({ simple: true, goal: 'greet' }), model: 'mock', userText: 'hi', loadedSkills: [], tools: [{ name: 'x' }], store: new VariableStore() });
     assert(p2.simple, 'derivePlan trivial-turn gate: simple=true routes to the flat loop');
@@ -614,6 +625,21 @@ app.whenReady().then(async () => {
 
     const single = await synthesize({ chat: chatSeq, model: 'mock', plan: { goal: 'g' }, stepResults: [{ step: 1, task: 't', conclusion: 'the answer' }], store: vs });
     assert(single.reply === 'the answer', 'single completed step passes through without an extra model call');
+
+    // The plan's merge contract reaches the synthesis prompt (and forces a
+    // synthesis call even for a single step, since a format was prescribed).
+    let synPrompt = '';
+    await synthesize({
+      chat: async ({ messages }) => { synPrompt = messages[messages.length - 1].content; return { text: 'merged per contract', toolCalls: [] }; },
+      model: 'mock', plan: { goal: 'g', merge: 'Follow the case-investigation report sections exactly.' },
+      stepResults: [{ step: 1, task: 't', conclusion: 'raw findings' }], store: vs
+    });
+    assert(/HOW TO COMBINE THE RESULTS: Follow the case-investigation report sections/.test(synPrompt), 'synthesis honors the plan merge instruction');
+
+    // produces flows into the step directive so the model knows what to record.
+    const { renderStepDirective } = require('../src/main/execute');
+    const dir = renderStepDirective({ id: 2, task: 'expand the case', produces: 'case_id, expansion_key' }, vs);
+    assert(/MUST PRODUCE: case_id, expansion_key/.test(dir) && /set_variable/.test(dir), 'step directive carries produces + set_variable guidance');
   }
 
   // ── Read-time skill healing (skill-content.js) ─────────────────────────────

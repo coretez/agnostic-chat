@@ -164,6 +164,33 @@ Injected dependencies (`chat`, `callTool`, `selectContext`, `summarize`, store)
 keep every function unit-testable without a live model — same discipline as the
 current `runChatLoop`/`makePlan`.
 
+### The plan contract
+
+Pass 2 returns a **structured series of JSON step objects plus merge
+instructions** (forced-tool output of `submit_plan`):
+
+```json
+{
+  "simple": false,
+  "goal": "one line: what done looks like",
+  "steps": [
+    { "task": "complete, self-contained instruction",
+      "produces": "case_id, tenant_id",        // named values/artifact later steps need → drives set_variable capture
+      "delegate": true,                          // run as an ISOLATED sub-agent (bulk stays out of the main thread)
+      "agent": "report-reader",                 // named agent for a delegated step, or "auto"
+      "parallel": true }                         // may run concurrently with adjacent parallel steps
+  ],
+  "merge": "how to combine step results into the final answer (structure/format); empty = last step's output IS the answer"
+}
+```
+
+Delegation and merging are therefore **planner decisions, in the plan itself** —
+not left to the model's whim mid-loop: `delegate`/`parallel` route a step to
+`runSubagent`, `produces` is echoed into the step directive ("THIS STEP MUST
+PRODUCE: … record with set_variable"), and `merge` is honored verbatim by
+`synthesize` ("HOW TO COMBINE THE RESULTS: …"). If a loaded skill prescribes an
+output format, the planner is instructed to write `merge` to follow it.
+
 ```js
 async function handleTurn({ chat, callTool, model, chat_id, userText, deps }) {
   // 1. Instruction layers + memory (§3)
@@ -202,7 +229,8 @@ async function handleTurn({ chat, callTool, model, chat_id, userText, deps }) {
       if (replans < REPLAN_BUDGET) {                           // auto re-plan the REMAINING tail
         replans++;
         const revised = await refinePlan({ chat: deps.fastChat, plan, store,
-                                           done: stepResults, stuckStep: step, reason: r.reason });
+                                           done: stepResults, stuckStep: step,
+                                           reason: r.reason, partial: r.partial });  // what it half-found rides along
         steps = [...steps.slice(0, idx), ...revised.steps];    // keep done; replace remaining; retry idx
         continue;
       }
@@ -215,8 +243,9 @@ async function handleTurn({ chat, callTool, model, chat_id, userText, deps }) {
     stepResults.push(r.result); idx++;
   }
 
-  // 5. Synthesize over accumulated variables + step results
-  const answer = await synthesize({ chat, model, goal: plan.goal, stepResults, store });
+  // 5. Synthesize over accumulated variables + step results, honoring the
+  //    plan's own merge contract (plan.merge → "HOW TO COMBINE THE RESULTS").
+  const answer = await synthesize({ chat, model, plan, stepResults, store });
 
   // 6. Persist + measure
   await saveVariableStore(chat_id, store);
