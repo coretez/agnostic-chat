@@ -7,6 +7,9 @@ const { connectAndList } = require('./mcp/client');
 const mcpManager = require('./mcp/manager');
 const { runAuthFlow } = require('./mcp/oauth');
 const { runChatLoop } = require('./chat-loop');
+const { executePlan, synthesize } = require('./execute');
+const { derivePlan, refinePlan } = require('./plan-derive');
+const { VariableStore, SET_VARIABLE_TOOL } = require('./variables');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
@@ -577,7 +580,7 @@ function registerIpc() {
         : '';
       const delegateTool = { ...DELEGATE_TOOL, description: DELEGATE_TOOL.description + roster };
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
-      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, ...scopedTools];
+      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...scopedTools];
 
       // Resolve the project's document output dir + placement template (both
       // user-configurable; global defaults from settings).
@@ -615,8 +618,22 @@ function registerIpc() {
         return runSubagent({ connector, model: m, fastModel, agent, task: task || '', tools: subTools, callTool: rawCallTool, onEvent: emitProgress });
       };
 
+      // Variable store — working memory of discovered tool parameters, loaded
+      // from the chat and saved back after the turn. Captures happen in BOTH
+      // paths: the step executor does its own, and the flat loop's are handled
+      // by the callTool wrapper below.
+      const chatId = payload?.chatId || null;
+      let store = new VariableStore();
+      try { if (chatId) store = VariableStore.fromJSON(repo.chats.getVariables(chatId)); } catch (e) { console.error('[variables load]', e && e.message); }
+      const varsAtStart = store.size;
+
       let delegatedCount = 0, delegateAbsorbed = 0; // telemetry: isolation via sub-agents
       const callTool = async (name, args) => {
+        if (name === 'set_variable') {
+          // Explicit working-memory write — never routed to MCP.
+          const entry = store.set({ key: args && args.key, value: args && args.value, type: args && args.type }, { confidence: 'derived', source: 'set_variable' });
+          return { text: entry ? `Remembered ${entry.key} = ${JSON.stringify(entry.value)}` : 'Ignored (empty key or value).' };
+        }
         if (name === 'save_document') {
           try { return saveDocument(args || {}); }
           catch (e) { console.error('[save_document]', e && e.message); return { text: `save_document failed: ${e.message}`, isError: true }; }
@@ -643,7 +660,13 @@ function registerIpc() {
           }
           return { text: results.map((r, i) => `### Result ${i + 1} — ${r.agent}\n${r.conclusion}`).join('\n\n') };
         }
-        return rawCallTool(name, args);
+        // Auto-capture working memory around real MCP calls (id/locator-shaped
+        // params only; re-observation is a no-op so the planned path's own
+        // captures don't double up).
+        try { store.captureFromArgs(args, { source: name }); } catch {}
+        const out = await rawCallTool(name, args);
+        try { if (!out.isError) store.captureFromResult(name, out.text || ''); } catch {}
+        return out;
       };
 
       // Emit the pre-call context ledger so the INTERNALS tab can show exactly
@@ -668,22 +691,104 @@ function registerIpc() {
       });
 
       let result;
+      let planInfo = null; // {steps, replans, completed} — planner telemetry (v15)
       try {
-        result = await runChatLoop({
-          chat: (a) => connector.chat(a),
-          callTool,
-          model: chosenModel,
-          messages: convo,
-          tools: orchestratorTools,
-          onEvent: emitProgress,
-          onLimit
-        });
+        // ── Plan Pass 2 (plan-derive.js): derive the steps from the loaded
+        // skills + tools + known values. Only attempted when real capabilities
+        // are in play; any planner failure degrades to {simple:true}, so the
+        // flat loop below remains the worst case — planning can never make a
+        // turn worse than today's behavior.
+        let plan = null;
+        if (scopedTools.length || loadedSkills.length) {
+          plan = await derivePlan({ connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents });
+          if (plan.error) console.warn('[plan-derive]', plan.error);
+        }
+
+        if (plan && !plan.simple && plan.steps.length > 1) {
+          // ── Plan-and-execute path ─────────────────────────────────────────
+          emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, steps: plan.steps.map((s) => ({ id: s.id, task: s.task, parallel: s.parallel })) });
+          const planDeps = { connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
+
+          // Stuck escalation (decision #1): after the re-plan budget is spent,
+          // explain what's stuck over the same one-shot chat:continue channel
+          // the iteration-limit prompt uses. No reply in 3 min → stop.
+          const onStuck = ({ goal, stuckStep, values, replans }) => new Promise((resolve) => {
+            let done = false;
+            const finish = (n) => { if (done) return; done = true; resolveLimit = null; clearTimeout(to); resolve({ continue: n > 0 }); };
+            resolveLimit = finish;
+            const to = setTimeout(() => finish(0), 180000);
+            emitProgress({ type: 'stuck', goal, step: stuckStep && stuckStep.task, values, replans });
+          });
+
+          const exec = await executePlan({
+            chat: (a) => connector.chat(a),
+            callTool,
+            model: chosenModel,
+            plan,
+            // executeStep adds set_variable itself; don't offer it twice.
+            tools: orchestratorTools.filter((t) => t.name !== 'set_variable'),
+            store,
+            history: convo,
+            refinePlan: (i) => refinePlan({ ...planDeps, ...i }),
+            onStuck,
+            // Between-steps compaction that structurally protects the KNOWN
+            // VALUES digest (P3) — discovered parameters survive verbatim.
+            compact: async (h) => {
+              const out = await maybeCompress({
+                messages: h,
+                contextWindow: contextWindowFor(chosenModel),
+                protect: store.render() || undefined,
+                summarize: async (older) => {
+                  const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
+                  return r.text || '';
+                }
+              });
+              if (out.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: out.tokensBefore });
+              return out.messages;
+            },
+            // Parallel steps hand off to the decompose-and-merge sibling.
+            runParallel: async (step) => {
+              const r = await runOne(step.agent, step.task);
+              delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
+              taskLog.push({ kind: 'subagent', label: (step.agent && step.agent !== 'auto') ? step.agent : String(step.task || '').slice(0, 60), tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
+              return { conclusion: r.conclusion || '' };
+            },
+            onEvent: emitProgress
+          });
+
+          const syn = await synthesize({ chat: (a) => connector.chat(a), model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
+          const u = exec.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
+          if (syn.usage) {
+            u.measured = true; u.calls += 1;
+            u.inputTokens += syn.usage.inputTokens || 0; u.outputTokens += syn.usage.outputTokens || 0;
+            u.cachedTokens += syn.usage.cachedTokens || 0; u.cacheCreationTokens += syn.usage.cacheCreationTokens || 0;
+          }
+          emitProgress({ type: 'done' });
+          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed };
+          planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
+        } else {
+          // ── Flat path (unchanged behavior) — with working memory in front of
+          // the model so values discovered in earlier turns stay usable.
+          const knownBlock = store.render();
+          result = await runChatLoop({
+            chat: (a) => connector.chat(a),
+            callTool,
+            model: chosenModel,
+            messages: knownBlock ? [{ role: 'system', content: knownBlock }, ...convo] : convo,
+            tools: orchestratorTools,
+            onEvent: emitProgress,
+            onLimit
+          });
+        }
       } catch (e) {
         console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
         throw e;
       } finally {
         ipcMain.removeListener('chat:continue', limitListener);
       }
+
+      // Persist working memory for the next turn (and across restarts).
+      try { if (chatId) repo.chats.setVariables(chatId, store.size ? JSON.stringify(store.toJSON()) : null); } catch (e) { console.error('[variables save]', e && e.message); }
 
       // Post-call: report each tool result's size — the raw material for Phase 1
       // (tool-result trimming) and immediately useful to see what's bloating context.
@@ -722,7 +827,11 @@ function registerIpc() {
           // Makes the planner's fallback rate queryable across turns instead
           // of only visible one turn at a time in the INTERNALS tab.
           planningFailed: !!(skillSelect && skillSelect.error),
-          toolFellBack: !!(toolScope && toolScope.fellBack)
+          toolFellBack: !!(toolScope && toolScope.fellBack),
+          // v15: measure the planner itself.
+          planSteps: planInfo ? planInfo.steps : 0,
+          planRefines: planInfo ? planInfo.replans : 0,
+          varsCaptured: Math.max(0, store.size - varsAtStart)
         };
         repo.metrics.record(metricRow);
         // Per-task rows: sub-agents (collected during the loop) + each tool call.

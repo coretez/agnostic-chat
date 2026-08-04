@@ -1,6 +1,8 @@
 # Planning Architecture — Plan-and-Execute with a Variable Store
 
-Status: **DESIGN — pre-implementation** · Branch: `feature/planning` · Supersedes the single-loop turn model in `chat-loop.js` for complex turns.
+Status: **BUILT (P0–P5)** · Branch: `feature/planning` · Supersedes the single-loop turn model in `chat-loop.js` for complex turns (which remains the simple-turn / fallback path).
+
+Implementation map: `variables.js` (P0) · `execute.js` (P1/P5) · `plan-derive.js` (P2) · `compress.js#protect` (P3) · schema v14/v15 + PROCESS-lens plan display (P4) · `ipc.js chat:send` planning branch (P5). All smoke-verified; live validation pending.
 
 This document is the coding plan for the plan-and-execute rework. It captures the
 mental model, the flowchart, the pseudocode, the reuse/new/modify map against the

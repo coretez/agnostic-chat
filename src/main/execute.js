@@ -136,12 +136,18 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
  * @param {object} o.store           VariableStore (shared across steps)
  * @param {function} [o.refinePlan]  async ({plan, done, stuckStep, reason, store}) => {steps:[...]}
  * @param {function} [o.onStuck]     async ({goal, done, stuckStep, values, replans}) => {continue:boolean}
+ * @param {function} [o.compact]     async (history) => history — run between steps
+ *   (wire to maybeCompress with protect: store.render() so the KNOWN VALUES
+ *   digest structurally survives mid-turn compaction — P3)
  * @returns {Promise<{stepResults:Array, history:Array, replans:number, completed:boolean}>}
  */
-async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, onEvent }) {
+async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onEvent }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   let steps = [...((plan && plan.steps) || [])];
   const stepResults = [];
+  const toolTrace = [];
+  const usage = makeUsage();
+  const mergeUsage = (u) => { if (u && u.calls) { usage.measured = usage.measured || u.measured; usage.calls += u.calls; usage.inputTokens += u.inputTokens; usage.outputTokens += u.outputTokens; usage.cachedTokens += u.cachedTokens; usage.cacheCreationTokens += u.cacheCreationTokens; } };
   let h = [...history];
   let replans = 0;
   let idx = 0;
@@ -150,8 +156,28 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
 
   while (idx < steps.length) {
     const step = steps[idx];
+
+    // Parallel steps hand off to the decompose-and-merge sibling (subagent.js)
+    // via the injected runner: an isolated sub-agent, no shared history — only
+    // its conclusion (and any values captured from it) comes back (P5).
+    if (step.parallel && typeof runParallel === 'function') {
+      emit({ type: 'process', kind: 'step-start', step: step.id, task: step.task, parallel: true });
+      let pr;
+      try { pr = await runParallel(step); }
+      catch (e) { pr = { conclusion: `parallel step failed: ${e.message}`, error: true }; }
+      // Harvest ids/paths from the sub-agent's conclusion into shared memory.
+      if (store && pr && pr.conclusion) store.captureFromResult(`step-${step.id}`, pr.conclusion, { step: step.id });
+      stepResults.push({ step: step.id, task: step.task, conclusion: (pr && pr.conclusion) || '', parallel: true });
+      emit({ type: 'process', kind: 'step-done', step: step.id, parallel: true });
+      idx += 1; continue;
+    }
+
     const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit });
     h = r.history;
+    mergeUsage(r.usage);
+    toolTrace.push(...(r.toolTrace || []));
+    // Between-steps compaction (P3): the injected hook protects the store digest.
+    if (typeof compact === 'function') { try { h = await compact(h); } catch {} }
 
     if (r.stuck) {
       // Auto re-plan the remaining tail while we still have budget.
@@ -192,7 +218,33 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
 
   const completed = idx >= steps.length;
   emit({ type: 'process', kind: 'execute-done', steps: stepResults.length, replans, completed });
-  return { stepResults, history: h, replans, completed };
+  return { stepResults, history: h, replans, completed, usage, toolTrace };
 }
 
-module.exports = { executeStep, executePlan, renderStepDirective, DEFAULT_STEP_BUDGET, REPLAN_BUDGET, STEP_WRAP_PROMPT };
+/**
+ * Final synthesis: one tool-less call over the goal, step results, and gathered
+ * values. Guarantees the turn ends with a coherent answer even when execution
+ * was partial (declined escalation keeps its partials for exactly this).
+ */
+async function synthesize({ chat, model, plan, stepResults = [], store, history = [], onEvent }) {
+  const emit = typeof onEvent === 'function' ? onEvent : () => {};
+  if (stepResults.length === 1 && !stepResults[0].incomplete) {
+    // Single completed step — its conclusion IS the answer; no extra call.
+    return { reply: stepResults[0].conclusion || '', usage: null };
+  }
+  const digest = stepResults.map((r) =>
+    `### Step ${r.step}: ${r.task}${r.incomplete ? ' (incomplete)' : ''}\n${r.conclusion || '(no result)'}`).join('\n\n');
+  const known = store && typeof store.render === 'function' ? store.render() : '';
+  const prompt =
+    `All plan steps have finished. Write the complete final answer for the user now — do NOT call any tools.\n\n` +
+    `GOAL: ${(plan && plan.goal) || ''}\n\n${known ? known + '\n\n' : ''}STEP RESULTS:\n${digest}` +
+    (stepResults.some((r) => r.incomplete) ? '\n\nSome steps are incomplete — say clearly what was accomplished and what remains.' : '');
+  emit({ type: 'model', model });
+  let res;
+  try {
+    res = await chat({ model, messages: [...history, { role: 'user', content: prompt }], tools: [], onDelta: (d) => emit({ type: 'token', text: d.text }) });
+  } catch { res = { text: '' }; }
+  return { reply: res.text || stepResults.map((r) => r.conclusion).filter(Boolean).join('\n\n') || '(no results produced)', usage: res.usage || null };
+}
+
+module.exports = { executeStep, executePlan, synthesize, renderStepDirective, DEFAULT_STEP_BUDGET, REPLAN_BUDGET, STEP_WRAP_PROMPT };

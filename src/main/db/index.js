@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 let db = null;
 
@@ -201,6 +201,15 @@ function migrate(database) {
   if (current < 14) {
     const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
     if (!ccols.includes('variables_json')) database.exec('ALTER TABLE chats ADD COLUMN variables_json TEXT');
+  }
+
+  // v15: plan-and-execute telemetry — measure the planner itself (steps derived,
+  // reactive re-plans, variables captured) per turn.
+  if (current < 15) {
+    const tcols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
+    if (!tcols.includes('plan_steps')) database.exec('ALTER TABLE turn_metrics ADD COLUMN plan_steps INTEGER');
+    if (!tcols.includes('plan_refines')) database.exec('ALTER TABLE turn_metrics ADD COLUMN plan_refines INTEGER');
+    if (!tcols.includes('vars_captured')) database.exec('ALTER TABLE turn_metrics ADD COLUMN vars_captured INTEGER');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

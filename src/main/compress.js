@@ -47,9 +47,13 @@ function renderForSummary(messages) {
  * @param {function} o.summarize async (olderMessages) => string
  * @param {number} [o.ratio=0.75]
  * @param {number} [o.keepRecent=6] recent non-system messages kept verbatim
+ * @param {string} [o.protect] content that must SURVIVE compaction verbatim
+ *   (the variable store's KNOWN VALUES digest — discovered tool parameters
+ *   must never be summarized away; see docs/PLANNING_ARCHITECTURE.md §5/P3).
+ *   Re-injected as its own system message right after the summary.
  * @returns {Promise<{messages:Array, compressed:boolean, tokensBefore:number}>}
  */
-async function maybeCompress({ messages, contextWindow, summarize, ratio = COMPRESSION_TRIGGER_RATIO, keepRecent = 6 }) {
+async function maybeCompress({ messages, contextWindow, summarize, ratio = COMPRESSION_TRIGGER_RATIO, keepRecent = 6, protect }) {
   const tokensBefore = estimateTokens(messages);
   const budget = contextWindow * ratio;
   if (tokensBefore <= budget) return { messages, compressed: false, tokensBefore };
@@ -62,7 +66,8 @@ async function maybeCompress({ messages, contextWindow, summarize, ratio = COMPR
   const recent = rest.slice(rest.length - keepRecent);
   const summary = await summarize(older);
   const summaryMsg = { role: 'system', content: `Summary of earlier conversation (older turns were compressed to save context):\n${summary}` };
-  return { messages: [...system, summaryMsg, ...recent], compressed: true, tokensBefore };
+  const protectMsg = protect ? [{ role: 'system', content: protect }] : [];
+  return { messages: [...system, summaryMsg, ...protectMsg, ...recent], compressed: true, tokensBefore };
 }
 
 const SUMMARY_PROMPT =

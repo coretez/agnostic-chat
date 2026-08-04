@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS turn_metrics (
   duration_ms              INTEGER,                     -- wall-clock for the whole turn
   planning_failed          INTEGER,                     -- 1 = the context planner call errored/mismatched this turn
   tool_fell_back           INTEGER,                     -- 1 = tool ceiling fell back to the full catalog (no usable picks)
+  plan_steps               INTEGER,                     -- steps in the derived plan (0/NULL = flat-loop turn)
+  plan_refines             INTEGER,                     -- reactive re-plans fired by stuck steps this turn
+  vars_captured            INTEGER,                     -- variable-store entries captured this turn
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_turn_metrics_project ON turn_metrics(project_id);

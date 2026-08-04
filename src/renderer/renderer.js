@@ -630,6 +630,28 @@ function captureProcess(ev) {
   const rec = state.internals[state.currentChatId];
   if (!rec) return;
   rec.process = rec.process || [];
+  // Plan-and-execute lifecycle (execute.js/plan-derive.js) — tracked on rec.plan
+  // so the PROCESS lens can show the derived plan, per-step status, re-plans and
+  // variable captures. Handled BEFORE the sub-agent branch below so these kinds
+  // never get misread as sub-agent updates.
+  const PLAN_KINDS = { plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
+  if (PLAN_KINDS[ev.kind]) {
+    if (ev.kind === 'plan') {
+      rec.plan = { goal: ev.goal || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
+    } else if (rec.plan) {
+      const byId = (id) => rec.plan.steps.find((s) => s.id === id);
+      if (ev.kind === 'step-start') { let s = byId(ev.step); if (!s && ev.task) { s = { id: ev.step, task: ev.task, parallel: !!ev.parallel, status: 'pending' }; rec.plan.steps.push(s); } if (s) { s.task = ev.task || s.task; s.status = 'running'; } }
+      else if (ev.kind === 'step-done') { const s = byId(ev.step); if (s) s.status = 'done'; }
+      else if (ev.kind === 'step-stuck') { const s = byId(ev.step); if (s) s.status = 'stuck'; }
+      else if (ev.kind === 'replan') { rec.plan.replans = ev.attempt || (rec.plan.replans + 1); rec.plan.steps = rec.plan.steps.filter((s) => s.status === 'done' || s.status === 'running' || s.status === 'stuck'); }
+      else if (ev.kind === 'escalate') { rec.plan.escalated = true; }
+      else if (ev.kind === 'execute-done') { rec.plan.completed = ev.completed !== false; }
+      else if (ev.kind === 'var-set' || ev.kind === 'var-capture') { rec.plan.vars = (rec.plan.vars || 0) + 1; }
+      else if (ev.kind === 'mid-turn-compact') { rec.plan.compacted = true; }
+    }
+    if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+    return;
+  }
   if (ev.kind === 'merge-start') { rec.merge = { status: 'running', count: ev.count }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (ev.kind === 'merge-done') { rec.merge = { status: 'done', tokens: ev.tokens }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (ev.kind === 'subagent-start') {
@@ -842,11 +864,25 @@ function renderProcess(rec) {
   // muted). 'warn' = the stage ran but planning failed and fell back.
   // 'planned' is reserved for capabilities that don't exist yet — don't use
   // it to mean "not used this turn" or "failed this turn".
+  // Plan-and-execute (Pass 2): the derived plan, its per-step status, and the
+  // working memory captured along the way.
+  const plan = rec.plan;
+  const planDetail = !plan ? 'simple turn — flat loop'
+    : `${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}`
+      + (plan.replans ? ` · ${plan.replans} re-plan${plan.replans === 1 ? '' : 's'}` : '')
+      + (plan.vars ? ` · ${plan.vars} value${plan.vars === 1 ? '' : 's'} remembered` : '')
+      + (plan.escalated ? ' · escalated to user' : '');
   const stages = [
     { name: 'Assemble', detail: `${L.assembled.length} messages`, state: 'done' },
     { name: 'Select skills', detail: ssDetail, state: ss && ss.error ? 'warn' : 'done' },
     { name: 'Select tools', detail: tsDetail, state: ts && ts.fellBack ? 'warn' : 'done' },
-    { name: 'Compact', detail: compacted ? 'summarized older history' : 'not needed this turn', state: 'done' },
+    { name: 'Plan', detail: planDetail, state: plan ? (plan.escalated ? 'warn' : 'done') : 'idle' },
+    ...(plan ? plan.steps.map((s) => ({
+      name: `· Step ${s.id}`,
+      detail: `${s.parallel ? '⇉ ' : ''}${(s.task || '').slice(0, 110)}`,
+      state: s.status === 'done' ? 'done' : s.status === 'running' ? 'active' : s.status === 'stuck' ? 'warn' : 'idle'
+    })) : []),
+    { name: 'Compact', detail: compacted ? 'summarized older history' : (plan && plan.compacted ? 'mid-turn (protected known values)' : 'not needed this turn'), state: 'done' },
     { name: 'Route', detail: L.model || '', state: 'done' },
     { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: 'done' },
     { name: 'Filter / trim', detail: nTools ? `${nTools} tool result${nTools === 1 ? '' : 's'} filtered · saved ${fmtTok(filterSaved)}` : 'no tool output to filter', state: 'done' },
@@ -1275,6 +1311,25 @@ async function submit() {
     body.appendChild(prompt);
     el.messages.scrollTop = el.messages.scrollHeight;
   }
+  // Stuck-plan escalation (decision #1): re-plans are exhausted — explain what
+  // is stuck and ask approval to keep trying (same chat:continue channel).
+  function showStuckPrompt(ev) {
+    status.textContent = '';
+    const prompt = document.createElement('div');
+    prompt.className = 'limitprompt';
+    const step = (ev.step || '').slice(0, 160);
+    prompt.innerHTML = `<span class="limitprompt__msg">Stuck after ${ev.replans || 0} re-plan${ev.replans === 1 ? '' : 's'}`
+      + (ev.goal ? ` while working on “${escapeHtml((ev.goal || '').slice(0, 120))}”` : '')
+      + (step ? ` — blocked at: ${escapeHtml(step)}` : '') + `. Keep trying?</span>`;
+    const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'KEEP TRYING';
+    const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
+    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
+    cont.onclick = () => answer(1);
+    stop.onclick = () => answer(0);
+    prompt.appendChild(cont); prompt.appendChild(stop);
+    body.appendChild(prompt);
+    el.messages.scrollTop = el.messages.scrollHeight;
+  }
 
   const unsub = window.api.onChatProgress((ev) => {
     if (ev.type === 'token') {
@@ -1285,6 +1340,7 @@ async function submit() {
     } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
+    else if (ev.type === 'stuck') { showStuckPrompt(ev); }
     else if (ev.type === 'internals') { captureInternals(ev); }
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
     else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
@@ -1355,6 +1411,15 @@ function planEvent(ev) {
   else if (ev.type === 'tool-start') { if (!planSwitched) { showRail('plan'); planSwitched = true; } planAdd('⚙ ' + String(ev.name).split('__').pop()); }
   else if (ev.type === 'tool-end') planFinalize(ev.ok !== false);
   else if (ev.type === 'done') planFinalize(true);
+  else if (ev.type === 'process') {
+    // Plan-and-execute narration in the live rail.
+    if (ev.kind === 'plan') { if (!planSwitched) { showRail('plan'); planSwitched = true; } planAdd(`◈ plan: ${(ev.steps || []).length} steps`); planFinalize(true); }
+    else if (ev.kind === 'step-start') planAdd(`▸ step ${ev.step}: ${(ev.task || '').slice(0, 60)}`);
+    else if (ev.kind === 'step-done') planFinalize(true);
+    else if (ev.kind === 'step-stuck') planFinalize(false);
+    else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
+    else if (ev.kind === 'escalate') planFinalize(false);
+  }
 }
 
 // ── Models screen ─────────────────────────────────────────────────

@@ -538,6 +538,75 @@ app.whenReady().then(async () => {
     assert(healed.completed && !escalated && healed.replans === 1, 'successful re-plan completes the turn without escalating');
   }
 
+  // ── P2: Plan derivation (Pass 2) — derivePlan / refinePlan ──────────────────
+  const { derivePlan, refinePlan } = require('../src/main/plan-derive');
+  {
+    const mkConnector = (args) => ({ chat: async ({ tools }) => ({ text: '', toolCalls: [{ id: 'p', name: tools[0].name, args }] }) });
+    const p1 = await derivePlan({
+      connector: mkConnector({ simple: false, goal: 'monthly report', steps: [{ task: 'find the tenant id' }, { task: 'run the report', parallel: false }] }),
+      model: 'mock', userText: 'make the monthly report', loadedSkills: [{ name: 'reporting', definition: 'steps: find tenant, run report' }], tools: [{ name: 'run_report' }], store: new VariableStore()
+    });
+    assert(!p1.simple && p1.steps.length === 2 && p1.steps[0].id === 1 && p1.steps[1].id === 2, 'derivePlan returns a well-formed ordered plan');
+
+    const p2 = await derivePlan({ connector: mkConnector({ simple: true, goal: 'greet' }), model: 'mock', userText: 'hi', loadedSkills: [], tools: [{ name: 'x' }], store: new VariableStore() });
+    assert(p2.simple, 'derivePlan trivial-turn gate: simple=true routes to the flat loop');
+
+    const p3 = await derivePlan({ connector: mkConnector({ simple: false, goal: 'g', steps: [{ task: 'only one' }] }), model: 'mock', userText: 't', loadedSkills: [], tools: [], store: new VariableStore() });
+    assert(p3.simple, 'derivePlan gate: a 1-step plan is treated as simple (nothing to orchestrate)');
+
+    const pFail = await derivePlan({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', userText: 't', loadedSkills: [], tools: [], store: new VariableStore() });
+    assert(pFail.simple && pFail.error, 'derivePlan failure degrades to simple (flat loop is the worst case)');
+
+    const r1 = await refinePlan({
+      connector: mkConnector({ simple: false, goal: 'g', steps: [{ task: 'alternative approach' }, { task: 'wrap up' }] }),
+      model: 'mock', userText: 't', plan: { goal: 'g' }, done: [{ step: 1, task: 'a', conclusion: 'found X' }],
+      stuckStep: { id: 2, task: 'blocked step' }, reason: 'iteration-budget-exhausted', store: new VariableStore()
+    });
+    assert(r1.steps.length === 2 && r1.steps[0].id === 2, 'refinePlan renumbers the revised tail from the stuck step');
+
+    const rFail = await refinePlan({ connector: { chat: async () => { throw new Error('down'); } }, model: 'mock', plan: { goal: 'g' }, stuckStep: { id: 3, task: 'orig' }, reason: 'x', store: new VariableStore() });
+    assert(rFail.steps.length === 1 && rFail.steps[0].task === 'orig', 'failed refine returns the stuck step (burns budget → escalation, never silently concludes)');
+  }
+
+  // ── P3: compaction protects the variable store digest ──────────────────────
+  {
+    const vs = new VariableStore();
+    vs.set({ key: 'tenant_id', value: 'acme-prod' }, { step: 1 });
+    const bulky = Array.from({ length: 12 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `turn ${i} ` + 'x'.repeat(4000) }));
+    const out = await maybeCompress({ messages: bulky, contextWindow: 10000, protect: vs.render(), summarize: async () => 'summary of older turns' });
+    assert(out.compressed, 'protect fixture triggers compaction');
+    const protectedMsg = out.messages.find((m) => m.role === 'system' && /KNOWN VALUES/.test(m.content));
+    assert(protectedMsg && protectedMsg.content.includes('tenant_id = "acme-prod"'), 'KNOWN VALUES digest survives compaction verbatim (P3)');
+    // P3 objective: the variable is still usable by a subsequent step.
+    assert(vs.get('tenant_id') === 'acme-prod', 'store itself untouched by compaction');
+  }
+
+  // ── P5: parallel-step handoff + synthesis over mixed results ───────────────
+  const { synthesize } = require('../src/main/execute');
+  {
+    const vs = new VariableStore();
+    const seq = [];
+    const chatSeq = async ({ messages, tools }) => {
+      const directive = messages.filter((m) => m.role === 'user').pop().content;
+      if (/CURRENT STEP/.test(directive)) return { text: 'sequential step done', toolCalls: [] };
+      return { text: 'final synthesized answer', toolCalls: [] };
+    };
+    const out = await executePlan({
+      chat: chatSeq, callTool: async () => ({ text: '{}' }), model: 'mock',
+      plan: { goal: 'mixed', steps: [{ id: 1, task: 'parallel research', parallel: true, agent: 'auto' }, { id: 2, task: 'use the findings' }] },
+      tools: [], store: vs, stepBudget: 3,
+      runParallel: async (step) => { seq.push('parallel:' + step.id); return { conclusion: JSON.stringify({ case_id: 'C-99', summary: 'found it' }) }; }
+    });
+    assert(out.completed && out.stepResults.length === 2 && out.stepResults[0].parallel, 'parallel step handed off to the sub-agent runner');
+    assert(vs.get('case_id') === 'C-99', "parallel step's conclusion harvested into shared working memory");
+
+    const syn = await synthesize({ chat: chatSeq, model: 'mock', plan: { goal: 'mixed' }, stepResults: out.stepResults, store: vs, history: [] });
+    assert(syn.reply === 'final synthesized answer', 'synthesize produces the final answer over mixed results');
+
+    const single = await synthesize({ chat: chatSeq, model: 'mock', plan: { goal: 'g' }, stepResults: [{ step: 1, task: 't', conclusion: 'the answer' }], store: vs });
+    assert(single.reply === 'the answer', 'single completed step passes through without an extra model call');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
