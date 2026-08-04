@@ -557,6 +557,15 @@ app.whenReady().then(async () => {
     const pFail = await derivePlan({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', userText: 't', loadedSkills: [], tools: [], store: new VariableStore() });
     assert(pFail.simple && pFail.error, 'derivePlan failure degrades to simple (flat loop is the worst case)');
 
+    // The planner's tool menu carries descriptions, not bare names.
+    let derivePrompt = '';
+    await derivePlan({
+      connector: { chat: async ({ messages, tools }) => { derivePrompt = messages[0].content; return { text: '', toolCalls: [{ id: 'p', name: tools[0].name, args: { simple: true, goal: 'g' } }] }; } },
+      model: 'mock', userText: 'report please', loadedSkills: [],
+      tools: [{ name: 'run_report', description: 'Runs a saved FPL report and returns rows.' }], store: new VariableStore()
+    });
+    assert(derivePrompt.includes('run_report: Runs a saved FPL report'), 'planner tool menu includes descriptions (name — what it does)');
+
     const r1 = await refinePlan({
       connector: mkConnector({ simple: false, goal: 'g', steps: [{ task: 'alternative approach' }, { task: 'wrap up' }] }),
       model: 'mock', userText: 't', plan: { goal: 'g' }, done: [{ step: 1, task: 'a', conclusion: 'found X' }],

@@ -12,6 +12,8 @@
 // the same offered-tool retry for thinking models that reject a forced
 // tool_choice.
 
+const { truncateForMenu } = require('./context-select');
+
 // Synthetic tool as a structured-output contract (see context-select.js for
 // why forced tool-calling beats prompted JSON here).
 const SUBMIT_PLAN_TOOL = {
@@ -53,7 +55,15 @@ function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents 
     parts.push('SKILL INSTRUCTIONS IN PLAY (derive your steps from these):\n\n'
       + loadedSkills.map((s) => `## ${s.name}\n${clip(s.definition || s.description || '', 24000)}`).join('\n\n'));
   }
-  if (tools.length) parts.push('AVAILABLE TOOLS:\n' + tools.map((t) => `- ${t.name}`).join('\n'));
+  if (tools.length) {
+    // Name + a one-line description (same sentence-boundary clip the selection
+    // menu uses): the planner can only sequence steps sensibly if it knows what
+    // each tool DOES, not just what it is called. Bare names produced plans
+    // that guessed at tool behavior. Descriptions here are already scoped —
+    // this list is the post-ceiling toolset, not the full catalog.
+    parts.push('AVAILABLE TOOLS (name — what it does):\n'
+      + tools.map((t) => `- ${t.name}: ${truncateForMenu(t.description, 200, 60)}`).join('\n'));
+  }
   if (agents.length) parts.push('NAMED AGENTS (for parallel steps):\n' + agents.map((a) => `- ${a.name}: ${clip(a.description, 160)}`).join('\n'));
   const known = store && typeof store.render === 'function' ? store.render() : '';
   if (known) parts.push(known);
