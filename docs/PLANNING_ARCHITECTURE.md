@@ -87,11 +87,16 @@ flowchart TD
     C --> D[Plan · Pass 2<br/>derive steps  ·  skill iteration]
     D -->|refine loop:<br/>plan.needsMore| D
     D --> E{The plan<br/>goal + ordered steps}
-    E --> F[Execute next step]
+    E --> F[Execute next step<br/>inner model↔tools loop<br/>capture vars from args + results]
     F <--> V[(Variable store<br/>discovered params)]
-    F --> G{Step used tools?}
-    G -->|inner model↔tools loop<br/>capture vars from args + results| F
-    G -->|step done| H{More steps?}
+    F --> S{Step outcome?}
+    S -->|done| H{More steps?}
+    S -->|stuck: budget exhausted| R{Re-plans < 3?}
+    R -->|yes| RP[Re-plan remaining steps<br/>with results-so-far + why stuck]
+    RP --> F
+    R -->|no| UA{Ask user: keep trying?<br/>explain what's stuck}
+    UA -->|yes → reset budget| RP
+    UA -->|no| I
     H -->|yes, next step| F
     H -->|context nearing window| K[Compact<br/>keep: instructions, variables,<br/>discovered, recent turns]
     K --> H
@@ -100,9 +105,11 @@ flowchart TD
     J --> Z[Reply to user]
 ```
 
-The three shapes that did not exist in the old flat-loop picture: **Pass 2 step
-derivation** (D, with its refine loop), the **Variable store** (V, read/written by
-every step), and **step-scoped execution** (F/G/H replacing one monolithic loop).
+The shapes that did not exist in the old flat-loop picture: **Pass 2 step
+derivation** (D), the **Variable store** (V, read/written by every step),
+**step-scoped execution** (F replacing one monolithic loop), and the **stuck →
+re-plan → escalate** control (S/R/RP/UA) — the system adapts its own plan around a
+stuck step and only interrupts the user when it genuinely can't progress.
 
 ---
 
@@ -175,18 +182,35 @@ async function handleTurn({ chat, callTool, model, chat_id, userText, deps }) {
     plan = await refinePlan({ chat: deps.fastChat, plan, layers, store });
   }
 
-  // 4. Execute each step against the shared variable store (NEW executor)
+  // 4. Execute the plan, re-planning around stuck steps (decision #1).
+  const REPLAN_BUDGET = 3;
   const stepResults = [];
   let history = seedHistory(layers, store, userText);
-  for (const step of plan.steps) {
+  let steps = [...plan.steps];
+  let replans = 0, idx = 0;
+  while (idx < steps.length) {
+    const step = steps[idx];
     if (step.parallel) {                                       // hand off to decompose-and-merge sibling
-      stepResults.push(await runSubagentStep(step, { callTool, ...deps }));
-      continue;
+      stepResults.push(await runSubagentStep(step, { callTool, ...deps })); idx++; continue;
     }
     const r = await executeStep({ chat, callTool, model, step, tools, history, store, deps });
-    history = r.history;                                       // step's trace stays in-turn
-    stepResults.push(r.result);
-    history = await maybeCompactKeepingStore({ history, store, model, summarize: deps.summarize });
+    history = await maybeCompactKeepingStore({ history: r.history, store, model, summarize: deps.summarize });
+
+    if (r.stuck) {
+      if (replans < REPLAN_BUDGET) {                           // auto re-plan the REMAINING tail
+        replans++;
+        const revised = await refinePlan({ chat: deps.fastChat, plan, store,
+                                           done: stepResults, stuckStep: step, reason: r.reason });
+        steps = [...steps.slice(0, idx), ...revised.steps];    // keep done; replace remaining; retry idx
+        continue;
+      }
+      const decision = await deps.onStuck({                    // budget spent → escalate with an explanation
+        goal: plan.goal, done: stepResults, stuckStep: step, values: store.render(), replans });
+      if (decision.continue) { replans = 0; continue; }        // user granted a fresh budget
+      stepResults.push({ step: step.id, conclusion: r.partial, incomplete: true });
+      break;                                                   // user declined → synthesize what we have
+    }
+    stepResults.push(r.result); idx++;
   }
 
   // 5. Synthesize over accumulated variables + step results
@@ -218,9 +242,12 @@ async function executeStep({ chat, callTool, model, step, tools, history, store,
       history.push({ role: 'tool', toolCallId: call.id, name: call.name, content: filtered.text });
     }
   }
-  // Step exhausted its budget — force a tool-less conclusion (open decision #1:
-  // per-step continue-at-limit prompt vs. the current global turn-level prompt).
-  return { result: await forceStepConclusion({ chat, model, history, step }), history };
+  // Step exhausted its budget without a natural stop → mark it STUCK so the
+  // orchestrator can re-plan the remaining tail (decision #1). Still force a
+  // tool-less partial conclusion so nothing gathered is lost.
+  const partial = await forceStepConclusion({ chat, model, history, step });
+  return { result: partial, partial: partial.conclusion, history, stuck: true,
+           reason: 'iteration-budget-exhausted' };
 }
 
 // Compaction that STRUCTURALLY protects the variable store (extends compress.js).
@@ -284,28 +311,36 @@ reuse or a bounded extension.
 
 ---
 
-## 9. Design considerations & OPEN DECISIONS
+## 9. Design considerations & decisions
 
-Three decisions are still open. Current recommendation is the default the code will
-assume unless changed:
+All three planning decisions are now **DECIDED** (below). The rest of the section
+logs considerations for the build.
 
-1. **Continue-at-limit granularity** — when a *step* exhausts its iteration budget,
-   do we prompt to continue **per-step**, or keep the existing **global** turn-level
-   continue prompt?
-   **Recommendation: per-step.** Finer control, matches the `executeStep` loop, and a
-   stuck step shouldn't force the whole turn to re-prompt.
+1. **Stuck-step handling — DECIDED: re-plan first, escalate to the user after a cap.**
+   When a step exhausts its iteration budget ("stuck") we do NOT immediately prompt
+   the user. Instead:
+   1. **Auto re-plan** — feed the results-so-far (completed steps + the variable
+      store + *why* the step stuck) back into Pass 2 (`refinePlan`) to re-derive the
+      *remaining* steps. Completed steps and the variable store are preserved; only
+      the not-yet-done tail is replaced.
+   2. **Bounded** — at most `REPLAN_BUDGET = 3` re-plans per turn (configurable).
+   3. **Escalate** — once the budget is spent and a step is still stuck, surface
+      *what is stuck* to the user (the goal, what's done, the blocking step, the
+      values gathered so far) and ask approval to keep trying. A "yes" grants a fresh
+      re-plan budget; a "no" synthesizes an answer from what was gathered.
+   Rationale: the system adapts on its own first and only interrupts the user when it
+   genuinely can't make progress — with a real explanation, not a bare "+10?".
 
-2. **Skill iteration: loop or single pass** — does Pass 2 refine the plan in a
-   `while plan.needsMore` loop until it stabilizes, or run once?
-   **Recommendation: single pass to start.** Add the refine loop only if derived
-   plans come out underspecified in practice. Cheaper, simpler, fewer fast-model
-   calls; the loop is scaffolded but capped at 1 iteration initially.
+2. **Skill iteration: loop or single pass — DECIDED (coupled to #1): single-pass
+   up front, re-plan reactively.** Pass 2 derives the plan in one cheap proactive
+   pass. The `refinePlan` loop still exists but is driven *reactively* by stuck steps
+   (decision #1), sharing the same `REPLAN_BUDGET = 3` cap. No proactive
+   `while plan.needsMore` spinning; re-planning happens on demand, bounded.
 
-3. **Variable capture mechanism** — explicit `set_variable` tool, automatic
-   extraction pass, or both?
-   **Recommendation: both.** Auto-extract from every `call.args` (used params are
-   resolved values) plus an explicit `set_variable` for derived/chosen values. Auto
-   gives recall for free; explicit gives the model a deliberate handle.
+3. **Variable capture mechanism — DECIDED: both.** Auto-extract from every
+   `call.args` (used params are resolved values) plus an explicit `set_variable` for
+   derived/chosen values. Auto gives recall for free; explicit gives the model a
+   deliberate handle. Implemented in P0.
 
 Other considerations logged for the build:
 - **When to plan at all.** Trivial turns (a greeting, a one-line question) shouldn't
@@ -345,16 +380,27 @@ Migration v14 (`chats.variables_json`) + repo load/save.
   round-trips across a save/load; survives a forced compaction. Smoke-verified.
 
 **Phase P1 — Step executor.** `execute.js` `executeStep` factored from `runChatLoop`,
-with variable capture wired and per-step budget + continue-at-limit (decision #1).
-- *Objective:* a two-step turn where step 2's tool call is formed **only** from a
-  value step 1 discovered, driven entirely by injected mocks. Smoke-verified.
+with variable capture wired (P0), per-step budget, `set_variable` interception, and
+**stuck detection** — a budget-exhausted step returns `{stuck, partial, reason}` plus
+a forced partial conclusion (decision #1). The `onStuck` escalation callback is
+stubbed here (mock-injectable); its live IPC wiring and the auto-`refinePlan` land in
+P2. The orchestration loop (re-plan tail / escalate) is exercised with a mock
+`refinePlan`.
+- *Objective:* (a) a two-step turn where step 2's tool call is formed **only** from a
+  value step 1 discovered; (b) a step that exhausts its budget is reported `stuck`
+  and its partial conclusion retained. Both driven entirely by injected mocks.
+  Smoke-verified.
 
-**Phase P2 — Plan derivation (Pass 2).** `plan-derive.js` `derivePlan` (+ scaffolded
-`refinePlan`, capped per decision #2), using the forced-tool structured-output
-pattern. Wire Pass 1 (`selectContext`) → Pass 2 → executor in `handleTurn`.
+**Phase P2 — Plan derivation (Pass 2) + re-plan.** `plan-derive.js` `derivePlan` and
+`refinePlan` (the reactive, `REPLAN_BUDGET`-capped re-plan of a stuck step's remaining
+tail, decisions #1/#2), using the forced-tool structured-output pattern. Wire Pass 1
+(`selectContext`) → Pass 2 → executor in `handleTurn`, plus the live `onStuck`
+user-escalation over IPC (reusing the continue-at-limit channel, now carrying the
+what's-stuck explanation).
 - *Objective:* derived plans are well-formed (goal + ordered steps) ≥95% of runs on a
-  fixture set; the trivial-turn gate skips planning for greetings. Measured:
-  `plan_steps`, `plan_refines`.
+  fixture set; a stuck step triggers ≤3 automatic re-plans of the remaining tail and
+  only then escalates. The trivial-turn gate skips planning for greetings. Measured:
+  `plan_steps`, `plan_refines` (= re-plans).
 
 **Phase P3 — Compaction that protects the store.** Extend `maybeCompress` with a
 `protect` block; re-inject the store digest + instruction layers verbatim.
