@@ -457,6 +457,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .codebtn:hover { color: var(--brand); border-color: var(--brand); }
 .codebtn.is-on { color: var(--brand); border-color: var(--brand); background: var(--brand-soft); }
 .codebtn:disabled { opacity: 0.4; cursor: default; }
+.codebtn--bypass { color: var(--warn); border-color: var(--warn); }
+.codebtn--bypass:hover { color: var(--danger); border-color: var(--danger); }
 .typing { display: inline-flex; gap: 4px; align-items: center; height: 18px; vertical-align: middle; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); animation: typing 1s infinite ease-in-out; }
 .typing span:nth-child(2) { animation-delay: 0.15s; }

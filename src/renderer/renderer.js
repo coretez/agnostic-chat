@@ -21,7 +21,7 @@ const el = {
   ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
-  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), codeToggle: $('code-toggle'),
+  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), codeToggle: $('code-toggle'), bypassChip: $('bypass-chip'),
   ctxMeter: $('ctx-meter'),
   intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
   intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
@@ -613,7 +613,22 @@ function updateCodeToggle() {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
   el.codeToggle.disabled = !chat;
   el.codeToggle.classList.toggle('is-on', !!(chat && chat.coding_mode));
+  updateBypassChip();
 }
+// A standing bypass is invisible power — surface it whenever coding mode is
+// on, and let one click revoke it (prompts resume immediately; main enforces).
+async function updateBypassChip() {
+  const chat = state.chats.find((c) => c.id === state.currentChatId);
+  let on = false;
+  if (chat && chat.coding_mode && state.currentProjectId) {
+    try { on = (await window.api.settings.get('coding_bypass', state.currentProjectId)) === '1'; } catch {}
+  }
+  el.bypassChip.hidden = !on;
+}
+el.bypassChip.onclick = async () => {
+  try { await window.api.settings.set('coding_bypass', '0', state.currentProjectId); } catch {}
+  updateBypassChip();
+};
 el.codeToggle.onclick = async () => {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
   if (!chat) return;
@@ -1403,7 +1418,7 @@ async function submit() {
     if (ev.gitAvailable) {
       const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS (GIT ROLLBACK)';
       bypass.title = 'Allow this and stop asking for this project — available because the working directory is a git repo, so changes can be rolled back';
-      bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); };
+      bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); updateBypassChip(); };
       prompt.appendChild(bypass);
     } else {
       const note = document.createElement('span');
