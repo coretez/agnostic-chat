@@ -634,7 +634,7 @@ function captureProcess(ev) {
   // so the PROCESS lens can show the derived plan, per-step status, re-plans and
   // variable captures. Handled BEFORE the sub-agent branch below so these kinds
   // never get misread as sub-agent updates.
-  const PLAN_KINDS = { plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
+  const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
   if (PLAN_KINDS[ev.kind]) {
     if (ev.kind === 'plan') {
       rec.plan = { goal: ev.goal || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
@@ -1338,6 +1338,8 @@ async function submit() {
       streamRender(body, streamed); // prose live; html/svg buffered as placeholders
       if (stick) el.messages.scrollTop = el.messages.scrollHeight;
     } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
+    else if (ev.type === 'process' && ev.kind === 'planning') { if (!streamed) status.textContent = 'deriving plan…'; }
+    else if (ev.type === 'process' && ev.kind === 'planning-done') { if (!streamed) status.textContent = ev.steps ? `plan: ${ev.steps} steps` : 'thinking…'; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
@@ -1416,7 +1418,9 @@ function planEvent(ev) {
   else if (ev.type === 'done') planFinalize(true);
   else if (ev.type === 'process') {
     // Plan-and-execute narration in the live rail.
-    if (ev.kind === 'plan') { if (!planSwitched) { showRail('plan'); planSwitched = true; } planAdd(`◈ plan: ${(ev.steps || []).length} steps`); planFinalize(true); }
+    if (ev.kind === 'planning') { if (!planSwitched) { showRail('plan'); planSwitched = true; } planAdd(`◈ deriving plan (${ev.model || 'fast model'})…`); }
+    else if (ev.kind === 'planning-done') planFinalize(!ev.error);
+    else if (ev.kind === 'plan') { planAdd(`◈ plan: ${(ev.steps || []).length} steps`); planFinalize(true); }
     else if (ev.kind === 'step-start') planAdd(`▸ step ${ev.step}: ${(ev.task || '').slice(0, 60)}`);
     else if (ev.kind === 'step-done') planFinalize(true);
     else if (ev.kind === 'step-stuck') planFinalize(false);

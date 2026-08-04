@@ -675,8 +675,19 @@ function registerIpc() {
         // turn worse than today's behavior.
         let plan = null;
         if (scopedTools.length || loadedSkills.length) {
-          plan = await derivePlan({ connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents });
+          // Visible + bounded: planning on a thinking fast-model can take
+          // minutes — narrate it (the rail/status shows "deriving plan…"
+          // instead of silent bouncing balls), and cap it so a stalled
+          // provider degrades to the flat loop instead of hanging the turn.
+          emitProgress({ type: 'process', kind: 'planning', model: fastModel });
+          const planT0 = Date.now();
+          plan = await Promise.race([
+            derivePlan({ connector, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents }),
+            new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
+          ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
+          emitProgress({ type: 'process', kind: 'planning-done', durationMs: Date.now() - planT0, steps: plan.simple ? 0 : plan.steps.length, error: plan.error });
+          taskLog.push({ kind: 'select', label: 'derive-plan', tokens: null, durationMs: Date.now() - planT0, ok: !plan.error });
         }
 
         if (plan && !plan.simple && plan.steps.length > 1) {
