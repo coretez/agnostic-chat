@@ -530,14 +530,33 @@ menu; this makes the boundary explicit, so a validation step degrades to
 *"validation script unavailable in this runtime — flagging unvalidated"*
 instead of asserting success.
 
-### 13c. Script execution — deliberately deferred
+### 13c. Script execution — RESOLVED by the coding harness (feature/code)
 
-Running bundled `validate_*.py` / render scripts is a sandboxing decision
-(exec in the project working_dir? a jailed interpreter? per-run user
-approval?), with real security surface. Deferred until 13a/13b prove out;
-13b keeps the gap honest meanwhile. When we take it on, the natural shape is
-a `run_skill_script` tool gated by per-project approval, executing in the
-project's `working_dir` with no network — decide then, not now.
+Originally deferred as a sandboxing decision. Resolved differently than the
+`run_skill_script` sketch below: a per-chat **coding harness toggle**
+(`chats.coding_mode`, v16) provides six file/shell tools (`coding-tools.js`)
+under a three-level permission hierarchy:
+
+1. **Scope (never bypassable)** — file actions must resolve inside
+   `working_dir` ∪ the project documents dir. The check runs on REAL paths
+   (symlink chains resolved via `realResolve`), before any prompt.
+2. **Action gating** — reads are free; `write_file`/`edit_file`/`run_command`
+   each require user approval (ALLOW/DENY prompt, 180s → deny) over the
+   one-shot prompt queue in `ipc.js`.
+3. **Bypass** — the per-project `coding_bypass` setting skips prompts, honored
+   only when `working_dir` is a git repo (rollback exists); enforced in main,
+   revocable from the composer BYPASS chip.
+
+`run_command` executes in `working_dir` with a scrubbed env allowlist (the app
+process env — API keys, tokens — never crosses into the shell). Coverage lives
+in `scripts/smoke.js` (jail incl. symlink escapes, gating, deny, env scrub,
+`hasGit`). Skills' bundled scripts can now run through `run_command`; a
+dedicated `read_skill_file` (13a) remains open. Full pipeline description:
+`docs/PIPELINE_PSEUDOCODE.md`.
+
+> Historical sketch (superseded): a `run_skill_script` tool gated by
+> per-project approval, executing in the project's `working_dir` with no
+> network.
 
 ## 14. Risks
 
