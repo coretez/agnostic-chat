@@ -745,8 +745,18 @@ function registerIpc() {
               return out.messages;
             },
             // Parallel steps hand off to the decompose-and-merge sibling.
+            // A sub-agent gets NO shared history — without the KNOWN VALUES
+            // block it cannot resolve parameters the plan names symbolically
+            // (seen live: a delegated step told to call describe_fingerprint
+            // (fingerprint_hash) had no fingerprint_hash and returned thin
+            // text with 0 tool calls). Prepend working memory + the step's
+            // produces contract to the task.
             runParallel: async (step) => {
-              const r = await runOne(step.agent, step.task);
+              const known = store.render();
+              const task = (known ? known + '\n\n' : '')
+                + step.task
+                + (step.produces ? `\n\nTHIS TASK MUST PRODUCE: ${step.produces}` : '');
+              const r = await runOne(step.agent, task);
               delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
               taskLog.push({ kind: 'subagent', label: (step.agent && step.agent !== 'auto') ? step.agent : String(step.task || '').slice(0, 60), tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
               return { conclusion: r.conclusion || '' };
