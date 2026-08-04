@@ -637,7 +637,7 @@ function captureProcess(ev) {
   const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
   if (PLAN_KINDS[ev.kind]) {
     if (ev.kind === 'plan') {
-      rec.plan = { goal: ev.goal || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
+      rec.plan = { goal: ev.goal || '', merge: ev.merge || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
     } else if (rec.plan) {
       const byId = (id) => rec.plan.steps.find((s) => s.id === id);
       if (ev.kind === 'step-start') { let s = byId(ev.step); if (!s && ev.task) { s = { id: ev.step, task: ev.task, parallel: !!ev.parallel, status: 'pending' }; rec.plan.steps.push(s); } if (s) { s.task = ev.task || s.task; s.status = 'running'; } }
@@ -1038,6 +1038,24 @@ function buildDigest(rec) {
     planning: {
       skills: skillEvt ? { available: skillEvt.available, loaded: skillEvt.selected, error: skillEvt.error || null } : null,
       tools: toolEvt ? { available: toolEvt.totalAvailable, scoped: toolEvt.scoped, fellBackToFullCatalog: !!toolEvt.fellBack, boundedBySkill: toolEvt.bySkills || null } : null
+    },
+    // Pass 2 + execution (plan-and-execute): the derived plan, per-step status,
+    // re-plans, and working-memory captures. mode "flat-loop" = the planner
+    // judged the turn simple (or planning failed/timed out and degraded).
+    execution: {
+      mode: rec.plan ? 'plan-and-execute' : 'flat-loop',
+      // Evaluations can run MID-TURN — without this the evaluator reads
+      // "N tools offered, 0 called" on a still-running turn as waste.
+      turnComplete: !!rec.metrics,
+      plan: rec.plan ? {
+        goal: rec.plan.goal || '',
+        steps: (rec.plan.steps || []).map((s) => ({ id: s.id, task: (s.task || '').slice(0, 140), produces: s.produces || '', parallel: !!s.parallel, status: s.status })),
+        merge: (rec.plan.merge || '').slice(0, 200),
+        replans: rec.plan.replans || 0,
+        escalatedToUser: !!rec.plan.escalated,
+        completed: rec.plan.completed !== false,
+        varsCaptured: rec.plan.vars || 0
+      } : null
     },
     tools: {
       offered: L.toolCount || 0,
