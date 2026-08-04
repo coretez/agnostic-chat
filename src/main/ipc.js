@@ -14,7 +14,21 @@ const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
-const { buildCodingTools, hasGit } = require('./coding-tools');
+const { buildCodingTools, hasGit, commitStep } = require('./coding-tools');
+
+// O7: render the alignment outcome — the reply IS the open decisions. Plain
+// markdown the renderer already knows how to display.
+function renderAlignReply(plan) {
+  const parts = [];
+  parts.push('Before building, a few directions need your call' + (plan.goal ? ` — goal: **${plan.goal}**` : '') + ':');
+  plan.decisions.forEach((d, i) => {
+    parts.push(`\n**${i + 1}. ${d.question}**`);
+    for (const o of d.options) parts.push(`- ${o}`);
+    if (d.recommendation) parts.push(`*Recommendation: ${d.recommendation}*`);
+  });
+  parts.push('\nReply with your choices (e.g. "1: React Native, 2: internal only") and I will plan the build against them — your decisions are recorded and won\'t be re-asked.');
+  return parts.join('\n');
+}
 const docs = require('./documents');
 
 // Tool the model calls to persist a generated deliverable. It supplies semantic
@@ -603,6 +617,8 @@ function registerIpc() {
             return (await askUser({ type: 'action-approve', kind, summary, gitAvailable })) > 0;
           };
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
+          coding.root = project.working_dir;         // for step-commits (O9)
+          coding.gitAvailable = gitAvailable;
           scopedTools = [...scopedTools, ...coding.tools];
           convo = [{
             role: 'system',
@@ -746,7 +762,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -754,7 +770,28 @@ function registerIpc() {
           taskLog.push({ kind: 'select', label: 'derive-plan', tokens: null, durationMs: Date.now() - planT0, ok: !plan.error });
         }
 
-        if (plan && !plan.simple && plan.steps.length > 1) {
+        // O8: decisions the user stated persist at `user` confidence — they
+        // outrank model guesses and survive turns/restarts with the store.
+        if (plan && Array.isArray(plan.record)) {
+          for (const rec of plan.record) {
+            const e = store.set({ key: rec.key, value: rec.value }, { confidence: 'user', source: 'align' });
+            if (e) emitProgress({ type: 'process', kind: 'var-set', key: e.key });
+          }
+        }
+
+        if (plan && plan.align && plan.decisions && plan.decisions.length) {
+          // ── O7 alignment gate: direction decisions end the turn ───────────
+          // No steps run, no synthesis call — the open decisions ARE the
+          // reply, and the user's answers arrive as the next turn.
+          emitProgress({ type: 'process', kind: 'align', decisions: plan.decisions.length });
+          emitProgress({ type: 'done' });
+          result = {
+            reply: renderAlignReply(plan), toolTrace: [], iterations: 0,
+            usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false },
+            planned: false, aligned: true
+          };
+          planInfo = { steps: 0, replans: 0, completed: true };
+        } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
           const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
@@ -776,6 +813,18 @@ function registerIpc() {
             history: convo,
             refinePlan: (i) => refinePlan({ ...planDeps, ...i }),
             onStuck,
+            // O9: the plan is the git history — a completed step that mutated
+            // the tree commits with its `produces` as the message. Framework
+            // bookkeeping (no approval); best-effort; parallel steps pass an
+            // empty trace so sub-agent work is never mis-attributed.
+            onStepComplete: async (step, stepResult, trace) => {
+              if (!coding || !coding.gitAvailable) return;
+              const mutated = (trace || []).some((t) => t.ok !== false && (t.name === 'write_file' || t.name === 'edit_file' || t.name === 'run_command'));
+              if (!mutated) return;
+              const msg = `step ${step.id}: ${String(step.produces || step.task || '').slice(0, 150)}`;
+              const out = await commitStep(coding.root, msg);
+              if (out.committed) emitProgress({ type: 'process', kind: 'step-commit', step: step.id, message: msg });
+            },
             // Between-steps compaction that structurally protects the KNOWN
             // VALUES digest (P3) — discovered parameters survive verbatim.
             compact: async (h) => {

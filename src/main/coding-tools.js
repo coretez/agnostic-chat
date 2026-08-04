@@ -138,6 +138,31 @@ function hasGit(dir) {
   try { return !!dir && fs.existsSync(path.join(dir, '.git')); } catch { return false; }
 }
 
+// O9: the plan is the git history. Commit the working tree after a completed
+// step, with the step's `produces` as the message. Framework bookkeeping — it
+// does NOT pass through the approval gate (nothing new is being done to the
+// tree; it is being recorded). Best-effort: a clean tree, a missing repo, or
+// a failing commit resolves {committed:false} and never breaks the turn.
+function commitStep(root, message) {
+  const env = { ...shellEnv(), GIT_TERMINAL_PROMPT: '0' };
+  const git = (args) => new Promise((res) => {
+    const c = spawn('git', args, { cwd: path.resolve(root), env });
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.stderr.on('data', (d) => { out += d; });
+    c.on('error', () => res({ code: -1, out }));
+    c.on('close', (code) => res({ code, out }));
+  });
+  return (async () => {
+    const st = await git(['status', '--porcelain']);
+    if (st.code !== 0) return { committed: false, reason: 'not a git repo' };
+    if (!st.out.trim()) return { committed: false, reason: 'clean tree' };
+    await git(['add', '-A']);
+    const cm = await git(['commit', '--no-verify', '-m', String(message || 'step').slice(0, 200)]);
+    return { committed: cm.code === 0, reason: cm.code === 0 ? '' : cm.out.trim().slice(0, 200) };
+  })();
+}
+
 // Resolve the symlink chain of `abs` even when the leaf doesn't exist yet
 // (writes create files): realpath the deepest EXISTING ancestor, then re-append
 // the untraversed tail. A symlinked parent OR a symlinked leaf both resolve to
@@ -342,14 +367,25 @@ function buildCodingTools({ root, docsRoot, approveAction }) {
         case 'list_dir': return listDirTool(jail, args);
         case 'grep_files': return grepFilesTool(jail, args);
         case 'write_file': {
-          jail.resolve(args.path); // scope check BEFORE bothering the user
-          const size = String(args.content ?? '').length;
-          if (!(await gate('write', `write_file → ${args.path} (${size} chars)`))) return denied('this file write');
+          // Scope check BEFORE bothering the user; the approval shows facts —
+          // new-vs-overwrite, sizes, a content head — not a bare description.
+          const abs = jail.resolve(args.path);
+          const content = String(args.content ?? '');
+          let facts = `new file, ${content.length} chars`;
+          try { const st = fs.statSync(abs); facts = `OVERWRITES ${st.size} bytes → ${content.length} chars`; } catch {}
+          const head = content.slice(0, 200).trimEnd();
+          const summary = `write_file → ${args.path} (${facts})` + (head ? `\n${head}${content.length > 200 ? '…' : ''}` : '');
+          if (!(await gate('write', summary))) return denied('this file write');
           return writeFileTool(jail, args);
         }
         case 'edit_file': {
+          // The approval IS the review: show the actual −/+ change, clipped.
           jail.resolve(args.path);
-          if (!(await gate('write', `edit_file → ${args.path}`))) return denied('this file edit');
+          const dclip = (s) => { const t = String(s ?? ''); return t.length > 400 ? t.slice(0, 400) + '…' : t; };
+          const summary = `edit_file → ${args.path}${args.replace_all ? ' (all occurrences)' : ''}\n`
+            + dclip(args.old_string).split('\n').map((l) => '- ' + l).join('\n') + '\n'
+            + dclip(args.new_string).split('\n').map((l) => '+ ' + l).join('\n');
+          if (!(await gate('write', summary))) return denied('this file edit');
           return editFileTool(jail, args);
         }
         case 'run_command': {
@@ -369,4 +405,4 @@ function buildCodingTools({ root, docsRoot, approveAction }) {
   return { tools: TOOLS, names, call };
 }
 
-module.exports = { buildCodingTools, hasGit, CODING_TOOLS: TOOLS };
+module.exports = { buildCodingTools, hasGit, commitStep, CODING_TOOLS: TOOLS };

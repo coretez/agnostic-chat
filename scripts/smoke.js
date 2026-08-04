@@ -16,7 +16,8 @@ const { connectAndList, McpConnection } = require('../src/main/mcp/client');
 const mcpManager = require('../src/main/mcp/manager');
 const { runChatLoop } = require('../src/main/chat-loop');
 const { maybeCompress } = require('../src/main/compress');
-const { buildCodingTools, hasGit } = require('../src/main/coding-tools');
+const { buildCodingTools, hasGit, commitStep } = require('../src/main/coding-tools');
+const { spawnSync } = require('node:child_process');
 
 function assert(cond, msg) {
   if (!cond) throw new Error('ASSERT FAILED: ' + msg);
@@ -771,6 +772,72 @@ app.whenReady().then(async () => {
     assert(!hasGit(work), 'coding: hasGit false without a repo');
     fs.mkdirSync(path.join(work, '.git'));
     assert(hasGit(work), 'coding: hasGit true with a .git dir');
+
+    // O5: approvals show the actual change — edit_file summaries carry −/+ lines,
+    // write_file overwrite summaries carry the size facts.
+    const summaries = [];
+    const ct2 = buildCodingTools({ root: work, approveAction: async (a) => { summaries.push(a.summary); return true; } });
+    await ct2.call('edit_file', { path: 'a.txt', old_string: 'alpha', new_string: 'omega' });
+    assert(summaries[0].includes('- alpha') && summaries[0].includes('+ omega'), 'coding: edit approval shows a −/+ diff (O5)');
+    await ct2.call('write_file', { path: 'a.txt', content: 'short\n' });
+    assert(/OVERWRITES \d+ bytes/.test(summaries[1]), 'coding: write approval states overwrite + sizes (O5)');
+  }
+
+  // ── O7/O8: alignment outcome + recorded decisions (plan-derive) ────────────
+  {
+    const { derivePlan: dp } = require('../src/main/plan-derive');
+    const mockPlanner = (args) => ({ chat: async () => ({ text: '', toolCalls: [{ id: 'p', name: 'submit_plan', args }] }) });
+
+    const aligned = await dp({
+      connector: mockPlanner({
+        simple: false, goal: 'build the app',
+        decisions: [{ question: 'Which platform?', options: ['React Native — one codebase', 'Swift — best iOS feel'], recommendation: 'React Native' }],
+        record: [{ key: 'distribution', value: 'internal' }]
+      }),
+      model: 'mock', userText: 'build me a phone app', codingMode: true
+    });
+    assert(aligned.align === true && aligned.simple === true && aligned.decisions.length === 1, 'align: coding-mode decisions end planning with an align outcome (O7)');
+    assert(aligned.decisions[0].options.length === 2 && aligned.record[0].key === 'distribution', 'align: options + record survive normalization (O8)');
+
+    const notCoding = await dp({
+      connector: mockPlanner({ simple: true, goal: 'g', decisions: [{ question: 'Which platform?' }] }),
+      model: 'mock', userText: 'x', codingMode: false
+    });
+    assert(!notCoding.align, 'align: decisions are ignored outside coding mode');
+  }
+
+  // ── O9: step-commits — the plan is the git history ─────────────────────────
+  {
+    const repoDir = path.join(tmp, 'o9-repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+    const g = (...a) => spawnSync('git', a, { cwd: repoDir });
+    g('init'); g('config', 'user.email', 's@smoke'); g('config', 'user.name', 'smoke');
+    fs.writeFileSync(path.join(repoDir, 'f.txt'), 'v1\n');
+    const c1 = await commitStep(repoDir, 'step 1: create f.txt');
+    assert(c1.committed, 'commitStep: dirty tree commits');
+    const c2 = await commitStep(repoDir, 'step 2: nothing');
+    assert(!c2.committed && c2.reason === 'clean tree', 'commitStep: clean tree is a no-op');
+    const log = spawnSync('git', ['log', '--format=%s'], { cwd: repoDir }).stdout.toString();
+    assert(log.includes('step 1: create f.txt'), "commitStep: the step's produces is the commit message (O9)");
+    const c3 = await commitStep(path.join(tmp, 'not-a-repo-xyz'), 'x');
+    assert(!c3.committed, 'commitStep: non-repo resolves false, never throws');
+
+    // executePlan fires onStepComplete with the step's own tool trace.
+    const { executePlan: ep } = require('../src/main/execute');
+    const { VariableStore: VS } = require('../src/main/variables');
+    const seen = [];
+    await ep({
+      chat: async ({ messages }) => (messages.some((m) => String(m.content || '').includes('STEP (2)'))
+        ? { text: 'done2', toolCalls: [] }
+        : (messages.filter((m) => m.role === 'tool').length ? { text: 'done1', toolCalls: [] } : { text: '', toolCalls: [{ id: 't1', name: 'write_file', args: { path: 'x' } }] })),
+      callTool: async () => ({ text: 'ok' }),
+      model: 'mock',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'write', produces: 'x file' }, { id: 2, task: 'read' }] },
+      tools: [{ name: 'write_file', description: '', inputSchema: {} }],
+      store: new VS(),
+      onStepComplete: (step, r, trace) => { seen.push({ id: step.id, mutated: (trace || []).some((t) => t.name === 'write_file') }); }
+    });
+    assert(seen.length === 2 && seen[0].id === 1 && seen[0].mutated && !seen[1].mutated, 'executePlan: onStepComplete fires per step with that step\'s trace (O9)');
   }
 
   console.log('\nALL SMOKE TESTS PASSED');

@@ -154,9 +154,17 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
  *   digest structurally survives mid-turn compaction — P3)
  * @returns {Promise<{stepResults:Array, history:Array, replans:number, completed:boolean}>}
  */
-async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onEvent, isAborted }) {
+async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onStepComplete, onEvent, isAborted }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
+  // Post-step hook (O9 step-commits and the like): fired after a step's result
+  // lands — completed, partial-on-stuck, and parallel alike — with the step's
+  // own tool trace so the caller can tell whether anything actually mutated.
+  // Best-effort: a throwing hook never breaks execution.
+  const stepDone = async (step, result, trace) => {
+    if (typeof onStepComplete !== 'function') return;
+    try { await onStepComplete(step, result, trace || []); } catch {}
+  };
   let steps = [...((plan && plan.steps) || [])];
   const stepResults = [];
   const toolTrace = [];
@@ -182,8 +190,10 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
       catch (e) { pr = { conclusion: `parallel step failed: ${e.message}`, error: true }; }
       // Harvest ids/paths from the sub-agent's conclusion into shared memory.
       if (store && pr && pr.conclusion) store.captureFromResult(`step-${step.id}`, pr.conclusion, { step: step.id });
-      stepResults.push({ step: step.id, task: step.task, conclusion: (pr && pr.conclusion) || '', parallel: true });
+      const prResult = { step: step.id, task: step.task, conclusion: (pr && pr.conclusion) || '', parallel: true };
+      stepResults.push(prResult);
       emit({ type: 'process', kind: 'step-done', step: step.id, parallel: true });
+      await stepDone(step, prResult, []);  // sub-agent traces stay isolated — no mutation info
       idx += 1; continue;
     }
 
@@ -227,10 +237,12 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
       if (decision.continue) { replans = 0; continue; }   // user granted a fresh budget
 
       stepResults.push({ ...r.result, incomplete: true });
+      await stepDone(step, r.result, r.toolTrace);        // partial work is still worth recording
       break;                                              // user declined → synthesize what we have
     }
 
     stepResults.push(r.result);
+    await stepDone(step, r.result, r.toolTrace);
     idx += 1;
   }
 

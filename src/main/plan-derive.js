@@ -39,7 +39,32 @@ const SUBMIT_PLAN_TOOL = {
           required: ['task']
         }
       },
-      merge: { type: 'string', description: "How to combine the step results into the final answer (structure, emphasis, format). Empty string if the last step's output IS the final answer." }
+      merge: { type: 'string', description: "How to combine the step results into the final answer (structure, emphasis, format). Empty string if the last step's output IS the final answer." },
+      decisions: {
+        type: 'array',
+        description: 'ALIGNMENT (O7): when the request sets a development direction the user has not decided (platform, stack, structure, distribution), return the open decisions INSTEAD of steps — the turn ends awaiting the user. Omit when the direction is already fixed.',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The decision the user must make, as one clear question.' },
+            options: { type: 'array', items: { type: 'string' }, description: 'The viable choices, each with its key tradeoff in a few words.' },
+            recommendation: { type: 'string', description: 'Your recommended choice and why, in one sentence.' }
+          },
+          required: ['question']
+        }
+      },
+      record: {
+        type: 'array',
+        description: 'Decisions the user has ALREADY stated (in this request or earlier) that should persist as durable known values — e.g. {key:"platform", value:"react-native"}. These are user decisions, never your own guesses.',
+        items: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', description: 'snake_case name, e.g. platform, stack, distribution.' },
+            value: { type: 'string', description: 'The decided value, short.' }
+          },
+          required: ['key', 'value']
+        }
+      }
     },
     required: ['simple', 'goal']
   }
@@ -73,7 +98,17 @@ function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents 
   return parts.join('\n\n') || '(no additional context)';
 }
 
-const DERIVE_PROMPT = (ctx, request) =>
+// Coding-mode plan-shape contract (HARNESS_OBJECTIVES O7/O10): alignment
+// before direction-setting work, verification after code-writing work, and no
+// steps the runtime can't perform. Appended to the guidance only when the
+// coding harness is active this turn.
+const CODING_RULES = `
+- ALIGN FIRST (never race): if the request requires choosing a development direction — platform, framework/stack, project structure, distribution target — and that choice is NOT already fixed by KNOWN VALUES, the project brief, or the request itself, do NOT plan steps. Call submit_plan with "decisions": one entry per open decision (question, viable options with tradeoffs, your recommendation). Never silently pick a direction for the user.
+- RECORD DECISIONS: when the user's request itself states a direction ("build it in Swift", "internal only"), put it in "record" as {key, value} so it persists as a durable known value. Record only the user's decisions, never your own picks.
+- VERIFY: a plan whose steps create or modify code MUST end with a verification step that runs the project's tests or build via run_command and fixes what fails. Untested code is not done.
+- CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.`;
+
+const DERIVE_PROMPT = (ctx, request, codingMode = false) =>
 `You are the planning stage of an LLM assistant. Decide whether the user's request needs a multi-step plan, and if so derive the steps — informed by the skill instructions in play (they often prescribe a procedure: follow it).
 
 ${ctx}
@@ -86,7 +121,7 @@ Guidance:
 - Otherwise prefer 2–6 concrete, ordered steps. Each step must be a complete instruction that could be executed on its own with the values known so far.
 - For each step, state what it "produces" — the named values (ids, paths) or artifact later steps will need. Steps that discover identifiers come before steps that use them.
 - DELEGATION: mark a step delegate=true when it is self-contained and would flood the main thread with bulk it doesn't need to keep (pulling a large report, sweeping many records) — an isolated sub-agent does the work and returns only its conclusion. Name a listed agent when one fits, else "auto". Mark delegated steps "parallel" only when they don't depend on each other's discoveries.
-- MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.
+- MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.${codingMode ? CODING_RULES : ''}
 
 Call submit_plan now.`;
 
@@ -142,16 +177,32 @@ function normalizeSteps(steps, startId = 1) {
  *   On any failure returns {simple:true} — the caller falls back to the flat
  *   loop, so planning can never make a turn WORSE than today's behavior.
  */
-async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents }) {
+async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false }) {
   try {
     const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents });
-    const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || ''));
+    const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
+    // User decisions stated in the request — persisted by the caller at
+    // `user` confidence so they survive turns and outrank model guesses (O8).
+    const record = (Array.isArray(parsed.record) ? parsed.record : [])
+      .filter((r) => r && typeof r.key === 'string' && r.key.trim() && r.value != null)
+      .map((r) => ({ key: r.key.trim(), value: String(r.value).trim() }));
+    // Alignment outcome (O7): open direction decisions end the turn awaiting
+    // the user — no steps run. Only honored in coding mode (the rules that
+    // elicit it are only issued there).
+    const decisions = (codingMode && Array.isArray(parsed.decisions) ? parsed.decisions : [])
+      .filter((d) => d && typeof d.question === 'string' && d.question.trim())
+      .map((d) => ({
+        question: d.question.trim(),
+        options: (Array.isArray(d.options) ? d.options : []).filter((o) => typeof o === 'string' && o.trim()).map((o) => o.trim()),
+        recommendation: typeof d.recommendation === 'string' ? d.recommendation.trim() : ''
+      }));
+    if (decisions.length) return { simple: true, align: true, decisions, goal: parsed.goal || '', steps: [], record };
     const steps = normalizeSteps(parsed.steps);
     const merge = typeof parsed.merge === 'string' ? parsed.merge.trim() : '';
     // A 0/1-step plan is the trivial-turn gate: nothing to orchestrate.
-    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge };
-    return { simple: false, goal: parsed.goal || '', steps, merge };
+    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge, record };
+    return { simple: false, goal: parsed.goal || '', steps, merge, record };
   } catch (e) {
     return { simple: true, goal: '', steps: [], error: `derivePlan failed: ${e.message}` };
   }
