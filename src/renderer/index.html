@@ -334,9 +334,11 @@
               <div class="mscreen__head">
                 <div>
                   <div class="mscreen__title">SKILLS</div>
-                  <div class="mscreen__sub">Skills are <b>on by default</b> for every project — toggle off any you don't want in scope. Enabled skills are injected as guidance for this project's chats. Import a library from a connected MCP server, or author your own.</div>
+                  <div class="mscreen__sub">Toggles apply to the selected project: <b id="skills-proj-name">—</b>. What's off stays out of that project's chats entirely. Import a library from a connected MCP server (the source dropdown lists servers), or author your own.</div>
                 </div>
                 <div class="spacer"></div>
+                <button class="btn btn--ghost btn--sm" id="skills-all-on" type="button" title="Enable every skill for this project">ALL ON</button>
+                <button class="btn btn--ghost btn--sm" id="skills-all-off" type="button" title="Disable every skill for this project — then toggle on just what you need">ALL OFF</button>
                 <div class="dropdown skills-src" id="skills-src-dd">
                   <button class="dropdown__btn" id="skills-src-btn" type="button"><span id="skills-src-label">import source…</span><span class="caret">▾</span></button>
                   <div class="dropdown__menu" id="skills-src-menu" hidden></div>

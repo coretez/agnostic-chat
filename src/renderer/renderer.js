@@ -652,6 +652,12 @@ el.scopeSkillsAll.onclick = () => setAllSkills(true);
 el.scopeSkillsNone.onclick = () => setAllSkills(false);
 el.scopeMcpAll.onclick = () => setAllMcp(true);
 el.scopeMcpNone.onclick = () => setAllMcp(false);
+// Same bulk controls on the SKILLS page (the usual flow: ALL OFF, then
+// toggle on just what the project needs).
+const _skAllOn = document.getElementById('skills-all-on');
+const _skAllOff = document.getElementById('skills-all-off');
+if (_skAllOn) _skAllOn.onclick = () => setAllSkills(true);
+if (_skAllOff) _skAllOff.onclick = () => setAllSkills(false);
 function updateComposerMeta() {
   const model = state.selected?.model;
   const chat = state.chats.find((c) => c.id === state.currentChatId);
@@ -2149,6 +2155,11 @@ async function loadSkills() {
 }
 function showSkills() {
   state.page = 'skills';
+  // Say WHICH project the toggles govern — the page edits the sidebar's
+  // selected project, and that was invisible.
+  const proj = state.projects.find((p) => p.id === state.currentProjectId);
+  const badge = document.getElementById('skills-proj-name');
+  if (badge) badge.textContent = proj ? proj.name.toUpperCase() : 'no project selected';
   el.pages.querySelectorAll('.page').forEach((s) => { s.hidden = s.dataset.page !== 'skills'; });
   el.tabbar.querySelectorAll('.tab').forEach((b) => b.classList.toggle('is-active', b.dataset.page === 'skills'));
   el.tbSlug.textContent = '/ skills';
