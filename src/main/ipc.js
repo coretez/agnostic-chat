@@ -782,7 +782,11 @@ function registerIpc() {
         if (plan && plan.align && plan.decisions && plan.decisions.length) {
           // ── O7 alignment gate: direction decisions end the turn ───────────
           // No steps run, no synthesis call — the open decisions ARE the
-          // reply, and the user's answers arrive as the next turn.
+          // reply, and the user's answers arrive as the next turn. The
+          // structured decisions also go to the renderer so it can present
+          // them as an interactive form (options + write-in); the markdown
+          // reply below stays the durable/persisted record.
+          emitProgress({ type: 'align-form', goal: plan.goal || '', decisions: plan.decisions });
           emitProgress({ type: 'process', kind: 'align', decisions: plan.decisions.length });
           emitProgress({ type: 'done' });
           result = {

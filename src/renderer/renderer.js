@@ -1327,6 +1327,59 @@ function showSetupNotice(missing) {
   };
 }
 
+// ── O7 alignment decisions as an interactive form ──────────────────
+// One selectable option row per decision plus a write-in ("Other"), submitted
+// as a single composed reply through the normal send path — so O8 decision
+// recording works unchanged. First of the feedback shapes; more (multi-select,
+// ranking) can ride the same align-form event.
+function renderAlignForm(body, ev) {
+  const form = document.createElement('div');
+  form.className = 'alignform';
+  const picks = new Array(ev.decisions.length).fill(null);
+  const short = (o) => String(o).split(' — ')[0].split(' - ')[0].trim();
+  ev.decisions.forEach((d, i) => {
+    const q = document.createElement('div'); q.className = 'alignform__q';
+    q.textContent = `${i + 1}. ${d.question}`;
+    form.appendChild(q);
+    const opts = document.createElement('div'); opts.className = 'alignform__opts';
+    const btns = [];
+    const select = (btn, value) => { btns.forEach((b) => b.classList.remove('is-picked')); if (btn) btn.classList.add('is-picked'); picks[i] = value; };
+    for (const o of (d.options || [])) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'alignform__opt';
+      b.textContent = o;
+      // Dashed outline marks the model's recommendation — a hint, not a pick.
+      if (d.recommendation && d.recommendation.toLowerCase().includes(short(o).toLowerCase())) b.classList.add('is-rec');
+      b.onclick = () => select(b, short(o));
+      btns.push(b); opts.appendChild(b);
+    }
+    const wrap = document.createElement('div'); wrap.className = 'alignform__writein';
+    const wb = document.createElement('button'); wb.type = 'button'; wb.className = 'alignform__opt'; wb.textContent = 'OTHER:';
+    const wi = document.createElement('input');
+    wi.placeholder = 'write in your own…';
+    const writeSelect = () => { if (wi.value.trim()) select(wb, wi.value.trim()); };
+    wb.onclick = () => { wi.focus(); writeSelect(); };
+    wi.oninput = writeSelect;
+    btns.push(wb);
+    wrap.appendChild(wb); wrap.appendChild(wi); opts.appendChild(wrap);
+    form.appendChild(opts);
+    if (d.recommendation) { const r = document.createElement('div'); r.className = 'alignform__rec'; r.textContent = '★ ' + d.recommendation; form.appendChild(r); }
+  });
+  const go = document.createElement('button'); go.type = 'button'; go.className = 'btn btn--brand btn--sm'; go.textContent = 'USE THESE CHOICES';
+  go.onclick = () => {
+    const parts = [];
+    ev.decisions.forEach((d, i) => { if (picks[i]) parts.push(`${i + 1}: ${picks[i]}`); });
+    if (!parts.length) return;
+    el.input.value = parts.join('; ');
+    autosize();
+    form.remove();          // the markdown reply above stays as the durable record
+    submit();
+  };
+  const bar = document.createElement('div'); bar.className = 'alignform__bar'; bar.appendChild(go);
+  form.appendChild(bar);
+  body.appendChild(form);
+  el.messages.scrollTop = el.messages.scrollHeight;
+}
+
 async function submit() {
   if (el.send.dataset.mode === 'stop') return; // a turn is running — the button is the stop control
   const text = el.input.value.trim();
@@ -1360,6 +1413,7 @@ async function submit() {
   const shortTool = (n) => String(n).split('__').pop();
   planReset();
   let streamed = '';
+  let alignEv = null; // structured O7 decisions — rendered as a form after the reply lands
   const nearBottom = () => el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
   // Mid-turn "tool-call limit reached" prompt: let the user grant more steps.
   function showLimitPrompt(iterations) {
@@ -1441,6 +1495,7 @@ async function submit() {
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
     else if (ev.type === 'action-approve') { showActionPrompt(ev); }
+    else if (ev.type === 'align-form') { alignEv = ev; }
     else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
     else if (ev.type === 'internals') { captureInternals(ev); }
     else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
@@ -1472,6 +1527,7 @@ async function submit() {
     if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
     renderAssistantBody(body, finalText);
     if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
+    if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
     el.messages.scrollTop = el.messages.scrollHeight;
     await window.api.messages.add({ chatId: state.currentChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
   } catch (err) {

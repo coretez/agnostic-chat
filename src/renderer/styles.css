@@ -452,6 +452,21 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .shellcmd { display: block; flex-basis: 100%; font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
 .limitprompt__msg--dim { font-size: 10.5px; color: var(--ink3); flex-basis: 100%; }
 
+/* O7 alignment decision form: selectable options + write-in per decision */
+.alignform { margin-top: 12px; border: 1px solid var(--brand); border-left-width: 2px; border-radius: 6px; background: var(--brand-soft); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.alignform__q { font-family: var(--mono); font-size: 11px; letter-spacing: 0.5px; color: var(--ink); margin-top: 4px; }
+.alignform__opts { display: flex; flex-direction: column; gap: 4px; }
+.alignform__opt { text-align: left; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink2); font-size: 12px; padding: 5px 9px; cursor: pointer; }
+.alignform__opt:hover { border-color: var(--brand); }
+.alignform__opt.is-rec { border-style: dashed; border-color: var(--brand); }
+.alignform__opt.is-picked { border-style: solid; border-color: var(--brand); background: var(--brand); color: #fff; }
+.alignform__writein { display: flex; gap: 6px; }
+.alignform__writein .alignform__opt { flex: none; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.5px; }
+.alignform__writein input { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+.alignform__writein input:focus { outline: none; border-color: var(--brand); }
+.alignform__rec { font-size: 11px; color: var(--ink3); }
+.alignform__bar { display: flex; margin-top: 6px; }
+
 /* Coding-harness toggle (composer) */
 .codebtn { min-width: 30px; height: 22px; padding: 0 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--ink3); font-family: var(--mono); font-size: 10px; letter-spacing: 0.5px; cursor: pointer; }
 .codebtn:hover { color: var(--brand); border-color: var(--brand); }
