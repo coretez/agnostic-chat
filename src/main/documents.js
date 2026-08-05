@@ -76,16 +76,14 @@ function placementPath(template, meta = {}) {
 }
 
 /**
- * Write content under outputDir per the template, versioning any existing file.
- * @returns {{absPath, relPath, version, mime, ext}}
+ * Write content at an exact path, versioning any existing file into a sibling
+ * .versions/ folder. The primitive under writeDocument, also used directly for
+ * fixed-location canonical docs (project-docs.js).
+ * @returns {{absPath, version}}
  */
-function writeDocument({ outputDir, template, meta = {}, content }) {
-  const relPath = placementPath(template, meta);
-  const absPath = path.join(outputDir, relPath);
+function writeFileVersioned(absPath, content) {
   const dir = path.dirname(absPath);
-  const ext = extFor(meta.format, meta.mime);
   fs.mkdirSync(dir, { recursive: true });
-
   let version = 1;
   if (fs.existsSync(absPath)) {
     const vdir = path.join(dir, '.versions');
@@ -98,7 +96,19 @@ function writeDocument({ outputDir, template, meta = {}, content }) {
     version = n + 1;
   }
   fs.writeFileSync(absPath, String(content == null ? '' : content), 'utf8');
-  return { absPath, relPath, version, mime: mimeFor(ext), ext };
+  return { absPath, version };
 }
 
-module.exports = { DEFAULT_TEMPLATE, defaultBase, resolveOutputDir, placementPath, writeDocument, slugSeg, extFor, mimeFor };
+/**
+ * Write content under outputDir per the template, versioning any existing file.
+ * @returns {{absPath, relPath, version, mime, ext}}
+ */
+function writeDocument({ outputDir, template, meta = {}, content }) {
+  const relPath = placementPath(template, meta);
+  const absPath = path.join(outputDir, relPath);
+  const ext = extFor(meta.format, meta.mime);
+  const w = writeFileVersioned(absPath, content);
+  return { absPath: w.absPath, relPath, version: w.version, mime: mimeFor(ext), ext };
+}
+
+module.exports = { DEFAULT_TEMPLATE, defaultBase, resolveOutputDir, placementPath, writeDocument, writeFileVersioned, slugSeg, extFor, mimeFor };

@@ -258,6 +258,16 @@ function registerIpc() {
     return { ok: true, project: repo.projects.setOutputDir(id, res.filePaths[0]) };
   });
   ipcMain.handle('documents:remove', (_e, { id }) => repo.documents.remove(id));
+  // Bootstrap the canonical dev-doc set (docs/SPEC.md, DESIGN.md, PSEUDOCODE.md,
+  // KNOWLEDGE.md) — idempotent; the renderer calls this when a project opens so
+  // the DOCUMENTS tab always shows the project's documentation structure.
+  ipcMain.handle('documents:ensureCanonical', (_e, { projectId }) => {
+    const p = repo.projects.get(projectId);
+    if (!p) return { created: [] };
+    const base = repo.settings.get('documents_base') || docs.defaultBase();
+    const outDir = docs.resolveOutputDir(p, base);
+    return { created: projectDocs.ensureCanonicalDocs({ projectId, outputDir: outDir }) };
+  });
 
   // Agents (authored per-project sub-agent definitions)
   ipcMain.handle('agents:list', (_e, { projectId }) => repo.agents.listByProject(projectId));
@@ -684,6 +694,16 @@ function registerIpc() {
       // `project`/`outputDir` were resolved above (coding-mode block).
       const placementTemplate = repo.settings.get('placement_template') || docs.DEFAULT_TEMPLATE;
       const saveDocument = (args) => {
+        // Canonical dev docs (spec/design/pseudocode/knowledge) have a fixed,
+        // designed home at docs/<NAME>.md — a documentation step's save goes
+        // there and versions, never into the deliverables bin.
+        const canonType = String(args.type || '').toLowerCase();
+        if (projectId && projectDocs.CANONICAL[canonType]) {
+          const w = projectDocs.writeCanonical({ projectId, outputDir, docType: canonType, content: args.content || '', source: 'chat' });
+          emitProgress({ type: 'process', kind: 'doc-update', doc: canonType, version: w.version });
+          emitProgress({ type: 'document-saved', title: projectDocs.CANONICAL[canonType], path: w.absPath, relPath: w.relPath, version: w.version, mime: 'text/markdown' });
+          return { text: `Updated ${w.relPath} (v${w.version}) — the project's canonical ${canonType} document.` };
+        }
         const meta = { type: args.type, title: args.title, format: args.format, properties: args.properties || {} };
         const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: args.content || '' });
         let row = null;
@@ -785,9 +805,15 @@ function registerIpc() {
         let plan = null;
         // O15: the canonical project docs (spec/design/pseudocode/knowledge)
         // are the planner's source of truth for objective and purpose —
-        // loaded here, injected into every derive/refine call.
+        // bootstrapped if missing (heals older projects), loaded here,
+        // injected into every derive/refine call.
         let docsBlock = '';
-        try { if (projectId) docsBlock = projectDocs.load(projectId); } catch (e) { console.error('[project-docs load]', e && e.message); }
+        try {
+          if (projectId) {
+            projectDocs.ensureCanonicalDocs({ projectId, outputDir });
+            docsBlock = projectDocs.load(projectId);
+          }
+        } catch (e) { console.error('[project-docs load]', e && e.message); }
         if (scopedTools.length || loadedSkills.length) {
           // Visible + bounded: planning on a thinking fast-model can take
           // minutes — narrate it (the rail/status shows "deriving plan…"
@@ -815,7 +841,7 @@ function registerIpc() {
           }
           if (projectId) {
             try {
-              const w = projectDocs.appendDecisions({ projectId, outputDir, template: placementTemplate, records: plan.record, goal: plan.goal || '' });
+              const w = projectDocs.appendDecisions({ projectId, outputDir, records: plan.record, goal: plan.goal || '' });
               if (w.added) emitProgress({ type: 'process', kind: 'doc-update', doc: 'spec', version: w.version, added: w.added });
             } catch (e) { console.error('[project-docs spec]', e && e.message); }
           }

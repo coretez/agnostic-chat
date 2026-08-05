@@ -1322,6 +1322,9 @@ async function selectProject(id) {
   renderProjects();
 
   state.chats = await window.api.chats.list(id);
+  // Bootstrap the canonical doc set (SPEC/DESIGN/PSEUDOCODE/KNOWLEDGE) so the
+  // DOCUMENTS tab always shows the project's documentation structure.
+  try { await window.api.documents.ensureCanonical(id); } catch {}
   state.documents = await window.api.documents.list(id);
   await loadSkills();
   await loadAgents();
