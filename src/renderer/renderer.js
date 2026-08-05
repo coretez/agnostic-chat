@@ -21,7 +21,7 @@ const el = {
   ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
-  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), codeToggle: $('code-toggle'), bypassChip: $('bypass-chip'),
+  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), modePlan: $('mode-plan'), modeCode: $('mode-code'), bypassChip: $('bypass-chip'),
   ctxMeter: $('ctx-meter'),
   intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
   intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
@@ -608,13 +608,30 @@ function updateComposerMeta() {
   el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}${code}`;
 }
 
-// ── Coding-harness toggle (per chat): file/shell tools in the working dir ──
+// ── Mode of operation (titlebar, per chat): PLAN harness vs CODE harness ──
 function updateCodeToggle() {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
-  el.codeToggle.disabled = !chat;
-  el.codeToggle.classList.toggle('is-on', !!(chat && chat.coding_mode));
+  const code = !!(chat && chat.coding_mode);
+  el.modePlan.disabled = !chat;
+  el.modeCode.disabled = !chat;
+  el.modePlan.classList.toggle('is-active', !!chat && !code);
+  el.modeCode.classList.toggle('is-active', code);
   updateBypassChip();
 }
+async function setChatMode(codeOn) {
+  const chat = state.chats.find((c) => c.id === state.currentChatId);
+  if (!chat || !!chat.coding_mode === codeOn) return;
+  if (codeOn) {
+    const proj = state.projects.find((p) => p.id === state.currentProjectId);
+    if (!proj || !proj.working_dir) { showSetupNotice(['workingDir']); return; }
+  }
+  await window.api.chats.setCodingMode(chat.id, codeOn);
+  chat.coding_mode = codeOn ? 1 : 0;
+  updateCodeToggle();
+  updateComposerMeta();
+}
+el.modePlan.onclick = () => setChatMode(false);
+el.modeCode.onclick = () => setChatMode(true);
 // A standing bypass is invisible power — surface it whenever coding mode is
 // on, and let one click revoke it (prompts resume immediately; main enforces).
 async function updateBypassChip() {
@@ -629,20 +646,6 @@ el.bypassChip.onclick = async () => {
   try { await window.api.settings.set('coding_bypass', '0', state.currentProjectId); } catch {}
   updateBypassChip();
 };
-el.codeToggle.onclick = async () => {
-  const chat = state.chats.find((c) => c.id === state.currentChatId);
-  if (!chat) return;
-  const on = chat.coding_mode ? 0 : 1;
-  if (on) {
-    const proj = state.projects.find((p) => p.id === state.currentProjectId);
-    if (!proj || !proj.working_dir) { showSetupNotice(['workingDir']); return; }
-  }
-  await window.api.chats.setCodingMode(chat.id, !!on);
-  chat.coding_mode = on;
-  updateCodeToggle();
-  updateComposerMeta();
-};
-
 // ── Internals: glass-box context inspector ─────────────────────────
 const CONTRIB = {
   system:  { label: 'system',  color: '#9aa0a6' },

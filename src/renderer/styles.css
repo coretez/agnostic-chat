@@ -457,8 +457,16 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .codebtn:hover { color: var(--brand); border-color: var(--brand); }
 .codebtn.is-on { color: var(--brand); border-color: var(--brand); background: var(--brand-soft); }
 .codebtn:disabled { opacity: 0.4; cursor: default; }
-.codebtn--bypass { color: var(--warn); border-color: var(--warn); }
+.codebtn--bypass { -webkit-app-region: no-drag; color: var(--warn); border-color: var(--warn); }
 .codebtn--bypass:hover { color: var(--danger); border-color: var(--danger); }
+
+/* Mode of operation (titlebar, top-left): PLAN harness vs CODE harness */
+.modeswitch { -webkit-app-region: no-drag; display: inline-flex; margin-left: 10px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.modeswitch__opt { height: 22px; padding: 0 10px; border: none; background: var(--raise); color: var(--ink3); font-family: var(--mono); font-size: 10px; letter-spacing: 0.8px; cursor: pointer; }
+.modeswitch__opt + .modeswitch__opt { border-left: 1px solid var(--line); }
+.modeswitch__opt:hover:not(:disabled) { color: var(--ink); }
+.modeswitch__opt.is-active { background: var(--brand); color: #fff; }
+.modeswitch__opt:disabled { opacity: 0.4; cursor: default; }
 .typing { display: inline-flex; gap: 4px; align-items: center; height: 18px; vertical-align: middle; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--ink3); animation: typing 1s infinite ease-in-out; }
 .typing span:nth-child(2) { animation-delay: 0.15s; }
