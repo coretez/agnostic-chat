@@ -38,12 +38,18 @@ compose today; boundary sentence lands with O10).
 
 ## B. Consent — the conscience
 
-**O4. Hierarchical permissions.** Three levels: (1) scope jail, never
-bypassable; (2) per-action approval for mutations, reads free; (3) bypass
-only where rollback exists (git), enforced in main, revocable and visible.
-*Source: Claude Code permission modes; Harness.io approval stages.*
-Accept: deny mutates nothing and tells the model not to retry; bypass
-ignored without `.git`; standing bypass shows a chip. **Status: SHIPPED.**
+**O4. Hierarchical permissions, priced by irreversibility.** Three levels:
+(1) scope jail, never bypassable; (2) action approval for what git cannot
+undo — reads free, file writes/edits auto-approved WHEN the working dir is a
+git repo (rollback exists; per-file prompts don't scale to real projects),
+shell always asks; (3) bypass (extends to shell) only where rollback exists
+(git), enforced in main, revocable and visible.
+*Source: Claude Code permission modes; Harness.io approval stages; usage
+feedback — per-file approval was unusable at project scale.*
+Accept: deny mutates nothing and tells the model not to retry; writes flow
+without prompts in a git repo and ask without one; shell prompts unless
+bypassed; bypass ignored without `.git`; standing bypass shows a chip.
+**Status: SHIPPED.**
 
 **O5. Reviewable approvals.** An approval must show what will actually
 happen — a diff for edits, size/overwrite facts for writes, the verbatim

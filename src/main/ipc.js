@@ -618,7 +618,13 @@ function registerIpc() {
         if (project && project.working_dir) {
           const gitAvailable = hasGit(project.working_dir);
           const approveAction = async ({ kind, summary }) => {
-            // Level-3 bypass: only honored with git in the working dir — even
+            // The gate prices IRREVERSIBILITY. File writes inside a git
+            // working tree are reversible (step-commits record them, git can
+            // revert them) — asking per file doesn't scale to real projects,
+            // so writes flow freely when git exists. Shell can do things git
+            // cannot undo, so it still asks. No git → everything asks.
+            if (kind === 'write' && gitAvailable) return true;
+            // Level-3 bypass (covers shell too): only honored with git — even
             // if the setting was somehow set without it, we still ask.
             try { if (gitAvailable && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
             return (await askUser({ type: 'action-approve', kind, summary, gitAvailable })) > 0;
@@ -631,9 +637,12 @@ function registerIpc() {
             role: 'system',
             content: 'CODING MODE: file and shell tools are available. Allowed directories: the project working directory '
               + project.working_dir + ' (relative paths resolve here) and the project documents directory ' + outputDir + '. '
-              + 'File actions outside those directories are refused. Reads are free; each write, edit, or shell command may '
-              + 'pause for the user to approve it — if one is declined, continue without it. Read a file before editing it; '
-              + 'edit_file replaces an exact existing string. run_command executes in the working directory.'
+              + 'File actions outside those directories are refused. Reads are free. '
+              + (gitAvailable
+                ? 'File writes/edits are auto-approved (git provides rollback); shell commands pause for the user to approve. '
+                : 'Each write, edit, or shell command pauses for the user to approve (no git repo — no rollback). ')
+              + 'If an action is declined, continue without it. Read a file before editing it; edit_file replaces an exact '
+              + 'existing string. run_command executes in the working directory.'
           }, ...convo];
           emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable });
         } else {

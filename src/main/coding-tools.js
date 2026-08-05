@@ -8,8 +8,10 @@
 //      directory. Relative paths resolve against the working directory;
 //      absolute paths are allowed only when they land inside a root.
 //   2. Action gating — reads (read_file, list_dir, grep_files) are free;
-//      mutations (write_file, edit_file, run_command) each pause for user
-//      approval via the injected approveAction callback.
+//      mutations pause for user approval via the injected approveAction
+//      callback. The caller prices IRREVERSIBILITY there: file writes in a
+//      git working tree auto-approve (rollback exists; per-file prompts don't
+//      scale to real projects), shell always asks unless bypassed.
 //   3. Bypass — the per-project `coding_bypass` setting skips mutation
 //      approvals, and is honored ONLY when the working directory is a git
 //      repository (hasGit below): git is the rollback story that makes
@@ -55,9 +57,9 @@ const TOOLS = [
     name: 'write_file',
     description:
       'Create or overwrite a file inside the working or documents directory. Parent folders are '
-      + 'created as needed. The user approves each write unless they enabled bypass for this '
-      + 'project — if a write is declined, continue without it rather than retrying. For small '
-      + 'changes to an existing file prefer edit_file.',
+      + 'created as needed. Auto-approved when the working directory is a git repo (rollback '
+      + 'exists); otherwise the user approves each write — if declined, continue without it '
+      + 'rather than retrying. For small changes to an existing file prefer edit_file.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -72,8 +74,8 @@ const TOOLS = [
     description:
       'Replace an exact string in a file inside the working or documents directory. old_string must '
       + 'match the file content exactly (including whitespace) and be unique unless replace_all is '
-      + 'true. Read the file first to copy the exact text. The user approves each edit unless they '
-      + 'enabled bypass for this project.',
+      + 'true. Read the file first to copy the exact text. Auto-approved when the working '
+      + 'directory is a git repo; otherwise the user approves each edit.',
     inputSchema: {
       type: 'object',
       properties: {
