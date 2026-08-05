@@ -1328,6 +1328,7 @@ function showSetupNotice(missing) {
 }
 
 async function submit() {
+  if (el.send.dataset.mode === 'stop') return; // a turn is running — the button is the stop control
   const text = el.input.value.trim();
   if ((!text && !state.attachments.length) || !state.currentChatId) return;
   const missing = missingPrereqs();
@@ -1336,7 +1337,12 @@ async function submit() {
   state.attachments = []; renderAttachChips();
   const userTurn = turn(text || '📎 (attached files)', 'user');
   if (attached.length) attachChipsOnTurn(userTurn, attached);
-  el.input.value = ''; autosize(); el.send.disabled = true;
+  el.input.value = ''; autosize();
+  // The SEND button morphs into the stop control for the running turn — same
+  // button, same look; clicking it aborts + saves work (main persists
+  // variables, step results, and metrics for what ran).
+  el.send.dataset.mode = 'stop';
+  el.send.textContent = '⏹ STOP & SAVE';
   document.documentElement.classList.add('busy');
   await window.api.messages.add({ chatId: state.currentChatId, role: 'user', content: text });
   // Keep attachments as project documents so they persist + appear in the rail.
@@ -1351,17 +1357,6 @@ async function submit() {
   const dots = document.createElement('span'); dots.className = 'typing'; dots.innerHTML = '<span></span><span></span><span></span>';
   const status = document.createElement('span'); status.className = 'turn__status';
   body.appendChild(dots); body.appendChild(status);
-  // STOP (abort + save work): kills the in-flight model call; the main
-  // process persists variables, step results, and metrics for what ran.
-  const stopBar = document.createElement('div');
-  stopBar.className = 'limitprompt';
-  const stopBtn = document.createElement('button');
-  stopBtn.className = 'btn btn--ghost btn--sm';
-  stopBtn.textContent = '⏹ STOP & SAVE';
-  stopBtn.onclick = () => { window.api.abortChat(); stopBtn.disabled = true; stopBtn.textContent = 'stopping…'; };
-  stopBar.appendChild(stopBtn);
-  thinking.appendChild(stopBar);
-
   const shortTool = (n) => String(n).split('__').pop();
   planReset();
   let streamed = '';
@@ -1471,7 +1466,6 @@ async function submit() {
       el.messages.insertBefore(note, thinking);
     }
     clearTimeout(_streamPending);
-    stopBar.remove();
     // Planned turns: the authoritative reply is the synthesis (res.reply);
     // streamed may hold per-step working text if stream-reset was missed.
     let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
@@ -1483,7 +1477,11 @@ async function submit() {
   } catch (err) {
     thinking.className = 'turn turn--meta';
     thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(err?.message ?? 'request failed')}</div>`;
-  } finally { unsub(); planStop(); el.send.disabled = false; document.documentElement.classList.remove('busy'); el.input.focus(); }
+  } finally {
+    unsub(); planStop();
+    el.send.dataset.mode = ''; el.send.textContent = 'SEND'; el.send.disabled = false;
+    document.documentElement.classList.remove('busy'); el.input.focus();
+  }
 }
 function autosize() { el.input.style.height = 'auto'; el.input.style.height = `${el.input.scrollHeight}px`; }
 
@@ -2319,7 +2317,15 @@ el.ovOutReveal.onclick = async () => {
 };
 el.railAddDoc.onclick = () => { const t = el.input.value.trim() || 'Untitled'; createDocument(t); el.input.value = ''; autosize(); };
 
-el.send.onclick = submit;
+el.send.onclick = () => {
+  if (el.send.dataset.mode === 'stop') {
+    window.api.abortChat();
+    el.send.disabled = true;            // one stop is enough; finally() re-arms it
+    el.send.textContent = 'STOPPING…';
+    return;
+  }
+  submit();
+};
 el.input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } });
 el.input.addEventListener('input', autosize);
 
