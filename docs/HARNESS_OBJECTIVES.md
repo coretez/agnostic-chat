@@ -118,6 +118,22 @@ else. No invisible context engineering — the differentiator over every
 harness studied. **Status: PARTIAL** (process events shipped; approval rows
 in task_metrics planned).
 
+**O15. Documentation is the source of truth, maintained by the pipeline.**
+The project documents library holds a canonical doc set — SPEC (objectives,
+requirements, decision records), DESIGN (architecture + ADRs), KNOWLEDGE
+(how it works, findings, gotchas). Planning READS these to determine
+objective and purpose — never inferring intent by re-reading code, the
+Claude/Codex failure mode. Every change WRITES back: ratified align
+decisions append to the SPEC automatically (framework bookkeeping, like
+step-commits); a code-changing plan must end with a documentation step
+after verification. Docs are real versioned files in the project output
+dir, indexed in the library.
+*Source: docs-as-code; Architecture Decision Records (Nygard); Diátaxis;
+requirements traceability.*
+Accept: an align `record` bumps the SPEC doc with the decision appended;
+`planContext` carries the docs under a source-of-truth banner;
+DERIVE_PROMPT carries the documentation rule. **Status: THIS CHANGE.**
+
 ---
 
 ## Traceability
@@ -132,3 +148,4 @@ in task_metrics planned).
 | O10 | plan-shape contract | `plan-derive.js` DERIVE_PROMPT coding rules |
 | O11 | refinement loop | planned — authored critic agents + assign |
 | O13 | checkpoint/revert | planned — rides O9 |
+| O15 | canonical project docs | `src/main/project-docs.js` + `plan-derive.js` docs context/rule + `ipc.js` spec append |

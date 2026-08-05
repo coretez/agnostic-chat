@@ -17,6 +17,9 @@ const mcpManager = require('../src/main/mcp/manager');
 const { runChatLoop } = require('../src/main/chat-loop');
 const { maybeCompress } = require('../src/main/compress');
 const { buildCodingTools, hasGit, commitStep } = require('../src/main/coding-tools');
+const projectDocs = require('../src/main/project-docs');
+const { planContext } = require('../src/main/plan-derive');
+const { DEFAULT_TEMPLATE } = require('../src/main/documents');
 const { spawnSync } = require('node:child_process');
 
 function assert(cond, msg) {
@@ -838,6 +841,33 @@ app.whenReady().then(async () => {
       onStepComplete: (step, r, trace) => { seen.push({ id: step.id, mutated: (trace || []).some((t) => t.name === 'write_file') }); }
     });
     assert(seen.length === 2 && seen[0].id === 1 && seen[0].mutated && !seen[1].mutated, 'executePlan: onStepComplete fires per step with that step\'s trace (O9)');
+  }
+
+  // ── O15: project docs — the pipeline maintains the SPEC; planning reads docs ──
+  {
+    const proj = repo.projects.create({ name: 'DocsProj' });
+    const outDir = path.join(tmp, 'docs-out');
+
+    // Ratified decisions append to the SPEC as dated decision records.
+    const w1 = projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, template: DEFAULT_TEMPLATE, records: [{ key: 'platform', value: 'react-native' }], goal: 'SIEM status app' });
+    assert(w1.version === 1 && fs.readFileSync(w1.absPath, 'utf8').includes('**platform** = react-native'), 'O15: first ratified decision creates the SPEC with a decision record');
+
+    // Later decisions accrete on the SAME document — version bump, prior kept.
+    const w2 = projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, template: DEFAULT_TEMPLATE, records: [{ key: 'distribution', value: 'internal' }] });
+    const specText = fs.readFileSync(w2.absPath, 'utf8');
+    assert(w2.version === 2 && specText.includes('platform') && specText.includes('distribution'), 'O15: later decisions append + version-bump the same SPEC doc');
+    assert(fs.existsSync(path.join(path.dirname(w2.absPath), '.versions')), 'O15: prior SPEC version preserved in .versions/');
+
+    // Empty records are a no-op (no doc churn on plain plans).
+    const w3 = projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, template: DEFAULT_TEMPLATE, records: [] });
+    assert(w3.added === 0 && !w3.version, 'O15: no decisions → no doc write');
+
+    // The planner reads the docs back as its source of truth.
+    const block = projectDocs.load(proj.id);
+    assert(block.includes('SPEC') && block.includes('react-native'), 'O15: load() returns the canonical docs for planning');
+    const pctx = planContext({ projectDocs: block });
+    assert(pctx.includes('PROJECT DOCUMENTATION') && pctx.includes('not by exploring code') && pctx.includes('react-native'), 'O15: planner context carries docs under the source-of-truth banner');
+    assert(planContext({}).includes('PROJECT DOCUMENTATION') === false, 'O15: no docs → no empty banner in the planner context');
   }
 
   console.log('\nALL SMOKE TESTS PASSED');

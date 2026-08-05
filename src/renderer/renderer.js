@@ -1586,6 +1586,7 @@ function planEvent(ev) {
     else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
     else if (ev.kind === 'escalate') planFinalize(false);
     else if (ev.kind === 'coding-mode') { planAdd(`⌥ coding harness: ${ev.tools || 0} tools${ev.gitAvailable ? ' · git' : ' · no git'}`); planFinalize(true); }
+    else if (ev.kind === 'doc-update') { planAdd(`✎ ${String(ev.doc || 'doc').toUpperCase()} updated → v${ev.version}`); planFinalize(true); }
     else if (ev.kind === 'align') { planAdd(`◈ alignment needed — ${ev.decisions} decision${ev.decisions === 1 ? '' : 's'} for you`); planFinalize(true); }
     else if (ev.kind === 'step-commit') { planAdd('✓ committed — ' + String(ev.message || '').slice(0, 48)); planFinalize(true); }
   }

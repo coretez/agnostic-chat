@@ -15,6 +15,7 @@ const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } =
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
 const { buildCodingTools, hasGit, commitStep } = require('./coding-tools');
+const projectDocs = require('./project-docs');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -754,6 +755,11 @@ function registerIpc() {
         // flat loop below remains the worst case — planning can never make a
         // turn worse than today's behavior.
         let plan = null;
+        // O15: the canonical project docs (spec/design/pseudocode/knowledge)
+        // are the planner's source of truth for objective and purpose —
+        // loaded here, injected into every derive/refine call.
+        let docsBlock = '';
+        try { if (projectId) docsBlock = projectDocs.load(projectId); } catch (e) { console.error('[project-docs load]', e && e.message); }
         if (scopedTools.length || loadedSkills.length) {
           // Visible + bounded: planning on a thinking fast-model can take
           // minutes — narrate it (the rail/status shows "deriving plan…"
@@ -762,7 +768,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -772,10 +778,18 @@ function registerIpc() {
 
         // O8: decisions the user stated persist at `user` confidence — they
         // outrank model guesses and survive turns/restarts with the store.
-        if (plan && Array.isArray(plan.record)) {
+        // O15: the same decisions land in the project SPEC as dated decision
+        // records — deterministic bookkeeping, the doc twin of step-commits.
+        if (plan && Array.isArray(plan.record) && plan.record.length) {
           for (const rec of plan.record) {
             const e = store.set({ key: rec.key, value: rec.value }, { confidence: 'user', source: 'align' });
             if (e) emitProgress({ type: 'process', kind: 'var-set', key: e.key });
+          }
+          if (projectId) {
+            try {
+              const w = projectDocs.appendDecisions({ projectId, outputDir, template: placementTemplate, records: plan.record, goal: plan.goal || '' });
+              if (w.added) emitProgress({ type: 'process', kind: 'doc-update', doc: 'spec', version: w.version, added: w.added });
+            } catch (e) { console.error('[project-docs spec]', e && e.message); }
           }
         }
 
@@ -798,7 +812,7 @@ function registerIpc() {
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck via the shared one-shot prompt queue.

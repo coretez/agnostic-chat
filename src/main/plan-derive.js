@@ -72,9 +72,14 @@ const SUBMIT_PLAN_TOOL = {
 
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [] }) {
+function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '' }) {
   const parts = [];
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
+  if (projectDocs) {
+    // O15: the canonical docs are the source of truth for objective and
+    // purpose — the planner derives intent from HERE, never by reading code.
+    parts.push('PROJECT DOCUMENTATION (source of truth for objectives, ratified decisions, design, and how things work — derive intent and constraints from here, not by exploring code):\n\n' + projectDocs);
+  }
   if (loadedSkills.length) {
     // The whole point of Pass 2: the SKILL'S OWN INSTRUCTIONS shape the steps.
     // Generous clip: a real SKILL.md procedure runs ~20k chars (~5k tok) and
@@ -106,7 +111,8 @@ const CODING_RULES = `
 - ALIGN FIRST (never race): if the request requires choosing a development direction — platform, framework/stack, project structure, distribution target — and that choice is NOT already fixed by KNOWN VALUES, the project brief, or the request itself, do NOT plan steps. Call submit_plan with "decisions": one entry per open decision (question, viable options with tradeoffs, your recommendation). Never silently pick a direction for the user.
 - RECORD DECISIONS: when the user's request itself states a direction ("build it in Swift", "internal only"), put it in "record" as {key, value} so it persists as a durable known value. Record only the user's decisions, never your own picks.
 - VERIFY: a plan whose steps create or modify code MUST end with a verification step that runs the project's tests or build via run_command and fixes what fails. Untested code is not done.
-- CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.`;
+- CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.
+- DOCUMENTATION (docs are the record, code is not): after the verification step, a plan that changed code, architecture, or behavior MUST end with a documentation step that updates the project docs via save_document — type "design" title "DESIGN" for architecture/interface/structure changes, type "knowledge" title "KNOWLEDGE" for discoveries, contracts, and gotchas learned while building (format md; reuse those exact types/titles so the same document versions instead of fragmenting). Update what changed; do not rewrite what didn't. The SPEC updates itself from ratified decisions — never write it from a plan step.`;
 
 const DERIVE_PROMPT = (ctx, request, codingMode = false) =>
 `You are the planning stage of an LLM assistant. Decide whether the user's request needs a multi-step plan, and if so derive the steps — informed by the skill instructions in play (they often prescribe a procedure: follow it).
@@ -177,9 +183,9 @@ function normalizeSteps(steps, startId = 1) {
  *   On any failure returns {simple:true} — the caller falls back to the flat
  *   loop, so planning can never make a turn WORSE than today's behavior.
  */
-async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false }) {
+async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, projectDocs = '' }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs });
     const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     // User decisions stated in the request — persisted by the caller at
@@ -213,9 +219,9 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
  * Matches the `refinePlan` signature executePlan expects.
  * @returns {Promise<{steps:Array}>} empty steps = "nothing more needed".
  */
-async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store }) {
+async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '' }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs });
     const doneDigest = done.map((d) => `- [step ${d.step}] ${clip(d.task, 160)}: ${clip(d.conclusion, 400)}`).join('\n');
     const stuck = { task: stuckStep ? stuckStep.task : '', partial: partial || '' };
     const parsed = await callForPlan(connector, model, REFINE_PROMPT(ctx, (plan && plan.goal) || '', doneDigest, stuck, reason || 'stuck', userText || ''));
@@ -231,4 +237,4 @@ async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills
   }
 }
 
-module.exports = { derivePlan, refinePlan, SUBMIT_PLAN_TOOL, DERIVE_PROMPT, REFINE_PROMPT };
+module.exports = { derivePlan, refinePlan, planContext, SUBMIT_PLAN_TOOL, DERIVE_PROMPT, REFINE_PROMPT };
