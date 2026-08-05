@@ -48,6 +48,8 @@ contextBridge.exposeInMainWorld('api', {
     pickWorkingDir: (id) => ipcRenderer.invoke('projects:pickWorkingDir', { id }),
     revealPath: (p) => ipcRenderer.invoke('app:revealPath', p),
     setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model }),
+    gitStatus: (id) => ipcRenderer.invoke('projects:gitStatus', { id }),
+    gitInit: (id) => ipcRenderer.invoke('projects:gitInit', { id }),
     setCheatSheet: (id, text) => ipcRenderer.invoke('projects:setCheatSheet', { id, text }),
     pickOutputDir: (id) => ipcRenderer.invoke('projects:pickOutputDir', { id }),
     setOutputDir: (id, dir) => ipcRenderer.invoke('projects:setOutputDir', { id, dir }),

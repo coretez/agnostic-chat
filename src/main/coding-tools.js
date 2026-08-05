@@ -140,6 +140,17 @@ function hasGit(dir) {
   try { return !!dir && fs.existsSync(path.join(dir, '.git')); } catch { return false; }
 }
 
+/** Initialize a git repo in dir (the one-click fix the no-git prompts offer —
+ *  the system asks instead of just refusing). Deterministic, never model-run. */
+function initGit(dir) {
+  try {
+    const r = require('node:child_process').spawnSync('git', ['init'], { cwd: dir, encoding: 'utf8' });
+    if (r.error) return { ok: false, error: r.error.message };
+    if (r.status !== 0) return { ok: false, error: (r.stderr || r.stdout || 'git init failed').trim() };
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
 // O9: the plan is the git history. Commit the working tree after a completed
 // step, with the step's `produces` as the message. Framework bookkeeping — it
 // does NOT pass through the approval gate (nothing new is being done to the
@@ -407,4 +418,4 @@ function buildCodingTools({ root, docsRoot, approveAction }) {
   return { tools: TOOLS, names, call };
 }
 
-module.exports = { buildCodingTools, hasGit, commitStep, CODING_TOOLS: TOOLS };
+module.exports = { buildCodingTools, hasGit, initGit, commitStep, CODING_TOOLS: TOOLS };

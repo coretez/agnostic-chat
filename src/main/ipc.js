@@ -14,7 +14,7 @@ const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
-const { buildCodingTools, hasGit, commitStep } = require('./coding-tools');
+const { buildCodingTools, hasGit, initGit, commitStep } = require('./coding-tools');
 const projectDocs = require('./project-docs');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
@@ -227,6 +227,16 @@ function registerIpc() {
   });
   ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
   ipcMain.handle('projects:setPreferredModel', (_e, { id, model }) => repo.projects.setPreferredModel(id, model));
+  // Coding-mode git story: report + one-click initialize (deterministic, main-side).
+  ipcMain.handle('projects:gitStatus', (_e, { id }) => {
+    const p = repo.projects.get(id);
+    return { workingDir: (p && p.working_dir) || null, hasGit: !!(p && p.working_dir && hasGit(p.working_dir)) };
+  });
+  ipcMain.handle('projects:gitInit', (_e, { id }) => {
+    const p = repo.projects.get(id);
+    if (!p || !p.working_dir) return { ok: false, error: 'No working directory set.' };
+    return initGit(p.working_dir);
+  });
   ipcMain.handle('projects:setCheatSheet', (_e, { id, text }) => repo.projects.setCheatSheet(id, text));
   ipcMain.handle('projects:setOutputDir', (_e, { id, dir }) => repo.projects.setOutputDir(id, dir));
   // The effective output dir (explicit, or the resolved default) — for display.
@@ -617,17 +627,20 @@ function registerIpc() {
       if (chatRow && chatRow.coding_mode) {
         if (project && project.working_dir) {
           const gitAvailable = hasGit(project.working_dir);
+          // Live re-check: the user can initialize git MID-TURN from the
+          // approval prompt — the very next gate decision must honor it.
+          const gitNow = () => hasGit(project.working_dir);
           const approveAction = async ({ kind, summary }) => {
             // The gate prices IRREVERSIBILITY. File writes inside a git
             // working tree are reversible (step-commits record them, git can
             // revert them) — asking per file doesn't scale to real projects,
             // so writes flow freely when git exists. Shell can do things git
             // cannot undo, so it still asks. No git → everything asks.
-            if (kind === 'write' && gitAvailable) return true;
+            if (kind === 'write' && gitNow()) return true;
             // Level-3 bypass (covers shell too): only honored with git — even
             // if the setting was somehow set without it, we still ask.
-            try { if (gitAvailable && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
-            return (await askUser({ type: 'action-approve', kind, summary, gitAvailable })) > 0;
+            try { if (gitNow() && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
+            return (await askUser({ type: 'action-approve', kind, summary, gitAvailable: gitNow() })) > 0;
           };
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
           coding.root = project.working_dir;         // for step-commits (O9)

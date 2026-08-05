@@ -708,6 +708,36 @@ async function setChatMode(codeOn) {
   chat.coding_mode = codeOn ? 1 : 0;
   updateCodeToggle();
   updateComposerMeta();
+  // Ask, don't just refuse: a working dir without git means every write
+  // prompts and bypass is off — offer the one-click fix at mode entry.
+  if (codeOn) {
+    try {
+      const st = await window.api.projects.gitStatus(state.currentProjectId);
+      if (st && st.workingDir && !st.hasGit) showGitOffer();
+    } catch {}
+  }
+}
+
+// "Do you want to initialize git?" — shown when a chat enters CODE mode over
+// a working directory that isn't a repo yet.
+function showGitOffer() {
+  const note = document.createElement('div');
+  note.className = 'turn turn--setup';
+  note.innerHTML = `<div class="turn__body"><div class="setup__title">CODING MODE · NO GIT REPOSITORY</div>`
+    + `<div id="git-offer-body">The working directory has no git repo — every file write will need approval and bypass is unavailable. Git provides the rollback that lets writes flow freely.`
+    + `<button type="button" class="linkbtn" data-git="init">Initialize git now</button>`
+    + `<button type="button" class="linkbtn" data-git="skip">Continue without</button></div></div>`;
+  el.messages.appendChild(note);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  note.querySelector('[data-git="init"]').onclick = async () => {
+    const body = note.querySelector('#git-offer-body');
+    body.textContent = 'initializing…';
+    const r = await window.api.projects.gitInit(state.currentProjectId);
+    body.textContent = (r && r.ok)
+      ? '✓ git initialized — file writes now flow without prompts; shell still asks (or BYPASS).'
+      : `git init failed: ${(r && r.error) || 'unknown'}`;
+  };
+  note.querySelector('[data-git="skip"]').onclick = () => note.remove();
 }
 el.modePlan.onclick = () => setChatMode(false);
 el.modeCode.onclick = () => setChatMode(true);
@@ -1548,15 +1578,35 @@ async function submit() {
     allow.onclick = () => answer(1);
     deny.onclick = () => answer(0);
     prompt.appendChild(allow); prompt.appendChild(deny);
-    if (ev.gitAvailable) {
+    const makeBypassBtn = () => {
       const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS (GIT ROLLBACK)';
       bypass.title = 'Allow this and stop asking for this project — available because the working directory is a git repo, so changes can be rolled back';
       bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); updateBypassChip(); };
-      prompt.appendChild(bypass);
+      return bypass;
+    };
+    if (ev.gitAvailable) {
+      prompt.appendChild(makeBypassBtn());
     } else {
+      // Ask, don't just refuse: initialize git right here — the pending
+      // approval stays open, and main re-checks git on every gate decision.
+      const init = document.createElement('button'); init.className = 'btn btn--ghost btn--sm'; init.textContent = 'INITIALIZE GIT';
+      init.title = 'Create a git repo in the working directory — file writes then flow without prompts, and bypass becomes available';
       const note = document.createElement('span');
       note.className = 'limitprompt__msg limitprompt__msg--dim';
-      note.textContent = 'Bypass unavailable — no git repo in the working directory (needed for rollback).';
+      note.textContent = 'No git repo — writes ask every time and bypass is unavailable.';
+      init.onclick = async () => {
+        init.disabled = true; init.textContent = 'initializing…';
+        const r = await window.api.projects.gitInit(state.currentProjectId);
+        if (r && r.ok) {
+          init.remove();
+          note.textContent = '✓ git initialized — writes now flow free; bypass available:';
+          prompt.appendChild(makeBypassBtn());
+        } else {
+          init.disabled = false; init.textContent = 'INITIALIZE GIT';
+          note.textContent = `git init failed: ${(r && r.error) || 'unknown'}`;
+        }
+      };
+      prompt.appendChild(init);
       prompt.appendChild(note);
     }
     body.appendChild(prompt);
