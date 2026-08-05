@@ -120,13 +120,12 @@
                     <div class="rail__note" id="plan-note">The agent's live steps appear here while it works.</div>
                   </div>
                   <div class="rail__panel" data-rail="scope" hidden>
-                    <div class="rail__head"><span id="scope-skills-head">SKILLS</span><span class="spacer"></span><button class="linkbtn" id="scope-skills-all" type="button">ALL</button><button class="linkbtn" id="scope-skills-none" type="button">NONE</button><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
-                    <ul class="raillist" id="scope-skills-list"></ul>
-                    <div class="rail__note" id="scope-skills-note">No skills installed. Click + to import.</div>
-                    <div class="rail__head"><span id="scope-mcp-head">MCP SERVERS</span><span class="spacer"></span><button class="linkbtn" id="scope-mcp-all" type="button">ALL</button><button class="linkbtn" id="scope-mcp-none" type="button">NONE</button><button class="icon-btn" id="scope-mcp-add" type="button" title="Manage MCP servers">+</button></div>
+                    <div class="rail__head"><span id="scope-skills-head">SKILLS</span><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
+                    <div class="rail__note" id="scope-skills-note">—</div>
+                    <div class="rail__head"><span id="scope-mcp-head">MCP CONNECTORS</span><button class="icon-btn" id="scope-mcp-add" type="button" title="Manage MCP servers">+</button></div>
                     <ul class="raillist" id="scope-mcp-list"></ul>
                     <div class="rail__note" id="scope-mcp-note">No MCP servers configured.</div>
-                    <div class="rail__note">Scope is per-project: what's unchecked here never reaches this project's chats — its tools and instructions stay out of the model's context entirely.</div>
+                    <div class="rail__note">Read-only summary — scope is set on the project OVERVIEW page.</div>
                   </div>
                 </div>
               </aside>
@@ -209,6 +208,23 @@
                   <button class="btn btn--ghost btn--sm" id="ov-out-change" type="button">CHANGE</button>
                 </div>
                 <div class="ovcard__note">Where generated documents (reports, exports) are saved — organized by type/tenant, versioned, and indexed. Defaults to your Documents folder; change it to a repo subfolder or shared drive.</div>
+              </div>
+
+              <div class="ovcard">
+                <div class="ovcard__title">SCOPE — WHAT THIS PROJECT CAN USE</div>
+                <div class="ovcard__note">Per-project: anything OFF here never reaches this project's chats — its tools and instructions stay out of the model's context entirely. Add or import new connectors and skills on their own pages (MCP · SKILLS); scope them here.</div>
+                <div class="ovscope">
+                  <div class="ovscope__col">
+                    <div class="ovscope__head"><span id="ov-skills-head">SKILLS</span><span class="spacer"></span><button class="linkbtn" id="ov-skills-all" type="button">ALL</button><button class="linkbtn" id="ov-skills-none" type="button">NONE</button></div>
+                    <ul class="ovscope__list" id="ov-skills-list"></ul>
+                    <div class="ovscope__empty" id="ov-skills-empty" hidden>No skills installed — import on the SKILLS page.</div>
+                  </div>
+                  <div class="ovscope__col">
+                    <div class="ovscope__head"><span id="ov-mcp-head">MCP CONNECTORS</span><span class="spacer"></span><button class="linkbtn" id="ov-mcp-all" type="button">ALL</button><button class="linkbtn" id="ov-mcp-none" type="button">NONE</button></div>
+                    <ul class="ovscope__list" id="ov-mcp-list"></ul>
+                    <div class="ovscope__empty" id="ov-mcp-empty" hidden>No connectors — add one on the MCP page.</div>
+                  </div>
+                </div>
               </div>
 
               <div class="ovcard">
@@ -337,8 +353,6 @@
                   <div class="mscreen__sub">Toggles apply to the selected project: <b id="skills-proj-name">—</b>. What's off stays out of that project's chats entirely. Import a library from a connected MCP server (the source dropdown lists servers), or author your own.</div>
                 </div>
                 <div class="spacer"></div>
-                <button class="btn btn--ghost btn--sm" id="skills-all-on" type="button" title="Enable every skill for this project">ALL ON</button>
-                <button class="btn btn--ghost btn--sm" id="skills-all-off" type="button" title="Disable every skill for this project — then toggle on just what you need">ALL OFF</button>
                 <div class="dropdown skills-src" id="skills-src-dd">
                   <button class="dropdown__btn" id="skills-src-btn" type="button"><span id="skills-src-label">import source…</span><span class="caret">▾</span></button>
                   <div class="dropdown__menu" id="skills-src-menu" hidden></div>

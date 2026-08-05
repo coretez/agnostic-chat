@@ -34,8 +34,7 @@ const el = {
   intEvalAssessment: $('int-eval-assessment'), intEvalFindings: $('int-eval-findings'),
   attachBtn: $('attach-btn'), attachInput: $('attach-input'), composerAttach: $('composer-attach'),
   railTabs: $('rail-tabs'), railDocList: $('rail-doc-list'), railAddDoc: $('rail-add-doc'),
-  scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'), scopeSkillsList: $('scope-skills-list'),
-  scopeSkillsAll: $('scope-skills-all'), scopeSkillsNone: $('scope-skills-none'), scopeMcpAll: $('scope-mcp-all'), scopeMcpNone: $('scope-mcp-none'),
+  scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'),
   palette: $('palette'), paletteInput: $('palette-input'), paletteList: $('palette-list'),
   // Models screen
   connList: $('conn-list'), connEmpty: $('conn-empty'), connEditor: $('conn-editor'), editorTitle: $('editor-title'),
@@ -414,6 +413,7 @@ function renderOverview() {
     el.ovCheat.dataset.projectId = String(p.id);
     el.ovCheatMsg.textContent = '';
   }
+  renderOverviewScope();
   updateModelSwitch();
 }
 // The output dir may be an explicit setting or a resolved default — ask main.
@@ -585,39 +585,45 @@ function renderDocs() {
   updateComposerMeta();
   if (state.page === 'chat') el.toolbarNote.textContent = PAGE_NOTES.chat();
 }
-// ── SCOPE rail: the project's capability surface, editable in place ────────
-// Opt-out scoping for both skills and MCP servers: unchecked here = that
-// capability never reaches this project's chats (its tools/instructions stay
-// out of context entirely — the "I don't need any of this right now" control).
+// ── Project scope ──────────────────────────────────────────────────────────
+// One home: the OVERVIEW page scopes what this project can use (skills + MCP
+// connectors, opt-out — OFF never reaches this project's chats). The MCP and
+// SKILLS pages create/import/manage the library; the SCOPE rail is a
+// read-only summary.
 function scopeRow({ label, sub, on, onToggle }) {
   const li = document.createElement('li');
   li.className = 'raillist__item';
   li.innerHTML = `<div class="title"><span class="tick">${on ? '☑' : '☐'}</span>${escapeHtml(label)}</div>`
     + (sub ? `<div class="sub">${escapeHtml(sub)}</div>` : '');
   li.onclick = onToggle;
-  li.title = on ? 'Enabled for this project — click to exclude' : 'Excluded from this project — click to enable';
+  li.title = on ? 'In scope for this project — click to exclude' : 'Out of scope — click to enable';
   return li;
 }
 
 async function refreshScope() {
-  await loadSkills();                       // reloads skillsAll + enabledIds, re-renders
+  await loadSkills();                       // reloads skillsAll + enabledIds
   if (state.currentProjectId) {
     try { state.projectMcpIds = new Set((await window.api.mcp.enabledForProject(state.currentProjectId)).map((s) => s.id)); } catch {}
   }
   renderScope();
+  renderOverviewScope();
   updateComposerMeta();
 }
 
-function renderScope() {
+// Interactive scoping — lives on the project OVERVIEW page.
+function renderOverviewScope() {
   const pid = state.currentProjectId;
+  const g = (id) => document.getElementById(id);
+  if (!g('ov-skills-list')) return;
+
   const allSkills = state.skillsAll || [];
   const enabledIds = state.skillsEnabledIds || new Set();
-  el.scopeSkillsHead.textContent = `SKILLS · ${enabledIds.size}/${allSkills.length}`;
-  el.scopeSkillsList.innerHTML = '';
-  el.scopeSkillsNote.hidden = allSkills.length > 0;
+  g('ov-skills-head').textContent = `SKILLS · ${enabledIds.size}/${allSkills.length} IN SCOPE`;
+  const skl = g('ov-skills-list'); skl.innerHTML = '';
+  g('ov-skills-empty').hidden = allSkills.length > 0;
   for (const s of allSkills) {
     const on = enabledIds.has(s.id);
-    el.scopeSkillsList.appendChild(scopeRow({
+    skl.appendChild(scopeRow({
       label: s.name, sub: null, on,
       onToggle: async () => { if (!pid) return; await window.api.skills.setForProject({ projectId: pid, skillId: s.id, enabled: !on }); refreshScope(); }
     }));
@@ -625,16 +631,38 @@ function renderScope() {
 
   const servers = state.mcpServers.filter((s) => s.enabled);
   const mcpIds = state.projectMcpIds || new Set(servers.map((s) => s.id));
-  const mcpOn = servers.filter((s) => mcpIds.has(s.id)).length;
-  el.scopeMcpHead.textContent = `MCP SERVERS · ${mcpOn}/${servers.length}`;
+  g('ov-mcp-head').textContent = `MCP CONNECTORS · ${servers.filter((s) => mcpIds.has(s.id)).length}/${servers.length} IN SCOPE`;
+  const ml = g('ov-mcp-list'); ml.innerHTML = '';
+  g('ov-mcp-empty').hidden = servers.length > 0;
+  for (const s of servers) {
+    const on = mcpIds.has(s.id);
+    ml.appendChild(scopeRow({
+      label: s.name, sub: `${s.transport} · ${(s.tools || []).length} tools · ${s.status || 'untested'}`, on,
+      onToggle: async () => { if (!pid) return; await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled: !on }); refreshScope(); }
+    }));
+  }
+}
+
+// Read-only summary in the chat rail — points at OVERVIEW for changes.
+function renderScope() {
+  const allSkills = state.skillsAll || [];
+  const enabledIds = state.skillsEnabledIds || new Set();
+  el.scopeSkillsHead.textContent = `SKILLS · ${enabledIds.size}/${allSkills.length} IN SCOPE`;
+  const names = allSkills.filter((s) => enabledIds.has(s.id)).map((s) => s.name);
+  el.scopeSkillsNote.textContent = names.length ? names.join(', ') : 'None in scope for this project.';
+
+  const servers = state.mcpServers.filter((s) => s.enabled);
+  const mcpIds = state.projectMcpIds || new Set(servers.map((s) => s.id));
+  el.scopeMcpHead.textContent = `MCP CONNECTORS · ${servers.filter((s) => mcpIds.has(s.id)).length}/${servers.length} IN SCOPE`;
   el.scopeMcpList.innerHTML = '';
   el.scopeMcpNote.hidden = servers.length > 0;
   for (const s of servers) {
     const on = mcpIds.has(s.id);
-    el.scopeMcpList.appendChild(scopeRow({
-      label: s.name, sub: `${s.transport} · ${(s.tools || []).length} tools · ${s.status || 'untested'}`, on,
-      onToggle: async () => { if (!pid) return; await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled: !on }); refreshScope(); }
-    }));
+    const li = document.createElement('li');
+    li.className = 'raillist__item';
+    li.innerHTML = `<div class="title">${on ? '☑' : '☐'} ${escapeHtml(s.name)}</div><div class="sub">${escapeHtml(s.transport)} · ${(s.tools || []).length} tools · ${escapeHtml(s.status || 'untested')}</div>`;
+    li.onclick = () => showPage('overview');
+    el.scopeMcpList.appendChild(li);
   }
 }
 
@@ -648,16 +676,10 @@ async function setAllMcp(enabled) {
   for (const s of state.mcpServers) await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled });
   refreshScope();
 }
-el.scopeSkillsAll.onclick = () => setAllSkills(true);
-el.scopeSkillsNone.onclick = () => setAllSkills(false);
-el.scopeMcpAll.onclick = () => setAllMcp(true);
-el.scopeMcpNone.onclick = () => setAllMcp(false);
-// Same bulk controls on the SKILLS page (the usual flow: ALL OFF, then
-// toggle on just what the project needs).
-const _skAllOn = document.getElementById('skills-all-on');
-const _skAllOff = document.getElementById('skills-all-off');
-if (_skAllOn) _skAllOn.onclick = () => setAllSkills(true);
-if (_skAllOff) _skAllOff.onclick = () => setAllSkills(false);
+document.getElementById('ov-skills-all').onclick = () => setAllSkills(true);
+document.getElementById('ov-skills-none').onclick = () => setAllSkills(false);
+document.getElementById('ov-mcp-all').onclick = () => setAllMcp(true);
+document.getElementById('ov-mcp-none').onclick = () => setAllMcp(false);
 function updateComposerMeta() {
   const model = state.selected?.model;
   const chat = state.chats.find((c) => c.id === state.currentChatId);
