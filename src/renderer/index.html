@@ -120,11 +120,13 @@
                     <div class="rail__note" id="plan-note">The agent's live steps appear here while it works.</div>
                   </div>
                   <div class="rail__panel" data-rail="scope" hidden>
-                    <div class="rail__head"><span id="scope-skills-head">SKILLS · 0 ENABLED</span><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
-                    <div class="rail__note" id="scope-skills-note">No skills enabled for this project yet.</div>
-                    <div class="rail__head"><span id="scope-mcp-head">MCP SERVERS · 0</span><button class="icon-btn" id="scope-mcp-add" type="button" title="Manage MCP servers">+</button></div>
+                    <div class="rail__head"><span id="scope-skills-head">SKILLS</span><span class="spacer"></span><button class="linkbtn" id="scope-skills-all" type="button">ALL</button><button class="linkbtn" id="scope-skills-none" type="button">NONE</button><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
+                    <ul class="raillist" id="scope-skills-list"></ul>
+                    <div class="rail__note" id="scope-skills-note">No skills installed. Click + to import.</div>
+                    <div class="rail__head"><span id="scope-mcp-head">MCP SERVERS</span><span class="spacer"></span><button class="linkbtn" id="scope-mcp-all" type="button">ALL</button><button class="linkbtn" id="scope-mcp-none" type="button">NONE</button><button class="icon-btn" id="scope-mcp-add" type="button" title="Manage MCP servers">+</button></div>
                     <ul class="raillist" id="scope-mcp-list"></ul>
                     <div class="rail__note" id="scope-mcp-note">No MCP servers configured.</div>
+                    <div class="rail__note">Scope is per-project: what's unchecked here never reaches this project's chats — its tools and instructions stay out of the model's context entirely.</div>
                   </div>
                 </div>
               </aside>

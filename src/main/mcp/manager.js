@@ -77,8 +77,12 @@ async function ensure(server) {
  * Connect all enabled MCP servers (skipping any that fail) and return their
  * tools plus a route map from namespaced tool name → {serverId, original}.
  */
-async function buildToolset() {
-  const servers = repo.mcp.list().filter((s) => s.enabled);
+async function buildToolset(projectId = null) {
+  // Project scope (opt-out, mirrors project_skills): pass a projectId to keep
+  // servers the project disabled out of the catalog entirely; without one
+  // (imports, global probes) the full enabled list is used.
+  const servers = (projectId != null ? repo.mcp.listEnabledForProject(projectId) : repo.mcp.list())
+    .filter((s) => s.enabled);
   const tools = [];
   const routes = new Map();
   for (const s of servers) {

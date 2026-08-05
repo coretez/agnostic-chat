@@ -471,9 +471,34 @@ function shapeMcp(row) {
   };
 }
 
+// Same columns as MCP_COLS but table-qualified for joins (never selects the
+// raw ciphertext — these rows can cross to the renderer).
+const MCP_COLS_M =
+  'm.id, m.name, m.transport, m.command, m.args_json, m.url, m.enabled, m.tools_json, m.status, m.status_detail, m.last_checked_at, m.created_at, m.updated_at, (m.secret_ciphertext IS NOT NULL) AS has_secret';
+
 const mcp = {
   list() {
     return getDb().prepare(`SELECT ${MCP_COLS} FROM mcp_servers ORDER BY created_at ASC`).all().map(shapeMcp);
+  },
+  /**
+   * Servers ENABLED for a project. Opt-out like project_skills: no project_mcp
+   * row = enabled; an explicit enabled=0 row excludes the server's catalog.
+   */
+  listEnabledForProject(projectId) {
+    return getDb()
+      .prepare(
+        `SELECT ${MCP_COLS_M} FROM mcp_servers m
+         LEFT JOIN project_mcp pm ON pm.server_id = m.id AND pm.project_id = ?
+         WHERE pm.enabled IS NULL OR pm.enabled = 1
+         ORDER BY m.created_at ASC`
+      )
+      .all(projectId)
+      .map(shapeMcp);
+  },
+  setForProject({ projectId, serverId, enabled = true }) {
+    getDb()
+      .prepare('INSERT OR REPLACE INTO project_mcp (project_id, server_id, enabled) VALUES (?, ?, ?)')
+      .run(projectId, serverId, enabled ? 1 : 0);
   },
   get(id) {
     return shapeMcp(getDb().prepare(`SELECT ${MCP_COLS} FROM mcp_servers WHERE id = ?`).get(id));

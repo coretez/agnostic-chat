@@ -91,6 +91,16 @@ CREATE TABLE IF NOT EXISTS project_skills (
   PRIMARY KEY (project_id, skill_id)
 );
 
+-- ── project_mcp: which MCP servers are ENABLED for a project (scoping) ───────
+-- Opt-out like project_skills: no row = enabled; enabled=0 keeps that server's
+-- whole tool catalog out of the project's turns.
+CREATE TABLE IF NOT EXISTS project_mcp (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  server_id  INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (project_id, server_id)
+);
+
 -- ── Agents: authored, per-project sub-agent definitions ────────────────────
 -- Named roles the orchestrator can `delegate` to (e.g. report-reader, case-checker).
 CREATE TABLE IF NOT EXISTS agents (

@@ -34,7 +34,8 @@ const el = {
   intEvalAssessment: $('int-eval-assessment'), intEvalFindings: $('int-eval-findings'),
   attachBtn: $('attach-btn'), attachInput: $('attach-input'), composerAttach: $('composer-attach'),
   railTabs: $('rail-tabs'), railDocList: $('rail-doc-list'), railAddDoc: $('rail-add-doc'),
-  scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'),
+  scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'), scopeSkillsList: $('scope-skills-list'),
+  scopeSkillsAll: $('scope-skills-all'), scopeSkillsNone: $('scope-skills-none'), scopeMcpAll: $('scope-mcp-all'), scopeMcpNone: $('scope-mcp-none'),
   palette: $('palette'), paletteInput: $('palette-input'), paletteList: $('palette-list'),
   // Models screen
   connList: $('conn-list'), connEmpty: $('conn-empty'), connEditor: $('conn-editor'), editorTitle: $('editor-title'),
@@ -584,23 +585,73 @@ function renderDocs() {
   updateComposerMeta();
   if (state.page === 'chat') el.toolbarNote.textContent = PAGE_NOTES.chat();
 }
+// ── SCOPE rail: the project's capability surface, editable in place ────────
+// Opt-out scoping for both skills and MCP servers: unchecked here = that
+// capability never reaches this project's chats (its tools/instructions stay
+// out of context entirely — the "I don't need any of this right now" control).
+function scopeRow({ label, sub, on, onToggle }) {
+  const li = document.createElement('li');
+  li.className = 'raillist__item';
+  li.innerHTML = `<div class="title"><span class="tick">${on ? '☑' : '☐'}</span>${escapeHtml(label)}</div>`
+    + (sub ? `<div class="sub">${escapeHtml(sub)}</div>` : '');
+  li.onclick = onToggle;
+  li.title = on ? 'Enabled for this project — click to exclude' : 'Excluded from this project — click to enable';
+  return li;
+}
+
+async function refreshScope() {
+  await loadSkills();                       // reloads skillsAll + enabledIds, re-renders
+  if (state.currentProjectId) {
+    try { state.projectMcpIds = new Set((await window.api.mcp.enabledForProject(state.currentProjectId)).map((s) => s.id)); } catch {}
+  }
+  renderScope();
+  updateComposerMeta();
+}
+
 function renderScope() {
-  const n = state.skills.length;
-  el.scopeSkillsHead.textContent = `SKILLS · ${n} ENABLED`;
-  el.scopeSkillsNote.textContent = n === 0 ? 'No skills enabled for this project yet.' : state.skills.map((s) => s.name).join(', ');
+  const pid = state.currentProjectId;
+  const allSkills = state.skillsAll || [];
+  const enabledIds = state.skillsEnabledIds || new Set();
+  el.scopeSkillsHead.textContent = `SKILLS · ${enabledIds.size}/${allSkills.length}`;
+  el.scopeSkillsList.innerHTML = '';
+  el.scopeSkillsNote.hidden = allSkills.length > 0;
+  for (const s of allSkills) {
+    const on = enabledIds.has(s.id);
+    el.scopeSkillsList.appendChild(scopeRow({
+      label: s.name, sub: null, on,
+      onToggle: async () => { if (!pid) return; await window.api.skills.setForProject({ projectId: pid, skillId: s.id, enabled: !on }); refreshScope(); }
+    }));
+  }
 
   const servers = state.mcpServers.filter((s) => s.enabled);
-  el.scopeMcpHead.textContent = `MCP SERVERS · ${servers.length}`;
+  const mcpIds = state.projectMcpIds || new Set(servers.map((s) => s.id));
+  const mcpOn = servers.filter((s) => mcpIds.has(s.id)).length;
+  el.scopeMcpHead.textContent = `MCP SERVERS · ${mcpOn}/${servers.length}`;
   el.scopeMcpList.innerHTML = '';
   el.scopeMcpNote.hidden = servers.length > 0;
   for (const s of servers) {
-    const li = document.createElement('li');
-    li.className = 'raillist__item';
-    li.innerHTML = `<div class="title">${escapeHtml(s.name)}</div><div class="sub">${escapeHtml(s.transport)} · ${(s.tools || []).length} tools · ${escapeHtml(s.status || 'untested')}</div>`;
-    li.onclick = () => showMcp();
-    el.scopeMcpList.appendChild(li);
+    const on = mcpIds.has(s.id);
+    el.scopeMcpList.appendChild(scopeRow({
+      label: s.name, sub: `${s.transport} · ${(s.tools || []).length} tools · ${s.status || 'untested'}`, on,
+      onToggle: async () => { if (!pid) return; await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled: !on }); refreshScope(); }
+    }));
   }
 }
+
+async function setAllSkills(enabled) {
+  const pid = state.currentProjectId; if (!pid) return;
+  for (const s of (state.skillsAll || [])) await window.api.skills.setForProject({ projectId: pid, skillId: s.id, enabled });
+  refreshScope();
+}
+async function setAllMcp(enabled) {
+  const pid = state.currentProjectId; if (!pid) return;
+  for (const s of state.mcpServers) await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled });
+  refreshScope();
+}
+el.scopeSkillsAll.onclick = () => setAllSkills(true);
+el.scopeSkillsNone.onclick = () => setAllSkills(false);
+el.scopeMcpAll.onclick = () => setAllMcp(true);
+el.scopeMcpNone.onclick = () => setAllMcp(false);
 function updateComposerMeta() {
   const model = state.selected?.model;
   const chat = state.chats.find((c) => c.id === state.currentChatId);
@@ -1216,6 +1267,8 @@ async function selectProject(id) {
   state.documents = await window.api.documents.list(id);
   await loadSkills();
   await loadAgents();
+  try { state.projectMcpIds = new Set((await window.api.mcp.enabledForProject(id)).map((s) => s.id)); } catch {}
+  renderScope();
   renderChats(); renderDocs();
   showPage('chat');
   updateModelSwitch();

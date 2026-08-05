@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 let db = null;
 
@@ -217,6 +217,18 @@ function migrate(database) {
   if (current < 16) {
     const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
     if (!ccols.includes('coding_mode')) database.exec('ALTER TABLE chats ADD COLUMN coding_mode INTEGER');
+  }
+
+  // v17: per-project MCP server scoping (opt-out, mirrors project_skills).
+  if (current < 17) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS project_mcp (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        server_id  INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+        enabled    INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (project_id, server_id)
+      );
+    `);
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

@@ -408,6 +408,9 @@ function registerIpc() {
   ipcMain.handle('mcp:add', (_e, input) => repo.mcp.add(input));
   ipcMain.handle('mcp:update', (_e, { id, patch }) => repo.mcp.update(id, patch));
   ipcMain.handle('mcp:remove', (_e, { id }) => repo.mcp.remove(id));
+  // Per-project MCP scoping (opt-out, mirrors skills:enabledForProject)
+  ipcMain.handle('mcp:enabledForProject', (_e, { projectId }) => repo.mcp.listEnabledForProject(projectId));
+  ipcMain.handle('mcp:setForProject', (_e, input) => repo.mcp.setForProject(input));
 
   // Connect to an MCP server and list its tools. Accepts { id } (saved — uses
   // stored/OAuth token, caches the connection) or an ephemeral config.
@@ -502,11 +505,15 @@ function registerIpc() {
         emitProgress(event);
       });
 
+      const projectId = payload?.projectId;
+
       // Gather tools from enabled MCP servers (skips any that fail to connect).
+      // Project-scoped: a project_mcp row with enabled=0 keeps that server's
+      // whole catalog out of this project's turns (opt-out, like skills).
       // Done before skill handling — the unified context planner below needs
       // both the skill menu and the tool menu at once.
       let toolset = { tools: [], routes: new Map() };
-      try { toolset = await mcpManager.buildToolset(); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
+      try { toolset = await mcpManager.buildToolset(projectId); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
 
       // Skills: enabled = candidate. Tools: gathered above. ONE planning call
       // (context-select.js) decides both which skills to load in full and
@@ -514,7 +521,6 @@ function registerIpc() {
       // gating on thresholds was exactly what let a turn's fixed overhead
       // (skills + tool schemas) balloon past what a request actually needed.
       let base = messages;
-      const projectId = payload?.projectId;
       let skillSelect = null;
       let loadedSkills = []; // skills actually in scope this turn — drives the tool ceiling below
       let es = [];

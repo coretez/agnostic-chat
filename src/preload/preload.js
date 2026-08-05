@@ -136,6 +136,8 @@ contextBridge.exposeInMainWorld('api', {
     update: (id, patch) => ipcRenderer.invoke('mcp:update', { id, patch }),
     remove: (id) => ipcRenderer.invoke('mcp:remove', { id }),
     connect: (input) => ipcRenderer.invoke('mcp:connect', input),
-    authorize: (id) => ipcRenderer.invoke('mcp:authorize', { id })
+    authorize: (id) => ipcRenderer.invoke('mcp:authorize', { id }),
+    enabledForProject: (projectId) => ipcRenderer.invoke('mcp:enabledForProject', { projectId }),
+    setForProject: (input) => ipcRenderer.invoke('mcp:setForProject', input)
   }
 });

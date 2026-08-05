@@ -870,6 +870,28 @@ app.whenReady().then(async () => {
     assert(planContext({}).includes('PROJECT DOCUMENTATION') === false, 'O15: no docs → no empty banner in the planner context');
   }
 
+  // ── Project-scoped MCP servers (opt-out, mirrors project_skills) ───────────
+  {
+    const proj = repo.projects.create({ name: 'ScopeProj' });
+    const s1 = repo.mcp.add({ name: 'siem', transport: 'http', url: 'https://example.test/a' });
+    const s2 = repo.mcp.add({ name: 'crm', transport: 'http', url: 'https://example.test/b' });
+
+    let enabled = repo.mcp.listEnabledForProject(proj.id).map((s) => s.name);
+    assert(enabled.includes('siem') && enabled.includes('crm'), 'project mcp: no rows → all servers enabled (opt-out default)');
+
+    repo.mcp.setForProject({ projectId: proj.id, serverId: s2.id, enabled: false });
+    enabled = repo.mcp.listEnabledForProject(proj.id).map((s) => s.name);
+    assert(enabled.includes('siem') && !enabled.includes('crm'), 'project mcp: enabled=0 row excludes that server for this project');
+
+    const other = repo.projects.create({ name: 'OtherProj' });
+    assert(repo.mcp.listEnabledForProject(other.id).map((s) => s.name).includes('crm'), 'project mcp: exclusion is per-project, other projects unaffected');
+
+    repo.mcp.setForProject({ projectId: proj.id, serverId: s2.id, enabled: true });
+    assert(repo.mcp.listEnabledForProject(proj.id).length === repo.mcp.list().length, 'project mcp: re-enable restores the full catalog');
+    assert(!('secret_ciphertext' in repo.mcp.listEnabledForProject(proj.id)[0]), 'project mcp: scoped rows never carry ciphertext');
+    repo.mcp.remove(s1.id); repo.mcp.remove(s2.id);
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
