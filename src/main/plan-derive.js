@@ -72,9 +72,14 @@ const SUBMIT_PLAN_TOOL = {
 
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '' }) {
+function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '' }) {
   const parts = [];
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
+  if (repoMap) {
+    // Coding mode: the planner must plan against REAL files, not guesses —
+    // steps that name actual paths execute; steps that imagine them wander.
+    parts.push('WORKING DIRECTORY MAP (plan against these real files):\n' + clip(repoMap, 4000));
+  }
   if (projectDocs) {
     // O15: the canonical docs are the source of truth for objective and
     // purpose — the planner derives intent from HERE, never by reading code.
@@ -108,6 +113,7 @@ function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents 
 // steps the runtime can't perform. Appended to the guidance only when the
 // coding harness is active this turn.
 const CODING_RULES = `
+- PLAN BY DEFAULT (never wander): a request that will create or modify files or code is NEVER simple. Derive steps in the canonical shape — (1) read/locate the relevant code (name real files from the working directory map), (2..n) implement each coherent change, (last) verify via tests/build and fix failures. simple=true is ONLY for questions, explanations, and pure reads. A mutating request answered without a plan is a failure.
 - ALIGN FIRST (never race): if the request requires choosing a development direction — platform, framework/stack, project structure, distribution target — and that choice is NOT already fixed by KNOWN VALUES, the project brief, or the request itself, do NOT plan steps. Call submit_plan with "decisions": one entry per open decision (question, viable options with tradeoffs, your recommendation). Never silently pick a direction for the user.
 - RECORD DECISIONS: when the user's request itself states a direction ("build it in Swift", "internal only"), put it in "record" as {key, value} so it persists as a durable known value. Record only the user's decisions, never your own picks.
 - VERIFY: a plan whose steps create or modify code MUST end with a verification step that runs the project's tests or build via run_command and fixes what fails. Untested code is not done.
@@ -183,9 +189,9 @@ function normalizeSteps(steps, startId = 1) {
  *   On any failure returns {simple:true} — the caller falls back to the flat
  *   loop, so planning can never make a turn WORSE than today's behavior.
  */
-async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, projectDocs = '' }) {
+async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, projectDocs = '', repoMap = '' }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap });
     const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     // User decisions stated in the request — persisted by the caller at
@@ -224,9 +230,9 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
  * Matches the `refinePlan` signature executePlan expects.
  * @returns {Promise<{steps:Array}>} empty steps = "nothing more needed".
  */
-async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '' }) {
+async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '', repoMap = '' }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap });
     const doneDigest = done.map((d) => `- [step ${d.step}] ${clip(d.task, 160)}: ${clip(d.conclusion, 400)}`).join('\n');
     const stuck = { task: stuckStep ? stuckStep.task : '', partial: partial || '' };
     const parsed = await callForPlan(connector, model, REFINE_PROMPT(ctx, (plan && plan.goal) || '', doneDigest, stuck, reason || 'stuck', userText || ''));

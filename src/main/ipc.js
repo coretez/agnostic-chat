@@ -826,6 +826,30 @@ function registerIpc() {
             docsBlock = projectDocs.load(projectId);
           }
         } catch (e) { console.error('[project-docs load]', e && e.message); }
+
+        // Coding mode plans against REAL files: a depth-2 map of the working
+        // dir feeds Pass 2 so steps name actual paths instead of guessing.
+        let repoMap = '';
+        if (coding) { try { repoMap = (await coding.call('list_dir', { depth: 2 })).text || ''; } catch {} }
+
+        // O15 doc maintenance — shared by BOTH execution paths; a turn that
+        // mutated files must never end unrecorded and undocumented.
+        const maintainDocs = async ({ goal, stepResults, toolTrace }) => {
+          try {
+            emitProgress({ type: 'process', kind: 'doc-writer', model: fastModel });
+            const upd = await updateDocs({
+              connector: { chat: chatAbortable }, model: fastModel,
+              goal, stepResults, toolTrace,
+              known: store.render(), current: projectDocs.readCanonical(projectId, outputDir)
+            });
+            for (const t of ['design', 'pseudocode', 'knowledge']) {
+              if (!upd[t]) continue;
+              const w = projectDocs.writeCanonical({ projectId, outputDir, docType: t, content: upd[t], source: 'pipeline' });
+              emitProgress({ type: 'process', kind: 'doc-update', doc: t, version: w.version });
+            }
+          } catch (e) { console.error('[doc-writer]', e && e.message); }
+        };
+        const turnMutated = (trace) => (trace || []).some((t) => t.ok !== false && ['write_file', 'edit_file', 'run_command'].includes(t.name));
         if (scopedTools.length || loadedSkills.length) {
           // Visible + bounded: planning on a thinking fast-model can take
           // minutes — narrate it (the rail/status shows "deriving plan…"
@@ -834,7 +858,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock, repoMap }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -878,7 +902,7 @@ function registerIpc() {
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck via the shared one-shot prompt queue.
@@ -972,23 +996,8 @@ function registerIpc() {
           // a dedicated technical-writer pass (doc-writer.js), deterministic
           // like step-commits and decision records. Plan-step documentation
           // produced untouched skeletons and narrative sludge; this doesn't.
-          if (coding && !exec.aborted && projectId) {
-            const mutated = (exec.toolTrace || []).some((t) => t.ok !== false && ['write_file', 'edit_file', 'run_command'].includes(t.name));
-            if (mutated) {
-              try {
-                emitProgress({ type: 'process', kind: 'doc-writer', model: fastModel });
-                const upd = await updateDocs({
-                  connector: { chat: chatAbortable }, model: fastModel,
-                  goal: plan.goal, stepResults: exec.stepResults, toolTrace: exec.toolTrace,
-                  known: store.render(), current: projectDocs.readCanonical(projectId, outputDir)
-                });
-                for (const t of ['design', 'pseudocode', 'knowledge']) {
-                  if (!upd[t]) continue;
-                  const w = projectDocs.writeCanonical({ projectId, outputDir, docType: t, content: upd[t], source: 'pipeline' });
-                  emitProgress({ type: 'process', kind: 'doc-update', doc: t, version: w.version });
-                }
-              } catch (e) { console.error('[doc-writer]', e && e.message); }
-            }
+          if (coding && !exec.aborted && projectId && turnMutated(exec.toolTrace)) {
+            await maintainDocs({ goal: plan.goal, stepResults: exec.stepResults, toolTrace: exec.toolTrace });
           }
         } else {
           // ── Flat path (unchanged behavior) — with working memory in front of
@@ -1005,6 +1014,18 @@ function registerIpc() {
             isAborted
           });
           if (result.aborted && !result.reply) result.reply = '⏹ Stopped at your request — the work above was kept.';
+
+          // A coding turn that fell to the flat loop still gets full
+          // bookkeeping: one commit for its mutations + the doc-writer pass.
+          // A wandering turn must never be an unrecorded, undocumented turn —
+          // and plan_steps=0 in turn_metrics makes the wandering measurable.
+          if (coding && !result.aborted && projectId && turnMutated(result.toolTrace)) {
+            try {
+              const c = await commitStep(project.working_dir, `turn: ${String(text).slice(0, 150)}`);
+              if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'turn' });
+            } catch (e) { console.error('[flat commit]', e && e.message); }
+            await maintainDocs({ goal: text, stepResults: [], toolTrace: result.toolTrace });
+          }
         }
       } catch (e) {
         console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);

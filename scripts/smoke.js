@@ -953,6 +953,16 @@ app.whenReady().then(async () => {
     assert(fs.readFileSync(specRow.path, 'utf8').includes('old decision') && !fs.existsSync(oldPath), 'migration: old content moved to the designed location, bin file removed');
   }
 
+  // ── Coding-mode planning discipline: plan-by-default + real-file map ──────
+  {
+    const { DERIVE_PROMPT } = require('../src/main/plan-derive');
+    const coded = DERIVE_PROMPT('ctx', 'req', true);
+    assert(coded.includes('PLAN BY DEFAULT') && coded.includes('NEVER simple'), 'coding rules: mutating requests are never simple (plan-by-default)');
+    assert(DERIVE_PROMPT('ctx', 'req', false).includes('PLAN BY DEFAULT') === false, 'coding rules: plan-by-default applies only in coding mode');
+    const ctx = planContext({ repoMap: 'cli.js\ntest/cli.test.js' });
+    assert(ctx.includes('WORKING DIRECTORY MAP') && ctx.includes('real files') && ctx.includes('cli.js'), 'planner context: working-directory map feeds Pass 2 so steps name real paths');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
