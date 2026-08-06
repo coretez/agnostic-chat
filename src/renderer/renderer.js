@@ -363,6 +363,7 @@ function showPage(page) {
   el.tbSlug.textContent = '/ ' + page;
   if (page === 'overview') renderOverview();
   if (page === 'internals') renderInternals();
+  if (page === 'documents') renderDocumentsPage();
 }
 function showFirstRun() {
   el.tabbar.hidden = true;
@@ -642,6 +643,66 @@ function renderOverviewScope() {
     }));
   }
 }
+
+// ── DOCUMENTS page: the project library (canonical docs + deliverables) ────
+const DOC_CANON = [
+  { type: 'spec', sub: 'objectives · requirements · decision records' },
+  { type: 'design', sub: 'architecture · module map · interfaces' },
+  { type: 'pseudocode', sub: 'component outlines' },
+  { type: 'knowledge', sub: 'contracts · gotchas · glossary' }
+];
+async function renderDocumentsPage() {
+  if (!state.currentProjectId) return;
+  try { state.documents = await window.api.documents.list(state.currentProjectId); } catch {}
+  const g = (id) => document.getElementById(id);
+  const canonUl = g('docs-canonical'), otherUl = g('docs-other');
+  if (!canonUl) return;
+  canonUl.innerHTML = ''; otherUl.innerHTML = '';
+  const canonTypes = new Set(DOC_CANON.map((c) => c.type));
+
+  const row = (d, sub) => {
+    const li = document.createElement('li'); li.className = 'conn';
+    const when = (d.updated_at || d.created_at || '').slice(0, 16);
+    li.innerHTML = `
+      <span class="conn__status${canonTypes.has(d.doc_type) ? ' conn__status--ok' : ''}"></span>
+      <div class="conn__info"><div class="conn__label">${escapeHtml(d.title)}</div><div class="conn__type">${escapeHtml(d.doc_type || d.source || 'doc')}</div></div>
+      <div class="conn__mid"><div class="conn__url">${escapeHtml(sub || d.path || '')}</div><div class="conn__meta">v${d.version || 1}${when ? ' · ' + escapeHtml(when) : ''}</div></div>
+      <div class="conn__actions"></div>`;
+    const actions = li.querySelector('.conn__actions');
+    const view = document.createElement('button'); view.className = 'conn__btn'; view.textContent = 'VIEW';
+    view.onclick = async () => {
+      const r = await window.api.documents.read(d.id);
+      if (r && r.error) { g('doc-reader-title').textContent = d.title; g('doc-reader-body').textContent = r.error; g('doc-reader').hidden = false; return; }
+      if (/html/.test(r.mime || '')) { openArtifact(r.content, d.title); return; }
+      g('doc-reader-title').textContent = `${d.title} · v${d.version || 1}`;
+      g('doc-reader-body').innerHTML = mdToHtml(r.content || '(empty)', []);
+      g('doc-reader').hidden = false;
+      g('doc-reader').scrollIntoView({ block: 'nearest' });
+    };
+    actions.appendChild(view);
+    if (d.path) {
+      const rev = document.createElement('button'); rev.className = 'conn__btn'; rev.textContent = 'FINDER';
+      rev.onclick = () => window.api.projects.revealPath(d.path);
+      actions.appendChild(rev);
+    }
+    return li;
+  };
+
+  // Canonical docs in their designed order, with their role as the subtitle.
+  for (const c of DOC_CANON) {
+    const d = state.documents.find((x) => x.doc_type === c.type);
+    if (d) canonUl.appendChild(row(d, c.sub));
+  }
+  // Everything else: deliverables, uploads, user docs.
+  const others = state.documents.filter((d) => !canonTypes.has(d.doc_type));
+  g('docs-other-empty').hidden = others.length > 0;
+  for (const d of others) otherUl.appendChild(row(d));
+}
+document.getElementById('docs-reveal').onclick = async () => {
+  if (!state.currentProjectId) return;
+  try { const eff = await window.api.projects.effectiveOutputDir(state.currentProjectId); if (eff && eff.outputDir) window.api.projects.revealPath(eff.outputDir); } catch {}
+};
+document.getElementById('doc-reader-close').onclick = () => { document.getElementById('doc-reader').hidden = true; };
 
 // Read-only summary in the chat rail — points at OVERVIEW for changes.
 function renderScope() {

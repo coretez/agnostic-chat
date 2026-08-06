@@ -467,6 +467,14 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .alignform__rec { font-size: 11px; color: var(--ink3); }
 .alignform__bar { display: flex; margin-top: 6px; }
 
+/* Documents page: library sections + inline reader */
+.docsec { font-family: var(--mono); font-size: 9.5px; letter-spacing: 1.2px; color: var(--ink3); margin: 18px 0 8px; }
+.docreader { margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); overflow: hidden; }
+.docreader__bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.docreader__title { font-family: var(--mono); font-size: 11px; letter-spacing: 0.5px; color: var(--ink2); }
+.docreader__body { padding: 14px 16px; max-height: 60vh; overflow-y: auto; font-size: 13px; }
+.docreader__body pre { overflow-x: auto; }
+
 /* Overview scope card: per-project skills + MCP connector scoping */
 .ovscope { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px; }
 .ovscope__head { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 1px; color: var(--ink3); margin-bottom: 6px; }

@@ -101,7 +101,8 @@ contextBridge.exposeInMainWorld('api', {
     linkToChat: (input) => ipcRenderer.invoke('documents:linkToChat', input),
     listByChat: (chatId) => ipcRenderer.invoke('documents:listByChat', { chatId }),
     remove: (id) => ipcRenderer.invoke('documents:remove', { id }),
-    ensureCanonical: (projectId) => ipcRenderer.invoke('documents:ensureCanonical', { projectId })
+    ensureCanonical: (projectId) => ipcRenderer.invoke('documents:ensureCanonical', { projectId }),
+    read: (id) => ipcRenderer.invoke('documents:read', { id })
   },
 
   skills: {

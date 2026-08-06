@@ -258,6 +258,17 @@ function registerIpc() {
     return { ok: true, project: repo.projects.setOutputDir(id, res.filePaths[0]) };
   });
   ipcMain.handle('documents:remove', (_e, { id }) => repo.documents.remove(id));
+  // Read a document's content for the library reader (path preferred, inline
+  // content as fallback). Read-only; renderer has no fs access of its own.
+  ipcMain.handle('documents:read', (_e, { id }) => {
+    const d = repo.documents.get(id);
+    if (!d) return { error: 'Document not found.' };
+    try {
+      const fs = require('node:fs');
+      if (d.path && fs.existsSync(d.path)) return { content: fs.readFileSync(d.path, 'utf8'), mime: d.mime_type || 'text/plain', title: d.title };
+      return { content: d.content || '', mime: d.mime_type || 'text/plain', title: d.title };
+    } catch (e) { return { error: e.message }; }
+  });
   // Bootstrap the canonical dev-doc set (docs/SPEC.md, DESIGN.md, PSEUDOCODE.md,
   // KNOWLEDGE.md) — idempotent; the renderer calls this when a project opens so
   // the DOCUMENTS tab always shows the project's documentation structure.

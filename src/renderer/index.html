@@ -340,8 +340,26 @@
             </div>
           </section>
 
-          <section class="page page--center" data-page="documents" hidden>
-            <div class="placeholder"><div class="placeholder__title">DOCUMENTS</div><div class="placeholder__sub">The library + reader + details view is a later phase. For now, documents show in the Chat rail.</div></div>
+          <section class="page page--scroll" data-page="documents" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">DOCUMENTS</div>
+                  <div class="mscreen__sub">The project library. Canonical documentation is the source of truth the planner reads — maintained by the pipeline and your edits, versioned on disk. Deliverables and uploads sit below it.</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn--ghost btn--sm" id="docs-reveal" type="button">⤴ OPEN FOLDER</button>
+              </div>
+              <div class="docsec">PROJECT DOCUMENTATION</div>
+              <ul class="connlist" id="docs-canonical"></ul>
+              <div class="docsec">GENERATED &amp; UPLOADED</div>
+              <ul class="connlist" id="docs-other"></ul>
+              <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
+              <div class="docreader" id="doc-reader" hidden>
+                <div class="docreader__bar"><span class="docreader__title" id="doc-reader-title"></span><span class="spacer"></span><button class="btn btn--ghost btn--sm" id="doc-reader-close" type="button">CLOSE</button></div>
+                <div class="docreader__body" id="doc-reader-body"></div>
+              </div>
+            </div>
           </section>
 
           <!-- Skills (per-project scoping + import from MCP) -->
