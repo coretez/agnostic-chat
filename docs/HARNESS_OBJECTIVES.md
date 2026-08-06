@@ -98,14 +98,18 @@ Harness.io Continuous Verification.*
 Accept: DERIVE_PROMPT carries the rules; a code-writing plan's last step
 runs verification. **Status: THIS CHANGE** (prompt contract).
 
-**O11. Refinement is bounded and structural.** After verify: parallel
-critique lenses (security, modularization/coupling, efficiency, redundancy)
-anchored by deterministic tools, findings become fix steps, ≤2 cycles,
-unresolved findings surfaced honestly.
+**O11. Refinement is bounded and structural.** Verify means three layers:
+(1) it works — the plan's own verification step runs tests/build; (2) it is
+well-made — DRY, modular, no brute force; (3) it is secure. Layers 2–3 run
+as a deterministic post-execution review (review.js): quality + security
+critic lenses over the actual changed files, in parallel, findings validated
+(known files only, high/med only, deduped, worst-first) — then ONE bounded
+fix step, committed as `review: …`. Clean is a first-class outcome.
 *Source: Chris's methodology; the multi-lens review pattern.*
-Accept: refinement runs as plan steps with authored critic agents.
-**Status: PLANNED** (agents table + `assign` already support authoring
-critics today).
+Accept: junk findings filtered; findings sorted worst-first; fix cycle runs
+once and cannot spiral; review failure never breaks a turn.
+**Status: SHIPPED (v1)** — deterministic-tool anchors (lint/audit) and
+authored-agent lenses are the v2 extensions.
 
 ## D. Recovery + measurement — the safety net
 
@@ -152,6 +156,6 @@ DERIVE_PROMPT carries the documentation rule. **Status: THIS CHANGE.**
 | O7, O8 | `align` outcome + `record` | `plan-derive.js` submit_plan schema + `ipc.js` align gate |
 | O9 | step-commits | `coding-tools.js` commitStep + `execute.js` onStepComplete |
 | O10 | plan-shape contract | `plan-derive.js` DERIVE_PROMPT coding rules |
-| O11 | refinement loop | planned — authored critic agents + assign |
+| O11 | verify layers 2–3: review + fix cycle | `src/main/review.js` + `ipc.js` review pass |
 | O13 | checkpoint/revert | planned — rides O9 |
 | O15 | canonical project docs | `src/main/project-docs.js` + `plan-derive.js` docs context/rule + `ipc.js` spec append |

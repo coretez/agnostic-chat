@@ -7,7 +7,8 @@ const { connectAndList } = require('./mcp/client');
 const mcpManager = require('./mcp/manager');
 const { runAuthFlow } = require('./mcp/oauth');
 const { runChatLoop } = require('./chat-loop');
-const { executePlan, synthesize } = require('./execute');
+const { executePlan, executeStep, synthesize } = require('./execute');
+const { reviewChanges } = require('./review');
 const { derivePlan, refinePlan } = require('./plan-derive');
 const { VariableStore, SET_VARIABLE_TOOL } = require('./variables');
 const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
@@ -967,6 +968,52 @@ function registerIpc() {
             },
             onEvent: emitProgress
           });
+
+          // ── O11 verify layer 2+3: quality + security review of the changed
+          // files (review.js), deterministic like step-commits. Layer 1 —
+          // "it works" — is the plan's own verify step. Confirmed high/med
+          // findings get ONE bounded fix step (worst first), then the fix is
+          // committed; review can never spiral or break a turn.
+          if (coding && !exec.aborted && exec.completed && turnMutated(exec.toolTrace)) {
+            try {
+              const changed = [...new Set(exec.toolTrace
+                .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
+                .map((t) => (t.args && t.args.path) || '').filter(Boolean))].slice(0, 6);
+              const files = [];
+              for (const p of changed) {
+                const r = await coding.call('read_file', { path: p });
+                if (!r.isError) files.push({ path: p, content: String(r.text || '') });
+              }
+              if (files.length) {
+                emitProgress({ type: 'process', kind: 'review', files: files.length });
+                const rev = await reviewChanges({ connector: { chat: chatAbortable }, model: fastModel, files, goal: plan.goal });
+                if (rev.findings.length && !isAborted()) {
+                  emitProgress({ type: 'process', kind: 'review-findings', count: rev.findings.length });
+                  const fixStep = {
+                    id: exec.stepResults.length + 1,
+                    task: 'Code review found problems in the files you just changed. Fix each one, then re-run the project tests to confirm nothing broke:\n'
+                      + rev.findings.map((f) => `- [${f.lens}/${f.severity}] ${f.file}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`).join('\n'),
+                    produces: 'review findings fixed, tests passing'
+                  };
+                  const fr = await executeStep({ chat: chatAbortable, callTool, model: chosenModel, step: fixStep, tools: orchestratorTools.filter((t) => t.name !== 'set_variable'), history: exec.history, store, onEvent: emitProgress, isAborted });
+                  exec.stepResults.push(fr.result);
+                  exec.toolTrace.push(...(fr.toolTrace || []));
+                  if (fr.usage && fr.usage.calls) {
+                    exec.usage.measured = exec.usage.measured || fr.usage.measured; exec.usage.calls += fr.usage.calls;
+                    exec.usage.inputTokens += fr.usage.inputTokens; exec.usage.outputTokens += fr.usage.outputTokens;
+                    exec.usage.cachedTokens += fr.usage.cachedTokens; exec.usage.cacheCreationTokens += fr.usage.cacheCreationTokens;
+                  }
+                  try {
+                    const c = await commitStep(project.working_dir, 'review: fix quality/security findings');
+                    if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'review' });
+                  } catch {}
+                  emitProgress({ type: 'process', kind: 'review-fixed', count: rev.findings.length });
+                } else if (!rev.findings.length) {
+                  emitProgress({ type: 'process', kind: 'review-clean' });
+                }
+              }
+            } catch (e) { console.error('[review]', e && e.message); }
+          }
 
           // The bubble has been streaming per-step text; the synthesis is the
           // REAL reply — tell the renderer to start its buffer fresh so the

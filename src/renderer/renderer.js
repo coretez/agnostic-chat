@@ -1781,6 +1781,10 @@ function planEvent(ev) {
     else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
     else if (ev.kind === 'escalate') planFinalize(false);
     else if (ev.kind === 'coding-mode') { planAdd(`⌥ coding harness: ${ev.tools || 0} tools${ev.gitAvailable ? ' · git' : ' · no git'}`); planFinalize(true); }
+    else if (ev.kind === 'review') { planAdd(`⚖ reviewing ${ev.files} changed file${ev.files === 1 ? '' : 's'} (quality · security)…`); }
+    else if (ev.kind === 'review-clean') { planFinalize(true); planAdd('⚖ review clean'); planFinalize(true); }
+    else if (ev.kind === 'review-findings') { planFinalize(false); planAdd(`⚖ ${ev.count} finding${ev.count === 1 ? '' : 's'} — fixing…`); }
+    else if (ev.kind === 'review-fixed') { planFinalize(true); }
     else if (ev.kind === 'doc-writer') { planAdd('✎ maintaining documentation…'); }
     else if (ev.kind === 'doc-update') { planAdd(`✎ ${String(ev.doc || 'doc').toUpperCase()} updated → v${ev.version}`); planFinalize(true); }
     else if (ev.kind === 'align') { planAdd(`◈ alignment needed — ${ev.decisions} decision${ev.decisions === 1 ? '' : 's'} for you`); planFinalize(true); }

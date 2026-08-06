@@ -963,6 +963,33 @@ app.whenReady().then(async () => {
     assert(ctx.includes('WORKING DIRECTORY MAP') && ctx.includes('real files') && ctx.includes('cli.js'), 'planner context: working-directory map feeds Pass 2 so steps name real paths');
   }
 
+  // ── Review pass (O11 v1): two lenses, validated findings, worst-first ─────
+  {
+    const { reviewChanges } = require('../src/main/review');
+    const files = [{ path: 'cli.js', content: 'var x = eval(input);' }];
+    let lensCount = 0;
+    const conn = { chat: async ({ messages }) => {
+      lensCount++;
+      const isSec = messages[0].content.includes('security reviewer');
+      return { toolCalls: [{ id: 'r', name: 'submit_review', args: { findings: isSec
+        ? [{ severity: 'high', file: 'cli.js', issue: 'eval on external input', fix: 'parse explicitly' },
+           { severity: 'low', file: 'cli.js', issue: 'nit', fix: 'x' },
+           { severity: 'med', file: 'other.js', issue: 'speculation about unseen file', fix: 'x' }]
+        : [{ severity: 'med', file: 'cli.js', issue: 'duplicated parse block', fix: 'extract helper' },
+           { severity: 'med', file: 'cli.js', issue: 'duplicated parse block', fix: 'extract helper' }] } }] };
+    } };
+    const rev = await reviewChanges({ connector: conn, model: 'mock', files, goal: 'g' });
+    assert(lensCount === 2, 'review: both lenses run');
+    assert(rev.findings.length === 2, 'review: low severity, unseen files, and duplicates all dropped');
+    assert(rev.findings[0].severity === 'high' && rev.findings[0].lens === 'security', 'review: findings sorted worst-first');
+    const clean = await reviewChanges({ connector: { chat: async () => ({ toolCalls: [{ id: 'r', name: 'submit_review', args: { clean: true, findings: [{ severity: 'high', file: 'cli.js', issue: 'padded' }] } }] }) }, model: 'mock', files, goal: 'g' });
+    assert(clean.findings.length === 0, 'review: clean=true wins over padded findings');
+    const fail = await reviewChanges({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', files, goal: 'g' });
+    assert(fail.findings.length === 0, 'review: model failure degrades to no findings, never breaks the turn');
+    const { DERIVE_PROMPT: DP } = require('../src/main/plan-derive');
+    assert(DP('c', 'r', true).includes('three layers'), 'coding rules: verify contract states all three layers');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
