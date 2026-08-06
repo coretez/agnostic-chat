@@ -55,7 +55,7 @@ const SUBMIT_PLAN_TOOL = {
       },
       record: {
         type: 'array',
-        description: 'Decisions the user has ALREADY stated (in this request or earlier) that should persist as durable known values — e.g. {key:"platform", value:"react-native"}. These are user decisions, never your own guesses.',
+        description: 'ONLY durable development-direction decisions the user has STATED (platform, stack, distribution, structure, naming) — e.g. {key:"platform", value:"react-native"}. Short snake_case key, short value. NEVER project titles, task descriptions, or restatements of the request; never your own picks.',
         items: {
           type: 'object',
           properties: {
@@ -112,7 +112,7 @@ const CODING_RULES = `
 - RECORD DECISIONS: when the user's request itself states a direction ("build it in Swift", "internal only"), put it in "record" as {key, value} so it persists as a durable known value. Record only the user's decisions, never your own picks.
 - VERIFY: a plan whose steps create or modify code MUST end with a verification step that runs the project's tests or build via run_command and fixes what fails. Untested code is not done.
 - CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.
-- DOCUMENTATION (docs are the record, code is not): after the verification step, a plan that changed code, architecture, or behavior MUST end with a documentation step that updates the project docs via save_document — type "design" title "DESIGN" for architecture/interface/structure changes, type "knowledge" title "KNOWLEDGE" for discoveries, contracts, and gotchas learned while building (format md; reuse those exact types/titles so the same document versions instead of fragmenting). Update what changed; do not rewrite what didn't. The SPEC updates itself from ratified decisions — never write it from a plan step.`;
+- DOCUMENTATION: the canonical project docs (SPEC/DESIGN/PSEUDOCODE/KNOWLEDGE) are maintained AUTOMATICALLY by the pipeline after execution — do NOT plan documentation steps and do NOT call save_document with those types. save_document is for deliverables (reports, exports) only.`;
 
 const DERIVE_PROMPT = (ctx, request, codingMode = false) =>
 `You are the planning stage of an LLM assistant. Decide whether the user's request needs a multi-step plan, and if so derive the steps — informed by the skill instructions in play (they often prescribe a procedure: follow it).
@@ -190,9 +190,14 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     // User decisions stated in the request — persisted by the caller at
     // `user` confidence so they survive turns and outrank model guesses (O8).
+    // Deterministic junk filter: a decision is a short snake_case key with a
+    // short value. Task descriptions and titles recorded as "decisions" once
+    // polluted a SPEC — never again.
+    const RECORD_KEY = /^[a-z][a-z0-9_]{1,30}$/;
     const record = (Array.isArray(parsed.record) ? parsed.record : [])
-      .filter((r) => r && typeof r.key === 'string' && r.key.trim() && r.value != null)
-      .map((r) => ({ key: r.key.trim(), value: String(r.value).trim() }));
+      .filter((r) => r && typeof r.key === 'string' && r.value != null)
+      .map((r) => ({ key: r.key.trim().toLowerCase().replace(/\s+/g, '_'), value: String(r.value).trim() }))
+      .filter((r) => RECORD_KEY.test(r.key) && r.value.length > 0 && r.value.length <= 100);
     // Alignment outcome (O7): open direction decisions end the turn awaiting
     // the user — no steps run. Only honored in coding mode (the rules that
     // elicit it are only issued there).

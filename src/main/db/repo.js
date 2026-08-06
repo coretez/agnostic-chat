@@ -253,6 +253,10 @@ const documents = {
     return d ? withProps(d) : null;
   },
   remove(id) { getDb().prepare('DELETE FROM documents WHERE id = ?').run(id); },
+  /** Re-point an indexed document at a new on-disk location (canonical-path migration). */
+  repath(id, p) {
+    getDb().prepare("UPDATE documents SET path = ?, updated_at = datetime('now') WHERE id = ?").run(p, id);
+  },
   /**
    * Register (or re-version) a generated document in the index. Keyed by
    * (project, path): re-saving the same location updates the row and bumps the

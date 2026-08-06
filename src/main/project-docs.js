@@ -125,18 +125,37 @@ function writeCanonical({ projectId, outputDir, docType, content, source = 'pipe
  */
 function ensureCanonicalDocs({ projectId, outputDir }) {
   const created = [];
+  let rows = [];
+  try { rows = repo.documents.listByProject(projectId); } catch {}
   for (const docType of Object.keys(CANONICAL)) {
     const absPath = canonicalPath(outputDir, docType);
-    let rows = [];
-    try { rows = repo.documents.listByProject(projectId); } catch {}
-    const indexed = rows.some((r) => r.doc_type === docType);
-    if (fs.existsSync(absPath) && indexed) continue;
+    const row = rows.find((r) => r.doc_type === docType);
+
+    // Migration: a canonical row still pointing into the old placement bin —
+    // move its content to the designed location and re-point the index.
+    if (row && row.path && row.path !== absPath) {
+      try {
+        if (fs.existsSync(row.path)) {
+          const oldText = fs.readFileSync(row.path, 'utf8');
+          const canonText = fs.existsSync(absPath) ? fs.readFileSync(absPath, 'utf8') : '';
+          // The old file wins unless the canonical file already has real
+          // content beyond its skeleton.
+          if (!canonText.trim() || canonText === SKELETONS[docType]) {
+            fs.mkdirSync(path.dirname(absPath), { recursive: true });
+            fs.writeFileSync(absPath, oldText, 'utf8');
+          }
+          fs.rmSync(row.path, { force: true });
+        }
+        repo.documents.repath(row.id, absPath);
+      } catch (e) { console.error('[project-docs migrate]', e && e.message); }
+    }
+
     if (!fs.existsSync(absPath)) {
       fs.mkdirSync(path.dirname(absPath), { recursive: true });
       fs.writeFileSync(absPath, SKELETONS[docType], 'utf8');
       created.push(docType);
     }
-    if (!indexed) {
+    if (!row) {
       try {
         repo.documents.saveGenerated({
           projectId, title: CANONICAL[docType], path: absPath, mimeType: 'text/markdown',
@@ -146,6 +165,19 @@ function ensureCanonicalDocs({ projectId, outputDir }) {
     }
   }
   return created;
+}
+
+/** Current canonical doc texts for the doc-writer pass (spec excluded — it is
+ *  pipeline-appended, never model-written). */
+function readCanonical(projectId, outputDir) {
+  const out = {};
+  for (const docType of ['design', 'pseudocode', 'knowledge']) {
+    try {
+      const p = canonicalPath(outputDir, docType);
+      out[docType] = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+    } catch { out[docType] = ''; }
+  }
+  return out;
 }
 
 /**
@@ -191,4 +223,4 @@ function appendDecisions({ projectId, outputDir, records = [], goal = '' }) {
   return { ...w, added: entries.length };
 }
 
-module.exports = { load, appendDecisions, ensureCanonicalDocs, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME };
+module.exports = { load, appendDecisions, ensureCanonicalDocs, readCanonical, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME };

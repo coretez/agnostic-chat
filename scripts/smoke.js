@@ -905,6 +905,54 @@ app.whenReady().then(async () => {
     repo.mcp.remove(s1.id); repo.mcp.remove(s2.id);
   }
 
+  // ── Doc-writer: the technical-writer pass (deterministic trigger, strict IO) ──
+  {
+    const { updateDocs } = require('../src/main/doc-writer');
+    let seenPrompt = '';
+    const mock = (reply) => ({ chat: async ({ messages }) => { seenPrompt = messages[0].content; return reply; } });
+
+    const good = '# DESIGN — Architecture & Interfaces\n\n## Module map\n- cli — arg parsing\n';
+    const out = await updateDocs({
+      connector: mock({ toolCalls: [{ id: 'x', name: 'submit_docs', args: { design: good, knowledge: 'not markdown', none: false } }] }),
+      model: 'mock', goal: 'add flag',
+      stepResults: [{ step: 1, task: 'edit cli.js', conclusion: 'added --verbose' }],
+      toolTrace: [{ name: 'edit_file', args: { path: 'cli.js' }, ok: true }, { name: 'run_command', args: { command: 'npm test' }, ok: true }],
+      known: 'KNOWN VALUES: x', current: { design: '# DESIGN old', pseudocode: '', knowledge: '# K' }
+    });
+    assert(out.design === good && !out.knowledge && !out.pseudocode, 'doc-writer: valid docs pass, fragments rejected, untouched docs omitted');
+    assert(seenPrompt.includes('technical writer') && seenPrompt.includes('Never narrate') && seenPrompt.includes('cli.js') && seenPrompt.includes('# DESIGN old'), 'doc-writer: prompt carries standards, files touched, and current docs');
+    const none = await updateDocs({ connector: mock({ toolCalls: [{ id: 'x', name: 'submit_docs', args: { none: true, design: good } }] }), model: 'mock', current: {} });
+    assert(Object.keys(none).length === 0, 'doc-writer: none=true wins — no writes');
+    const fail = await updateDocs({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', current: {} });
+    assert(Object.keys(fail).length === 0, 'doc-writer: model failure degrades to no-op, never degrades docs');
+  }
+
+  // ── Record junk filter: decisions are short snake_case, never task prose ──
+  {
+    const { derivePlan } = require('../src/main/plan-derive');
+    const mockChat = { chat: async () => ({ toolCalls: [{ id: 'p', name: 'submit_plan', args: { simple: true, goal: 'g', record: [
+      { key: 'platform', value: 'react-native' },
+      { key: 'project', value: 'Agnostic Chat-Code Project website — a long restated task description that is not a decision at all and rambles on' },
+      { key: 'Project Title', value: 'x' }
+    ] } }] }) };
+    const p = await derivePlan({ connector: mockChat, model: 'mock', userText: 'u', tools: [], store: new VariableStore(), loadedSkills: [], agents: [] });
+    assert(p.record.length === 2 && p.record[0].key === 'platform' && p.record[1].key === 'project_title', 'record filter: long task-prose values dropped, keys normalized to snake_case');
+  }
+
+  // ── Canonical-path migration: old bin rows re-pointed to docs/<NAME>.md ──
+  {
+    const proj = repo.projects.create({ name: 'MigrateProj' });
+    const outDir = path.join(tmp, 'migrate-out');
+    const oldPath = path.join(outDir, 'documents', 'spec', 'spec.md');
+    fs.mkdirSync(path.dirname(oldPath), { recursive: true });
+    fs.writeFileSync(oldPath, '# SPEC old\n\n## Decision records\n- old decision\n');
+    repo.documents.saveGenerated({ projectId: proj.id, title: 'SPEC', path: oldPath, mimeType: 'text/markdown', source: 'pipeline', docType: 'spec', version: 1 });
+    projectDocs.ensureCanonicalDocs({ projectId: proj.id, outputDir: outDir });
+    const specRow = repo.documents.listByProject(proj.id).find((d) => d.doc_type === 'spec');
+    assert(specRow.path === projectDocs.canonicalPath(outDir, 'spec'), 'migration: spec row re-pointed to docs/SPEC.md');
+    assert(fs.readFileSync(specRow.path, 'utf8').includes('old decision') && !fs.existsSync(oldPath), 'migration: old content moved to the designed location, bin file removed');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

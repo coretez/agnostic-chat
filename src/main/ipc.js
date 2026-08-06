@@ -16,6 +16,7 @@ const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
 const { buildCodingTools, hasGit, initGit, commitStep } = require('./coding-tools');
 const projectDocs = require('./project-docs');
+const { updateDocs } = require('./doc-writer');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -966,6 +967,29 @@ function registerIpc() {
           emitProgress({ type: 'done' });
           result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted };
           planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
+
+          // O15: documentation is maintained AUTOMATICALLY after execution —
+          // a dedicated technical-writer pass (doc-writer.js), deterministic
+          // like step-commits and decision records. Plan-step documentation
+          // produced untouched skeletons and narrative sludge; this doesn't.
+          if (coding && !exec.aborted && projectId) {
+            const mutated = (exec.toolTrace || []).some((t) => t.ok !== false && ['write_file', 'edit_file', 'run_command'].includes(t.name));
+            if (mutated) {
+              try {
+                emitProgress({ type: 'process', kind: 'doc-writer', model: fastModel });
+                const upd = await updateDocs({
+                  connector: { chat: chatAbortable }, model: fastModel,
+                  goal: plan.goal, stepResults: exec.stepResults, toolTrace: exec.toolTrace,
+                  known: store.render(), current: projectDocs.readCanonical(projectId, outputDir)
+                });
+                for (const t of ['design', 'pseudocode', 'knowledge']) {
+                  if (!upd[t]) continue;
+                  const w = projectDocs.writeCanonical({ projectId, outputDir, docType: t, content: upd[t], source: 'pipeline' });
+                  emitProgress({ type: 'process', kind: 'doc-update', doc: t, version: w.version });
+                }
+              } catch (e) { console.error('[doc-writer]', e && e.message); }
+            }
+          }
         } else {
           // ── Flat path (unchanged behavior) — with working memory in front of
           // the model so values discovered in earlier turns stay usable.
