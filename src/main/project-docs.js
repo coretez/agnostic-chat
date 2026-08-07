@@ -4,7 +4,9 @@
 //
 // Claude Code / Codex re-derive a project's objective and purpose by reading
 // its code every session. This app inverts that: a canonical doc set lives at
-// a DESIGNED location in the project's output dir (never the generic
+// a DESIGNED location — <working_dir>/docs when the project has a working
+// directory (versioned WITH the code, visible to the agent's own tools),
+// else <output_dir>/docs (never the generic
 // type-bin), the PLANNER reads it to know intent, and the pipeline WRITES it
 // back as things change. Structure (Diátaxis-informed: what/why · structure ·
 // outline · how-it-actually-works):
@@ -100,13 +102,13 @@ const SKELETONS = {
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
 /** The one fixed on-disk location for a canonical doc. */
-function canonicalPath(outputDir, docType) {
-  return path.join(outputDir, DOCS_DIRNAME, `${CANONICAL[docType]}.md`);
+function canonicalPath(docsBase, docType) {
+  return path.join(docsBase, DOCS_DIRNAME, `${CANONICAL[docType]}.md`);
 }
 
 /** Versioned write to a canonical doc's fixed path + library index row. */
-function writeCanonical({ projectId, outputDir, docType, content, source = 'pipeline' }) {
-  const absPath = canonicalPath(outputDir, docType);
+function writeCanonical({ projectId, docsBase, docType, content, source = 'pipeline' }) {
+  const absPath = canonicalPath(docsBase, docType);
   const w = docs.writeFileVersioned(absPath, content);
   try {
     repo.documents.saveGenerated({
@@ -123,12 +125,12 @@ function writeCanonical({ projectId, outputDir, docType, content, source = 'pipe
  * Heals projects created before this structure existed.
  * @returns {string[]} docTypes created this call
  */
-function ensureCanonicalDocs({ projectId, outputDir }) {
+function ensureCanonicalDocs({ projectId, docsBase }) {
   const created = [];
   let rows = [];
   try { rows = repo.documents.listByProject(projectId); } catch {}
   for (const docType of Object.keys(CANONICAL)) {
-    const absPath = canonicalPath(outputDir, docType);
+    const absPath = canonicalPath(docsBase, docType);
     const row = rows.find((r) => r.doc_type === docType);
 
     // Migration: a canonical row still pointing into the old placement bin —
@@ -169,11 +171,11 @@ function ensureCanonicalDocs({ projectId, outputDir }) {
 
 /** Current canonical doc texts for the doc-writer pass (spec excluded — it is
  *  pipeline-appended, never model-written). */
-function readCanonical(projectId, outputDir) {
+function readCanonical(projectId, docsBase) {
   const out = {};
   for (const docType of ['design', 'pseudocode', 'knowledge']) {
     try {
-      const p = canonicalPath(outputDir, docType);
+      const p = canonicalPath(docsBase, docType);
       out[docType] = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
     } catch { out[docType] = ''; }
   }
@@ -203,14 +205,14 @@ function load(projectId, clipPer = 8000) {
  * deterministic bookkeeping on the O8 path, the doc twin of step-commits.
  * @returns {{absPath?, relPath?, version?, added}}
  */
-function appendDecisions({ projectId, outputDir, records = [], goal = '' }) {
+function appendDecisions({ projectId, docsBase, records = [], goal = '' }) {
   const entries = records
     .filter((r) => r && r.key && r.value != null)
     .map((r) => `- ${new Date().toISOString().slice(0, 10)} · **${r.key}** = ${r.value}${goal ? ` — while: ${clip(goal, 120)}` : ''}`);
   if (!entries.length) return { added: 0 };
 
-  ensureCanonicalDocs({ projectId, outputDir });
-  const absPath = canonicalPath(outputDir, 'spec');
+  ensureCanonicalDocs({ projectId, docsBase });
+  const absPath = canonicalPath(docsBase, 'spec');
   let text = '';
   try { if (fs.existsSync(absPath)) text = fs.readFileSync(absPath, 'utf8'); } catch {}
   if (!text.trim()) text = SKELETONS.spec;
@@ -219,7 +221,7 @@ function appendDecisions({ projectId, outputDir, records = [], goal = '' }) {
   // exists (it does in the skeleton), else at the end.
   text += entries.join('\n') + '\n';
 
-  const w = writeCanonical({ projectId, outputDir, docType: 'spec', content: text });
+  const w = writeCanonical({ projectId, docsBase, docType: 'spec', content: text });
   return { ...w, added: entries.length };
 }
 

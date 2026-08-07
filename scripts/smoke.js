@@ -849,31 +849,31 @@ app.whenReady().then(async () => {
     const outDir = path.join(tmp, 'docs-out');
 
     // Bootstrap: the full canonical set appears at docs/<NAME>.md, indexed.
-    const created = projectDocs.ensureCanonicalDocs({ projectId: proj.id, outputDir: outDir });
+    const created = projectDocs.ensureCanonicalDocs({ projectId: proj.id, docsBase: outDir });
     assert(created.length === 4, 'O15: bootstrap creates all four canonical docs');
     for (const t of ['SPEC', 'DESIGN', 'PSEUDOCODE', 'KNOWLEDGE']) {
       assert(fs.existsSync(path.join(outDir, 'docs', `${t}.md`)), `O15: docs/${t}.md exists at its designed location`);
     }
     assert(fs.readFileSync(path.join(outDir, 'docs', 'SPEC.md'), 'utf8').includes('## Decision records'), 'O15: SPEC skeleton is structured, not an empty page');
-    assert(projectDocs.ensureCanonicalDocs({ projectId: proj.id, outputDir: outDir }).length === 0, 'O15: bootstrap is idempotent — existing docs untouched');
+    assert(projectDocs.ensureCanonicalDocs({ projectId: proj.id, docsBase: outDir }).length === 0, 'O15: bootstrap is idempotent — existing docs untouched');
     assert(repo.documents.listByProject(proj.id).filter((d) => projectDocs.CANONICAL[d.doc_type]).length === 4, 'O15: all four indexed in the documents library');
 
     // Ratified decisions append to the SPEC as dated decision records.
-    const w1 = projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, records: [{ key: 'platform', value: 'react-native' }], goal: 'SIEM status app' });
+    const w1 = projectDocs.appendDecisions({ projectId: proj.id, docsBase: outDir, records: [{ key: 'platform', value: 'react-native' }], goal: 'SIEM status app' });
     assert(fs.readFileSync(w1.absPath, 'utf8').includes('**platform** = react-native'), 'O15: ratified decision lands in SPEC as a decision record');
 
     // Later decisions accrete on the SAME document — version bump, prior kept.
-    const w2 = projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, records: [{ key: 'distribution', value: 'internal' }] });
+    const w2 = projectDocs.appendDecisions({ projectId: proj.id, docsBase: outDir, records: [{ key: 'distribution', value: 'internal' }] });
     const specText = fs.readFileSync(w2.absPath, 'utf8');
     assert(w2.version === w1.version + 1 && specText.includes('platform') && specText.includes('distribution'), 'O15: later decisions append + version-bump the same SPEC doc');
     assert(fs.existsSync(path.join(path.dirname(w2.absPath), '.versions')), 'O15: prior SPEC versions preserved in docs/.versions/');
 
     // Canonical writes route to the fixed path (what save_document uses).
-    const wc = projectDocs.writeCanonical({ projectId: proj.id, outputDir: outDir, docType: 'design', content: '# DESIGN\nupdated', source: 'chat' });
+    const wc = projectDocs.writeCanonical({ projectId: proj.id, docsBase: outDir, docType: 'design', content: '# DESIGN\nupdated', source: 'chat' });
     assert(wc.absPath === projectDocs.canonicalPath(outDir, 'design') && wc.version === 2, 'O15: canonical write versions the fixed docs/DESIGN.md, never a new bin file');
 
     // Empty records are a no-op (no doc churn on plain plans).
-    assert(projectDocs.appendDecisions({ projectId: proj.id, outputDir: outDir, records: [] }).added === 0, 'O15: no decisions → no doc write');
+    assert(projectDocs.appendDecisions({ projectId: proj.id, docsBase: outDir, records: [] }).added === 0, 'O15: no decisions → no doc write');
 
     // The planner reads the docs back as its source of truth.
     const block = projectDocs.load(proj.id);
@@ -947,7 +947,7 @@ app.whenReady().then(async () => {
     fs.mkdirSync(path.dirname(oldPath), { recursive: true });
     fs.writeFileSync(oldPath, '# SPEC old\n\n## Decision records\n- old decision\n');
     repo.documents.saveGenerated({ projectId: proj.id, title: 'SPEC', path: oldPath, mimeType: 'text/markdown', source: 'pipeline', docType: 'spec', version: 1 });
-    projectDocs.ensureCanonicalDocs({ projectId: proj.id, outputDir: outDir });
+    projectDocs.ensureCanonicalDocs({ projectId: proj.id, docsBase: outDir });
     const specRow = repo.documents.listByProject(proj.id).find((d) => d.doc_type === 'spec');
     assert(specRow.path === projectDocs.canonicalPath(outDir, 'spec'), 'migration: spec row re-pointed to docs/SPEC.md');
     assert(fs.readFileSync(specRow.path, 'utf8').includes('old decision') && !fs.existsSync(oldPath), 'migration: old content moved to the designed location, bin file removed');

@@ -279,7 +279,7 @@ function registerIpc() {
     if (!p) return { created: [] };
     const base = repo.settings.get('documents_base') || docs.defaultBase();
     const outDir = docs.resolveOutputDir(p, base);
-    return { created: projectDocs.ensureCanonicalDocs({ projectId, outputDir: outDir }) };
+    return { created: projectDocs.ensureCanonicalDocs({ projectId, docsBase: p.working_dir || outDir }) };
   });
 
   // Agents (authored per-project sub-agent definitions)
@@ -646,6 +646,10 @@ function registerIpc() {
       const chatRow = chatId ? repo.chats.get(chatId) : null;
       const globalBase = repo.settings.get('documents_base') || docs.defaultBase();
       const outputDir = docs.resolveOutputDir(project, globalBase);
+      // Canonical docs live WITH the code when a working dir exists — in the
+      // repo (git-versioned, visible to the agent's own file tools and to any
+      // repo analysis), else in the document library.
+      const docsBase = (project && project.working_dir) || outputDir;
       let coding = null;
       if (chatRow && chatRow.coding_mode) {
         if (project && project.working_dir) {
@@ -712,7 +716,7 @@ function registerIpc() {
         // there and versions, never into the deliverables bin.
         const canonType = String(args.type || '').toLowerCase();
         if (projectId && projectDocs.CANONICAL[canonType]) {
-          const w = projectDocs.writeCanonical({ projectId, outputDir, docType: canonType, content: args.content || '', source: 'chat' });
+          const w = projectDocs.writeCanonical({ projectId, docsBase, docType: canonType, content: args.content || '', source: 'chat' });
           emitProgress({ type: 'process', kind: 'doc-update', doc: canonType, version: w.version });
           emitProgress({ type: 'document-saved', title: projectDocs.CANONICAL[canonType], path: w.absPath, relPath: w.relPath, version: w.version, mime: 'text/markdown' });
           return { text: `Updated ${w.relPath} (v${w.version}) — the project's canonical ${canonType} document.` };
@@ -823,7 +827,7 @@ function registerIpc() {
         let docsBlock = '';
         try {
           if (projectId) {
-            projectDocs.ensureCanonicalDocs({ projectId, outputDir });
+            projectDocs.ensureCanonicalDocs({ projectId, docsBase });
             docsBlock = projectDocs.load(projectId);
           }
         } catch (e) { console.error('[project-docs load]', e && e.message); }
@@ -840,17 +844,32 @@ function registerIpc() {
             emitProgress({ type: 'process', kind: 'doc-writer', model: fastModel });
             const upd = await updateDocs({
               connector: { chat: chatAbortable }, model: fastModel,
-              goal, stepResults, toolTrace,
-              known: store.render(), current: projectDocs.readCanonical(projectId, outputDir)
+              goal, stepResults, toolTrace, files: await readChanged(toolTrace),
+              known: store.render(), current: projectDocs.readCanonical(projectId, docsBase)
             });
             for (const t of ['design', 'pseudocode', 'knowledge']) {
               if (!upd[t]) continue;
-              const w = projectDocs.writeCanonical({ projectId, outputDir, docType: t, content: upd[t], source: 'pipeline' });
+              const w = projectDocs.writeCanonical({ projectId, docsBase, docType: t, content: upd[t], source: 'pipeline' });
               emitProgress({ type: 'process', kind: 'doc-update', doc: t, version: w.version });
             }
           } catch (e) { console.error('[doc-writer]', e && e.message); }
         };
         const turnMutated = (trace) => (trace || []).some((t) => t.ok !== false && ['write_file', 'edit_file', 'run_command'].includes(t.name));
+        // The files a trace actually changed, with content — evidence for the
+        // review pass AND the doc-writer (documenting from step summaries
+        // alone produced vague docs; real contents produce real module maps).
+        const readChanged = async (trace) => {
+          if (!coding) return [];
+          const paths = [...new Set((trace || [])
+            .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
+            .map((t) => (t.args && t.args.path) || '').filter(Boolean))].slice(0, 6);
+          const files = [];
+          for (const p of paths) {
+            const r = await coding.call('read_file', { path: p });
+            if (!r.isError) files.push({ path: p, content: String(r.text || '') });
+          }
+          return files;
+        };
         if (scopedTools.length || loadedSkills.length) {
           // Visible + bounded: planning on a thinking fast-model can take
           // minutes — narrate it (the rail/status shows "deriving plan…"
@@ -878,7 +897,7 @@ function registerIpc() {
           }
           if (projectId) {
             try {
-              const w = projectDocs.appendDecisions({ projectId, outputDir, records: plan.record, goal: plan.goal || '' });
+              const w = projectDocs.appendDecisions({ projectId, docsBase, records: plan.record, goal: plan.goal || '' });
               if (w.added) emitProgress({ type: 'process', kind: 'doc-update', doc: 'spec', version: w.version, added: w.added });
             } catch (e) { console.error('[project-docs spec]', e && e.message); }
           }
@@ -976,14 +995,7 @@ function registerIpc() {
           // committed; review can never spiral or break a turn.
           if (coding && !exec.aborted && exec.completed && turnMutated(exec.toolTrace)) {
             try {
-              const changed = [...new Set(exec.toolTrace
-                .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
-                .map((t) => (t.args && t.args.path) || '').filter(Boolean))].slice(0, 6);
-              const files = [];
-              for (const p of changed) {
-                const r = await coding.call('read_file', { path: p });
-                if (!r.isError) files.push({ path: p, content: String(r.text || '') });
-              }
+              const files = await readChanged(exec.toolTrace);
               if (files.length) {
                 emitProgress({ type: 'process', kind: 'review', files: files.length });
                 const rev = await reviewChanges({ connector: { chat: chatAbortable }, model: fastModel, files, goal: plan.goal });

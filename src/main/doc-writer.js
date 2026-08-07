@@ -27,7 +27,7 @@ const SUBMIT_DOCS_TOOL = {
 
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-const DOC_WRITER_PROMPT = ({ goal, filesTouched, stepDigest, known, current }) =>
+const DOC_WRITER_PROMPT = ({ goal, filesTouched, stepDigest, known, current, files = [] }) =>
 `You maintain a software project's canonical documentation after a change was executed. You are a precise technical writer, not a narrator.
 
 STANDARDS — violations make the documentation worthless:
@@ -47,6 +47,10 @@ FILES TOUCHED: ${filesTouched || '(none recorded)'}
 STEP RESULTS:
 ${stepDigest || '(none)'}
 ${known ? '\n' + known : ''}
+
+CHANGED FILE CONTENTS — document from THESE (real module names, real exports,
+real data shapes), never from the step summaries alone:
+${files.length ? files.map((f) => `### ${f.path}\n\`\`\`\n${clip(f.content, 5000)}\n\`\`\``).join('\n\n') : '(no file contents available — be correspondingly conservative)'}
 
 CURRENT DOCUMENTS
 
@@ -73,7 +77,7 @@ function validDoc(s) {
  *   empty object on "nothing to update" AND on any failure — docs are never
  *   degraded by a bad model call.
  */
-async function updateDocs({ connector, model, goal, stepResults = [], toolTrace = [], known = '', current = {} }) {
+async function updateDocs({ connector, model, goal, stepResults = [], toolTrace = [], known = '', current = {}, files = [] }) {
   try {
     const files = [...new Set(toolTrace
       .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
@@ -86,7 +90,7 @@ async function updateDocs({ connector, model, goal, stepResults = [], toolTrace 
     const stepDigest = stepResults
       .map((r) => `- [step ${r.step}] ${clip(r.task, 120)}: ${clip(r.conclusion, 300)}`).join('\n');
 
-    const content = DOC_WRITER_PROMPT({ goal, filesTouched, stepDigest, known, current });
+    const content = DOC_WRITER_PROMPT({ goal, filesTouched, stepDigest, known, current, files });
     const messages = [{ role: 'user', content }];
     let r;
     try {
