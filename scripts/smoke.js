@@ -1007,6 +1007,33 @@ app.whenReady().then(async () => {
     assert(unwrapDdg('//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.b%2Fc') === 'https://a.b/c', 'web: uddg param decoded');
   }
 
+  // ── Dev servers + build environment ───────────────────────────────────────
+  {
+    const devServer = require('../src/main/dev-server');
+    const wd = path.join(tmp, 'srv'); fs.mkdirSync(wd, { recursive: true });
+    const ct2 = buildCodingTools({ root: wd, approveAction: async () => true, buildEnv: { SMOKE_BUILD_VAR: 'yes' }, projectId: 'smoke' });
+
+    // Build env reaches commands; app secrets still do not.
+    process.env.SMOKE_SECRET_CANARY = 'leak';
+    const e = await ct2.call('run_command', { command: 'echo V=${SMOKE_BUILD_VAR:-unset} C=${SMOKE_SECRET_CANARY:-unset}' });
+    delete process.env.SMOKE_SECRET_CANARY;
+    assert(e.text.includes('V=yes') && e.text.includes('C=unset'), 'build env: project vars reach commands, app env stays scrubbed');
+
+    // A long-lived process survives the tool call that started it.
+    const st = await ct2.call('start_server', { command: 'node -e "console.log(\'listening on http://localhost:9931\'); setInterval(()=>{},1e3)"', wait_seconds: 8 });
+    assert(!st.isError && st.text.includes('http://localhost:9931'), 'dev server: starts, stays running, URL detected');
+    assert(devServer.status('smoke').running === true, 'dev server: still alive after the tool call returned');
+    const lg = await ct2.call('server_logs', { lines: 5 });
+    assert(lg.text.includes('listening'), 'dev server: logs captured for diagnosis');
+    await ct2.call('stop_server', {});
+    assert(devServer.status('smoke').running === false, 'dev server: stop_server ends it');
+
+    // A process that dies immediately is reported as an error with its output.
+    const bad = await ct2.call('start_server', { command: 'node -e "console.error(\'boom\'); process.exit(1)"', wait_seconds: 6 });
+    assert(bad.isError && bad.text.includes('boom'), 'dev server: failed start reported with its output');
+    devServer.disposeAll();
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

@@ -28,6 +28,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const devServer = require('./dev-server');
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.cache', '.versions', '__pycache__', '.venv', 'venv']);
 const MAX_READ = 48000;        // chars from read_file before eliding (filter caps again at 24k)
@@ -115,6 +116,35 @@ const TOOLS = [
       },
       required: ['pattern']
     }
+  },
+  {
+    name: 'start_server',
+    description:
+      'Start a long-running process (dev server, watcher) in the working directory and LEAVE IT '
+      + 'RUNNING across turns — use this for `npm run dev`, not run_command, which kills the '
+      + 'process when it returns. Returns the detected URL plus the first output. Starting again '
+      + 'replaces the previous server.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'The command to run, e.g. "npm run dev".' },
+        wait_seconds: { type: 'number', description: 'How long to wait for it to report ready before returning (default 12, max 60).' }
+      },
+      required: ['command']
+    }
+  },
+  {
+    name: 'server_logs',
+    description: 'Read recent output from the running server started with start_server — use to diagnose a failed start or a runtime error.',
+    inputSchema: {
+      type: 'object',
+      properties: { lines: { type: 'number', description: 'How many recent lines to return (default 60).' } }
+    }
+  },
+  {
+    name: 'stop_server',
+    description: 'Stop the running server started with start_server.',
+    inputSchema: { type: 'object', properties: {} }
   },
   {
     name: 'run_command',
@@ -328,17 +358,20 @@ function grepFilesTool(jail, args) {
 // this allowlist crosses into the shell (the -l login shell still sources the
 // user's own rc files, so PATH managers like nvm keep working).
 const SHELL_ENV_ALLOW = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM'];
-function shellEnv() {
+function shellEnv(extra = {}) {
   const env = {};
   for (const k of SHELL_ENV_ALLOW) if (process.env[k] != null) env[k] = process.env[k];
+  // Project build environment (Overview → BUILD ENVIRONMENT): the deliberate
+  // way to give builds what they need without inheriting the app's secrets.
+  for (const [k, v] of Object.entries(extra || {})) if (v != null) env[k] = String(v);
   return env;
 }
 
-function runCommandTool(root, command, timeoutMs) {
+function runCommandTool(root, command, timeoutMs, extraEnv) {
   return new Promise((resolve) => {
     let out = '';
     let timedOut = false;
-    const child = spawn('/bin/zsh', ['-lc', command], { cwd: path.resolve(root), env: shellEnv() });
+    const child = spawn('/bin/zsh', ['-lc', command], { cwd: path.resolve(root), env: shellEnv(extraEnv) });
     const add = (chunk) => { if (out.length < MAX_SHELL_OUT) out += chunk.toString('utf8'); };
     child.stdout.on('data', add);
     child.stderr.on('data', add);
@@ -363,7 +396,7 @@ function runCommandTool(root, command, timeoutMs) {
  *                                    decided by the caller inside this callback)
  * @returns {{tools:Array, names:Set<string>, call:function}}
  */
-function buildCodingTools({ root, docsRoot, approveAction }) {
+function buildCodingTools({ root, docsRoot, approveAction, buildEnv = {}, projectId = null }) {
   const jail = makeJail([root, docsRoot]);
   const names = new Set(TOOLS.map((t) => t.name));
   const gate = async (kind, summary) =>
@@ -406,7 +439,27 @@ function buildCodingTools({ root, docsRoot, approveAction }) {
           if (!cmd) return { text: 'run_command: no command given.', isError: true };
           if (!(await gate('shell', cmd))) return denied('this shell command');
           const timeoutMs = Math.min(Math.max(Number(args.timeout_seconds) || 60, 1), 300) * 1000;
-          return runCommandTool(root, cmd, timeoutMs);
+          return runCommandTool(root, cmd, timeoutMs, buildEnv);
+        }
+        case 'start_server': {
+          const cmd = String(args.command || '').trim();
+          if (!cmd) return { text: 'start_server: no command given.', isError: true };
+          if (!(await gate('shell', cmd + '   [long-running server]'))) return denied('starting this server');
+          const waitMs = Math.min(Math.max(Number(args.wait_seconds) || 12, 1), 60) * 1000;
+          const r = await devServer.start({ projectId, root, command: cmd, env: shellEnv(buildEnv), waitMs });
+          const head = r.running
+            ? `Server running${r.url ? ` at ${r.url}` : ''}${r.ready ? ' (ready)' : ' (still starting)'} — it stays up across turns; stop_server ends it.`
+            : `Server exited (code ${r.exitCode})${r.error ? ` — ${r.error}` : ''}.`;
+          return { text: `${head}\n\n${r.logs.join('\n') || '(no output yet)'}`, isError: !r.running };
+        }
+        case 'server_logs': {
+          const r = devServer.logs(projectId, Number(args.lines) || 60);
+          if (!r.logs.length) return { text: r.running ? '(server running, no output captured yet)' : 'No server is running — start one with start_server.' };
+          return { text: `${r.running ? 'running' : 'stopped'}${r.url ? ` · ${r.url}` : ''}\n\n${r.logs.join('\n')}` };
+        }
+        case 'stop_server': {
+          const r = devServer.stop(projectId);
+          return { text: r.stopped ? `Stopped: ${r.command}` : 'No server was running.' };
         }
         default: return { text: `unknown coding tool: ${name}`, isError: true };
       }

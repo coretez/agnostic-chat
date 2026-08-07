@@ -4,6 +4,7 @@ const { app, BrowserWindow, shell } = require('electron');
 const path = require('node:path');
 
 const { openDatabase } = require('./db');
+const devServer = require('./dev-server');
 const { registerIpc } = require('./ipc');
 const mcpManager = require('./mcp/manager');
 
@@ -82,8 +83,9 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  try { devServer.disposeAll(); } catch {}
   if (process.platform !== 'darwin') app.quit();
 });
 
 // Shut down any live MCP subprocesses cleanly.
-app.on('will-quit', () => { try { mcpManager.disposeAll(); } catch {} });
+app.on('will-quit', () => { try { mcpManager.disposeAll(); } catch {} try { devServer.disposeAll(); } catch {} });

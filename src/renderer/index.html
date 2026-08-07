@@ -228,6 +228,13 @@
               </div>
 
               <div class="ovcard">
+                <div class="ovcard__title">BUILD ENVIRONMENT</div>
+                <div class="ovcard__note">Environment variables for commands and dev servers this project runs — one KEY=VALUE per line. The app's own environment is never inherited, so anything a build needs (NODE_ENV, API base URLs, ports) belongs here.</div>
+                <textarea class="ovcheat" id="ov-env" rows="4" placeholder="NODE_ENV=development&#10;PORT=3000"></textarea>
+                <div class="ovcheat__actions"><div class="spacer"></div><span class="test-result" id="ov-env-msg"></span><button class="btn btn--brand btn--sm" id="ov-env-save" type="button">SAVE</button></div>
+              </div>
+
+              <div class="ovcard">
                 <div class="ovcard__title">PROJECT CHEAT SHEET</div>
                 <div class="ovcard__note">A short brief on this project's objectives, rules, and mode of operation. Kept separate from skills (candidate capabilities) and chat history (past turns) — this is orientation, read by the planner before it decides what's relevant to a task.</div>
                 <textarea class="ovcheat" id="ov-cheat" rows="6" placeholder="e.g. Objective: read-only compliance reporting for one tenant. Rules: never write to Fluency; always cite the report id. Mode of operation: most requests are single-report lookups; multi-tenant comparisons are rare."></textarea>

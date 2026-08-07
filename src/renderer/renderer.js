@@ -415,6 +415,7 @@ function renderOverview() {
     el.ovCheatMsg.textContent = '';
   }
   renderOverviewScope();
+  loadBuildEnv(p.id);
   updateModelSwitch();
 }
 // The output dir may be an explicit setting or a resolved default — ask main.
@@ -429,6 +430,26 @@ async function updateOutputDir(p) {
     el.ovOutChange.textContent = (eff && eff.explicit) ? 'CHANGE' : 'SET (default shown)';
   } catch { el.ovOutPath.textContent = '—'; }
 }
+// Build environment (Overview): KEY=VALUE lines merged into every command and
+// dev server this project runs.
+async function loadBuildEnv(projectId) {
+  const ta = document.getElementById('ov-env');
+  if (!ta || ta.dataset.projectId === String(projectId)) return;
+  try { ta.value = (await window.api.settings.get('build_env', projectId)) || ''; } catch { ta.value = ''; }
+  ta.dataset.projectId = String(projectId);
+  document.getElementById('ov-env-msg').textContent = '';
+}
+async function saveBuildEnv() {
+  const pid = state.currentProjectId; if (!pid) return;
+  const ta = document.getElementById('ov-env');
+  const msg = document.getElementById('ov-env-msg');
+  const bad = ta.value.split('\n').filter((l) => l.trim() && !/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.test(l));
+  if (bad.length) { msg.textContent = `ignoring ${bad.length} malformed line${bad.length === 1 ? '' : 's'}`; msg.className = 'test-result test-result--error'; }
+  else { msg.textContent = 'saved'; msg.className = 'test-result'; }
+  try { await window.api.settings.set('build_env', ta.value, pid); } catch {}
+  setTimeout(() => { msg.textContent = ''; }, 2500);
+}
+
 async function saveCheatSheet() {
   const p = state.projects.find((x) => x.id === state.currentProjectId);
   if (!p) return;
@@ -2578,6 +2599,7 @@ el.agentSave.onclick = saveAgent;
 el.agentCancel.onclick = closeAgentEditor;
 el.railTabs.querySelectorAll('.rail__tab').forEach((b) => { b.onclick = () => showRail(b.dataset.rail); });
 el.ovCheatSave.onclick = saveCheatSheet;
+document.getElementById('ov-env-save').onclick = saveBuildEnv;
 
 el.newProjectBtn.onclick = () => { el.newProjectForm.hidden = !el.newProjectForm.hidden; if (!el.newProjectForm.hidden) el.newProjectInput.focus(); };
 el.heroNewProject.onclick = openNewProjectForm;

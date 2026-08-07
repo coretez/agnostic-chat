@@ -670,7 +670,17 @@ function registerIpc() {
             try { if (gitNow() && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
             return (await askUser({ type: 'action-approve', kind, summary, gitAvailable: gitNow() })) > 0;
           };
-          coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
+          // Project build environment (Overview → BUILD ENVIRONMENT): KEY=VALUE
+          // lines merged into every command and server the model runs, so
+          // builds get what they need without inheriting the app's secrets.
+          let buildEnv = {};
+          try {
+            for (const line of String(repo.settings.get('build_env', projectId) || '').split('\n')) {
+              const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+              if (m) buildEnv[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+            }
+          } catch {}
+          coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction, buildEnv, projectId });
           coding.root = project.working_dir;         // for step-commits (O9)
           coding.gitAvailable = gitAvailable;
           // Web tools join the planning menu in coding mode — docs lookup and
@@ -685,7 +695,10 @@ function registerIpc() {
                 ? 'File writes/edits are auto-approved (git provides rollback); shell commands pause for the user to approve. '
                 : 'Each write, edit, or shell command pauses for the user to approve (no git repo — no rollback). ')
               + 'If an action is declined, continue without it. Read a file before editing it; edit_file replaces an exact '
-              + 'existing string. run_command executes in the working directory.'
+              + 'existing string. run_command executes in the working directory and is KILLED when it '
+              + 'returns — start long-running processes (dev servers, watchers) with start_server, which '
+              + 'keeps them alive across turns; read their output with server_logs.'
+              + (Object.keys(buildEnv).length ? ' Build environment variables set for this project: ' + Object.keys(buildEnv).join(', ') + '.' : '')
           }, ...convo];
           emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable });
         } else {
