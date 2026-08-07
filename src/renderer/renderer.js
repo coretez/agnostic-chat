@@ -845,6 +845,7 @@ function captureProcess(ev) {
   // variable captures. Handled BEFORE the sub-agent branch below so these kinds
   // never get misread as sub-agent updates.
   const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
+  if (ev.kind === 'align') { rec.aligned = ev.decisions || true; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (PLAN_KINDS[ev.kind]) {
     if (ev.kind === 'plan') {
       rec.plan = { goal: ev.goal || '', merge: ev.merge || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
@@ -1253,7 +1254,11 @@ function buildDigest(rec) {
     // re-plans, and working-memory captures. mode "flat-loop" = the planner
     // judged the turn simple (or planning failed/timed out and degraded).
     execution: {
-      mode: rec.plan ? 'plan-and-execute' : 'flat-loop',
+      // An alignment turn is a DELIBERATE outcome (open decisions returned to
+      // the user, no steps by design) — reporting it as 'flat-loop' with a
+      // null plan made every align turn read to the evaluator as a planning
+      // failure.
+      mode: rec.plan ? 'plan-and-execute' : rec.aligned ? 'alignment' : 'flat-loop',
       // Evaluations can run MID-TURN — without this the evaluator reads
       // "N tools offered, 0 called" on a still-running turn as waste.
       turnComplete: !!rec.metrics,

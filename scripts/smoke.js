@@ -957,7 +957,8 @@ app.whenReady().then(async () => {
   {
     const { DERIVE_PROMPT } = require('../src/main/plan-derive');
     const coded = DERIVE_PROMPT('ctx', 'req', true);
-    assert(coded.includes('PLAN BY DEFAULT') && coded.includes('NEVER simple'), 'coding rules: mutating requests are never simple (plan-by-default)');
+    assert(coded.includes('PLAN BY DEFAULT') && coded.includes('NEVER return simple=true'), 'coding rules: mutating requests are never simple (plan-by-default)');
+    assert(coded.includes('stages, phases, or an ordered sequence') && coded.includes('documentation, or a recommendation rather than code'), 'coding rules: staged/design requests plan too, even when the deliverable is prose');
     assert(DERIVE_PROMPT('ctx', 'req', false).includes('PLAN BY DEFAULT') === false, 'coding rules: plan-by-default applies only in coding mode');
     const ctx = planContext({ repoMap: 'cli.js\ntest/cli.test.js' });
     assert(ctx.includes('WORKING DIRECTORY MAP') && ctx.includes('real files') && ctx.includes('cli.js'), 'planner context: working-directory map feeds Pass 2 so steps name real paths');
