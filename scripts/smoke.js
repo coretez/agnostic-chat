@@ -990,6 +990,22 @@ app.whenReady().then(async () => {
     assert(DP('c', 'r', true).includes('three layers'), 'coding rules: verify contract states all three layers');
   }
 
+  // ── Web tools: offline parser discipline (network itself not smoke-tested) ──
+  {
+    const { parseDdg, htmlToText, unwrapDdg } = require('../src/main/web-tools');
+    const ddg = '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&rut=x">Example <b>Docs</b></a>'
+      + '<td class="result__snippet">The &amp;official&amp; docs</td>'
+      + '<a class="result__a" href="javascript:void(0)">junk</a>'
+      + '<a class="result__a" href="https://direct.example.org/page">Direct</a>';
+    const r = parseDdg(ddg);
+    assert(r.length === 2 && r[0].url === 'https://example.com/docs' && r[0].title === 'Example Docs', 'web: DDG redirect links unwrapped, tags stripped from titles');
+    assert(r[1].url === 'https://direct.example.org/page', 'web: non-http schemes dropped, direct links kept');
+    assert(r[0].snippet.includes('&official&'), 'web: snippets entity-decoded');
+    const txt = htmlToText('<html><script>evil()</script><style>x{}</style><h1>Title</h1><p>Para &amp; more</p><li>item</li></html>');
+    assert(!txt.includes('evil') && txt.includes('Title') && txt.includes('Para & more') && txt.includes('- item'), 'web: htmlToText strips scripts/styles, keeps structure');
+    assert(unwrapDdg('//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.b%2Fc') === 'https://a.b/c', 'web: uddg param decoded');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

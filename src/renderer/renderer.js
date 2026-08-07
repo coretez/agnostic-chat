@@ -1302,13 +1302,29 @@ function turn(text, role, model) {
     div.className = `turn turn--${role}`;
     div.innerHTML = `<div class="turn__who turn__who--${role}">${escapeHtml(who)}</div><div class="turn__body"></div>`;
     const bodyEl = div.querySelector('.turn__body');
-    if (role === 'assistant') renderAssistantBody(bodyEl, text || '');
+    if (role === 'assistant') { renderAssistantBody(bodyEl, text || ''); div._copyText = text || ''; addCopyBtn(div); }
     else bodyEl.textContent = text;
   }
   el.messages.appendChild(div);
   el.messages.scrollTop = el.messages.scrollHeight;
   return div;
 }
+// Copy the response's raw markdown to the clipboard — appears on hover.
+function addCopyBtn(div) {
+  const b = document.createElement('button');
+  b.className = 'copybtn'; b.type = 'button'; b.title = 'Copy response';
+  b.textContent = '⧉';
+  b.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(div._copyText || '');
+      b.textContent = '✓';
+      setTimeout(() => { b.textContent = '⧉'; }, 1200);
+    } catch {}
+  };
+  div.appendChild(b);
+  return b;
+}
+
 function toolChips(turnEl, trace) {
   if (!trace || !trace.length) return;
   const row = document.createElement('div');
@@ -1721,6 +1737,8 @@ async function submit() {
     let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
     if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
     renderAssistantBody(body, finalText);
+    thinking._copyText = finalText;
+    if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);
     if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
     if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
     el.messages.scrollTop = el.messages.scrollHeight;

@@ -467,6 +467,12 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .alignform__rec { font-size: 11px; color: var(--ink3); }
 .alignform__bar { display: flex; margin-top: 6px; }
 
+/* Copy-response button (assistant turns, hover) */
+.turn--assistant { position: relative; }
+.copybtn { position: absolute; top: 0; right: 6px; width: 24px; height: 22px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink3); font-size: 12px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity 0.12s; }
+.turn--assistant:hover .copybtn { opacity: 1; }
+.copybtn:hover { color: var(--brand); border-color: var(--brand); }
+
 /* Documents page: library sections + inline reader */
 .docsec { font-family: var(--mono); font-size: 9.5px; letter-spacing: 1.2px; color: var(--ink3); margin: 18px 0 8px; }
 .docreader { margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); overflow: hidden; }

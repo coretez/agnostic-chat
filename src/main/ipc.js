@@ -18,6 +18,7 @@ const { selectContext, applyToolCeiling } = require('./context-select');
 const { buildCodingTools, hasGit, initGit, commitStep } = require('./coding-tools');
 const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
+const webTools = require('./web-tools');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -672,7 +673,9 @@ function registerIpc() {
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction });
           coding.root = project.working_dir;         // for step-commits (O9)
           coding.gitAvailable = gitAvailable;
-          scopedTools = [...scopedTools, ...coding.tools];
+          // Web tools join the planning menu in coding mode — docs lookup and
+          // error-message searches are part of real development.
+          scopedTools = [...scopedTools, ...coding.tools, ...webTools.WEB_TOOLS];
           convo = [{
             role: 'system',
             content: 'CODING MODE: file and shell tools are available. Allowed directories: the project working directory '
@@ -695,7 +698,9 @@ function registerIpc() {
       // tools (no `__` namespace) route to the pack; everything else to MCP.
       const rawCallTool = (name, args) => (coding && coding.names.has(name))
         ? coding.call(name, args)
-        : mcpManager.callTool(name, args, toolset.routes);
+        : webTools.names.has(name)
+          ? webTools.call(name, args)
+          : mcpManager.callTool(name, args, toolset.routes);
 
       // Authored per-project agents the orchestrator can delegate to by name.
       let authoredAgents = [];
@@ -705,7 +710,9 @@ function registerIpc() {
         : '';
       const delegateTool = { ...DELEGATE_TOOL, description: DELEGATE_TOOL.description + roster };
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
-      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...scopedTools];
+      // Web tools ride scopedTools in coding mode; plain chats get them here
+      // (execution-only) so internet access exists everywhere without dupes.
+      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...(coding ? [] : webTools.WEB_TOOLS), ...scopedTools];
 
       // Document placement template (user-configurable; global default).
       // `project`/`outputDir` were resolved above (coding-mode block).
