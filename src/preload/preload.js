@@ -87,6 +87,8 @@ contextBridge.exposeInMainWorld('api', {
     rename: (id, title) => ipcRenderer.invoke('chats:rename', { id, title }),
     setModel: (id, model) => ipcRenderer.invoke('chats:setModel', { id, model }),
     setCodingMode: (id, on) => ipcRenderer.invoke('chats:setCodingMode', { id, on }),
+    variables: (id) => ipcRenderer.invoke('chats:variables', { id }),
+    setVariable: (id, key, value) => ipcRenderer.invoke('chats:setVariable', { id, key, value }),
     archive: (id) => ipcRenderer.invoke('chats:archive', { id })
   },
 

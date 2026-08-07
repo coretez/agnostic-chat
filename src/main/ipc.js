@@ -19,6 +19,7 @@ const { buildCodingTools, hasGit, initGit, commitStep } = require('./coding-tool
 const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
 const webTools = require('./web-tools');
+const projectFacts = require('./project-facts');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -318,6 +319,19 @@ function registerIpc() {
   ipcMain.handle('chats:rename', (_e, { id, title }) => repo.chats.rename(id, title));
   ipcMain.handle('chats:setModel', (_e, { id, model }) => repo.chats.setModel(id, model));
   ipcMain.handle('chats:setCodingMode', (_e, { id, on }) => repo.chats.setCodingMode(id, on));
+  // Tracked variables (working memory) — visible and editable by the user.
+  ipcMain.handle('chats:variables', (_e, { id }) => {
+    try { return VariableStore.fromJSON(repo.chats.getVariables(id)).toJSON(); } catch { return []; }
+  });
+  ipcMain.handle('chats:setVariable', (_e, { id, key, value }) => {
+    const store = VariableStore.fromJSON(repo.chats.getVariables(id));
+    // A value the user typed is `user` confidence: it outranks anything the
+    // model observed and survives contradiction.
+    if (value == null || value === '') store.remove ? store.remove(key) : store.set({ key, value: '' }, { confidence: 'user', source: 'user' });
+    else store.set({ key, value }, { confidence: 'user', source: 'user' });
+    repo.chats.setVariables(id, store.size ? JSON.stringify(store.toJSON()) : null);
+    return store.toJSON();
+  });
   ipcMain.handle('chats:archive', (_e, { id }) => repo.chats.archive(id));
   ipcMain.handle('messages:list', (_e, { chatId }) => repo.messages.listByChat(chatId));
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
@@ -817,6 +831,14 @@ function registerIpc() {
         try { store.captureFromArgs(args, { source: name }); } catch {}
         const out = await rawCallTool(name, args);
         try { if (!out.isError) store.captureFromResult(name, out.text || ''); } catch {}
+        // Coding-mode common variables (dev server URL/port, build/test/lint
+        // commands, package manager) — the same durable-facts treatment MCP
+        // ids get, so the next turn never re-derives how to run this project.
+        try {
+          for (const key of projectFacts.capture(store, { name, args, text: out.text || '', ok: !out.isError })) {
+            emitProgress({ type: 'process', kind: 'var-capture', key, from: 'project' });
+          }
+        } catch {}
         return out;
       };
 

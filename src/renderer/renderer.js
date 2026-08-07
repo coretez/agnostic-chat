@@ -371,6 +371,7 @@ function showFirstRun() {
   el.tbSlug.textContent = '';
 }
 function showRail(name) {
+  if (name === 'vars') renderVars();
   el.railTabs.querySelectorAll('.rail__tab').forEach((b) => b.classList.toggle('is-active', b.dataset.rail === name));
   document.querySelectorAll('.rail__panel').forEach((p) => { p.hidden = p.dataset.rail !== name; });
 }
@@ -724,6 +725,32 @@ document.getElementById('docs-reveal').onclick = async () => {
   try { const eff = await window.api.projects.effectiveOutputDir(state.currentProjectId); if (eff && eff.outputDir) window.api.projects.revealPath(eff.outputDir); } catch {}
 };
 document.getElementById('doc-reader-close').onclick = () => { document.getElementById('doc-reader').hidden = true; };
+
+// ── KNOWN VALUES rail: what this chat has learned, visible and editable ────
+async function renderVars() {
+  const list = document.getElementById('vars-list');
+  const head = document.getElementById('vars-head');
+  if (!list || !state.currentChatId) return;
+  let vars = [];
+  try { vars = await window.api.chats.variables(state.currentChatId); } catch {}
+  head.textContent = `KNOWN VALUES · ${vars.length}`;
+  list.innerHTML = '';
+  for (const v of vars) {
+    const li = document.createElement('li');
+    li.className = 'raillist__item';
+    li.innerHTML = `<div class="title">${escapeHtml(v.key)}</div>`
+      + `<div class="sub">${escapeHtml(String(v.value).slice(0, 90))} · ${escapeHtml(v.confidence || 'observed')}</div>`;
+    li.title = 'Click to edit — your value outranks anything the model observed. Empty clears it.';
+    li.onclick = async () => {
+      const next = window.prompt(`${v.key}\n\nEdit the value (empty clears it):`, String(v.value));
+      if (next === null) return;
+      try { await window.api.chats.setVariable(state.currentChatId, v.key, next.trim()); } catch {}
+      renderVars();
+    };
+    list.appendChild(li);
+  }
+  document.getElementById('vars-note').hidden = vars.length > 0;
+}
 
 // Read-only summary in the chat rail — points at OVERVIEW for changes.
 function renderScope() {
@@ -1449,6 +1476,7 @@ async function selectChat(id) {
   updateCodeToggle();
   updateComposerMeta();
   updateModelSwitch();
+  renderVars();
   updateCtxMeter();
   renderChats();
   showPage('chat');
@@ -1773,7 +1801,7 @@ async function submit() {
     thinking.className = 'turn turn--meta';
     thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(err?.message ?? 'request failed')}</div>`;
   } finally {
-    unsub(); planStop();
+    unsub(); planStop(); renderVars();
     el.send.dataset.mode = ''; el.send.textContent = 'SEND'; el.send.disabled = false;
     document.documentElement.classList.remove('busy'); el.input.focus();
   }

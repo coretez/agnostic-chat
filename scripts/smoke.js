@@ -1034,6 +1034,33 @@ app.whenReady().then(async () => {
     devServer.disposeAll();
   }
 
+  // ── Project facts: common coding variables captured deterministically ─────
+  {
+    const facts = require('../src/main/project-facts');
+    const store = new VariableStore();
+    facts.capture(store, { name: 'start_server', args: { command: 'npm run dev -- --port 3111' }, text: 'ready - Local: http://localhost:3111', ok: true });
+    assert(store.get('dev_server_url') === 'http://localhost:3111' && store.get('dev_server_port') === '3111', 'facts: dev server URL + port captured from the server output');
+    assert(store.get('dev_command') === 'npm run dev -- --port 3111' && store.get('package_manager') === 'npm', 'facts: dev command and package manager captured');
+
+    facts.capture(store, { name: 'run_command', args: { command: 'npm test' }, text: 'ok', ok: true });
+    facts.capture(store, { name: 'run_command', args: { command: 'npm run build' }, text: 'ok', ok: true });
+    assert(store.get('test_command') === 'npm test' && store.get('build_command') === 'npm run build', 'facts: test and build commands captured from what actually ran');
+
+    // A failing command is not "the way to do it"; a failed start leaves no URL.
+    facts.capture(store, { name: 'run_command', args: { command: 'pytest -q' }, text: 'boom', ok: false });
+    assert(store.get('test_command') === 'npm test', 'facts: a failed command does not overwrite a working one');
+    const s2 = new VariableStore();
+    facts.capture(s2, { name: 'start_server', args: { command: 'npm run dev' }, text: 'Error: port in use', ok: false });
+    assert(s2.get('dev_server_url') === undefined, 'facts: a failed start records no URL');
+
+    // User-stated values outrank observation (confidence ranking).
+    store.set({ key: 'test_command', value: 'npm run test:ci' }, { confidence: 'user', source: 'user' });
+    facts.capture(store, { name: 'run_command', args: { command: 'npm test' }, text: 'ok', ok: true });
+    assert(store.get('test_command') === 'npm run test:ci', 'facts: user-set value is not overwritten by observation');
+
+    assert(facts.capture(store, { name: 'read_file', args: { path: 'a.js' }, text: 'x', ok: true }).length === 0, 'facts: non-command tools contribute nothing');
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);

@@ -106,6 +106,7 @@
                 <div class="rail__tabs" id="rail-tabs">
                   <button class="rail__tab is-active" data-rail="docs" type="button">DOCS</button>
                   <button class="rail__tab" data-rail="plan" type="button">PLAN</button>
+                  <button class="rail__tab" data-rail="vars" type="button">VALUES</button>
                   <button class="rail__tab" data-rail="scope" type="button">SCOPE</button>
                 </div>
                 <div class="rail__body">
@@ -118,6 +119,11 @@
                     <div class="rail__head"><span>ACTIVITY</span><span class="spacer"></span><span id="plan-elapsed" class="plan-elapsed"></span></div>
                     <ul class="planlist" id="plan-list"></ul>
                     <div class="rail__note" id="plan-note">The agent's live steps appear here while it works.</div>
+                  </div>
+                  <div class="rail__panel" data-rail="vars" hidden>
+                    <div class="rail__head"><span id="vars-head">KNOWN VALUES</span></div>
+                    <ul class="raillist" id="vars-list"></ul>
+                    <div class="rail__note" id="vars-note">Values this chat has learned — ids and locators from tools, and how to build, test, and run this project. Re-injected into every step; click one to edit or clear it.</div>
                   </div>
                   <div class="rail__panel" data-rail="scope" hidden>
                     <div class="rail__head"><span id="scope-skills-head">SKILLS</span><button class="icon-btn" id="scope-skills-manage" type="button" title="Manage skills">+</button></div>
