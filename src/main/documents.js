@@ -15,7 +15,14 @@ const os = require('node:os');
 const DEFAULT_TEMPLATE = 'documents/{type}/{tenant}/{title}-{period}.{ext}';
 
 /** Default root for the whole app's documents (user-overridable via settings). */
-function defaultBase() { return path.join(os.homedir(), 'Documents', 'Agnostic Chat'); }
+function defaultBase() {
+  // Product renamed to Shamrock. An existing library at the old path keeps
+  // working — renaming the default would strand every document already
+  // written there.
+  const legacy = path.join(os.homedir(), 'Documents', 'Agnostic Chat');
+  try { if (fs.existsSync(legacy)) return legacy; } catch {}
+  return path.join(os.homedir(), 'Documents', 'Shamrock');
+}
 
 /** Where a project's documents live: explicit per-project output_dir, else <base>/<project>. */
 function resolveOutputDir(project, base) {

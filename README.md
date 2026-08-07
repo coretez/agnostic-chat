@@ -1,4 +1,4 @@
-# Agnostic Chat
+# Shamrock
 
 An LLM-agnostic, project-centric desktop chat app for coding and document work — think a Claude Code–style workflow where you can switch the model in the background (OpenAI, Anthropic, Qwen, Kimi, Gemini) and keep a project's chats, documents, skills, and keys together instead of stranding them inside a single conversation.
 

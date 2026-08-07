@@ -9,7 +9,7 @@
 const { spawn } = require('node:child_process');
 
 const PROTOCOL_VERSION = '2024-11-05';
-const CLIENT_INFO = { name: 'Agnostic Chat', version: '0.1.0' };
+const CLIENT_INFO = { name: 'Shamrock', version: '0.1.0' };
 
 function shapeTools(result) {
   const tools = (result && result.tools) || [];

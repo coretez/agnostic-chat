@@ -1,10 +1,10 @@
-# Agnostic Chat — Design Specification
+# Shamrock — Design Specification
 
 > Status: living document · Last updated 2026-08-01
 > Source of truth for the UI is the interactive prototype in
-> `Interactive design system demo/Agnostic Chat - Direction B.dc.html`
+> `Interactive design system demo/Shamrock - Direction B.dc.html`
 > (**Direction B**, the committed visual language — a dark terminal/developer
-> aesthetic). `Agnostic Chat.dc.html` (**Direction A**, Apple-native) is the same
+> aesthetic). `Shamrock.dc.html` (**Direction A**, Apple-native) is the same
 > information architecture in an alternate skin, retained as a possible future
 > appearance toggle (see §9). The two differ only in visual language, not IA.
 
@@ -12,7 +12,7 @@
 
 ## 1. Product
 
-Agnostic Chat is an **LLM-agnostic, project-centric desktop app** for coding,
+Shamrock is an **LLM-agnostic, project-centric desktop app** for coding,
 document management, and process work. It is built in Electron but must feel
 indistinguishable from a native macOS (AppKit) application.
 
@@ -80,7 +80,7 @@ Electron with a hard main/renderer boundary.
   folder, with the DB as the index over them.
 
 ### Canonical data location
-`app.getPath('userData')` (macOS: `~/Library/Application Support/Agnostic Chat/`).
+`app.getPath('userData')` (macOS: `~/Library/Application Support/Shamrock/`).
 Layout:
 ```
 <userData>/

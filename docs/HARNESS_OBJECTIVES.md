@@ -1,6 +1,6 @@
 # Coding Harness — Objectives (SPEC)
 
-What the Agnostic Chat coding harness must do, derived from studying how the
+What the Shamrock coding harness must do, derived from studying how the
 current generation of harnesses is designed — Claude Code, Kimi Code CLI,
 OpenCode, Aider — and from delivery-pipeline platforms (Harness.io) whose
 gates/rollback/audit discipline predates all of them. Each objective has an

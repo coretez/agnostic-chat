@@ -42,10 +42,10 @@ Configurability is a first-class requirement, not just a default:
 - **Per-project output dir**, settable in OVERVIEW (folder picker + Reveal),
   re-pointable anywhere (repo subfolder, shared drive, iCloud, …).
 - **Global default base** (a setting) so new projects inherit the user's preferred
-  root — default `~/Documents/Agnostic Chat/`.
+  root — default `~/Documents/Shamrock/`.
 - Effective default per project: `<global base>/<Project Name>/`.
 Each project gets an **output directory**, distinct from `working_dir`:
-- Default: `~/Documents/Agnostic Chat/<Project Name>/` — in the user's Documents,
+- Default: `~/Documents/Shamrock/<Project Name>/` — in the user's Documents,
   trivially findable, never junking a code repo.
 - If the project's `working_dir` is set and the user prefers in-repo docs, they can
   point the output dir at `<working_dir>/documents/`.
@@ -115,7 +115,7 @@ traceable to what made them, versioned, and manageable** — the opposite of a j
 session folder.
 
 ## Decisions (2026-08-03)
-1. **Default output location: `~/Documents/Agnostic Chat/<Project Name>/`** — per
+1. **Default output location: `~/Documents/Shamrock/<Project Name>/`** — per
    project, in the user's Documents (findable, never junks a repo). Per-project
    configurable (can be re-pointed, e.g. into a repo), settable in OVERVIEW.
 2. **Organization: by topic/skill** — `documents/reports/`, `documents/investigations/`,

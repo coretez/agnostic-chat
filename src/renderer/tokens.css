@@ -30,9 +30,9 @@
   --hov: #232529;
   --sel: #2a2c31;
 
-  --brand: #e04452;
-  --brand-deep: #b3242e;
-  --brand-soft: rgba(224, 68, 82, 0.14);
+  --brand: #3faa63;
+  --brand-deep: #2c7d48;
+  --brand-soft: rgba(63, 170, 99, 0.16);
   --green: #3ec97a;
   --blue: #5b9bd8;
 
@@ -61,9 +61,9 @@
   --hov: #eeece6;
   --sel: #e6e3db;
 
-  --brand: #b3242e;
-  --brand-deep: #8f1c24;
-  --brand-soft: #f8e8eb;
+  --brand: #1f7a43;
+  --brand-deep: #14572f;
+  --brand-soft: #e4f2e8;
   --green: #2e9e5b;
   --blue: #2f73b7;
 }

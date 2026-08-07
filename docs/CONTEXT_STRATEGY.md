@@ -7,7 +7,7 @@ tool-result clearing, memory, sub-agents) — and they all **hide it**. You get 
 black box that silently rewrites your prompt and occasionally forgets things,
 with no way to see why or to intervene.
 
-**Agnostic Chat's differentiator: the context engine is a glass box.** Every
+**Shamrock's differentiator: the context engine is a glass box.** Every
 transformation applied to the prompt before it reaches the model is a *visible,
 inspectable, and (eventually) overridable* event. This is the concrete,
 shippable form of the "prompt protection" idea the project started with.

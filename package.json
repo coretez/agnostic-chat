@@ -1,7 +1,7 @@
 {
   "name": "agnostic-chat",
   "version": "0.1.0",
-  "description": "An LLM-agnostic, coding-focused desktop chat app with browser access and prompt protection.",
+  "description": "Shamrock — an LLM-agnostic, coding-focused desktop harness with a glass-box context engine.",
   "main": "src/main/main.js",
   "author": "Chris",
   "license": "MIT",
@@ -14,7 +14,7 @@
   },
   "build": {
     "appId": "com.fluencysecurity.agnosticchat",
-    "productName": "Agnostic Chat",
+    "productName": "Shamrock",
     "copyright": "Copyright © 2026 Chris Jordan",
     "directories": {
       "buildResources": "build",

@@ -77,7 +77,7 @@ async function registerClient(endpoint, redirectUri, scope) {
   const r = await fetchJson(endpoint, {
     method: 'POST',
     body: {
-      client_name: 'Agnostic Chat',
+      client_name: 'Shamrock',
       redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
