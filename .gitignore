@@ -11,3 +11,7 @@ out/
 
 # Generated test/preview artifact (built by scripts/mkpreview or /tmp harness)
 src/renderer/preview.html
+
+# Local build output + OS cruft
+build/*.iconset/
+*.icns.tmp

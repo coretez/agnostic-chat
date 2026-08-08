@@ -159,3 +159,21 @@ DERIVE_PROMPT carries the documentation rule. **Status: THIS CHANGE.**
 | O11 | verify layers 2–3: review + fix cycle | `src/main/review.js` + `ipc.js` review pass |
 | O13 | checkpoint/revert | planned — rides O9 |
 | O15 | canonical project docs | `src/main/project-docs.js` + `plan-derive.js` docs context/rule + `ipc.js` spec append |
+
+---
+
+## Licensing
+
+Shamrock is offered under **FSL-1.1-ALv2** (`LICENSE`), copyright 2026
+Christopher Jordan. Free for all use including internal commercial use and
+client work; a commercial license is required only for *competing use* —
+offering Shamrock, or something substantially similar built from it, as a
+product or service to others. Every release converts to Apache 2.0 two years
+after publication.
+
+Decided because: the product is a desktop app, so AGPL's network clause has no
+leverage; pure non-commercial terms would block the internal adoption the
+distribution model depends on; and MIT gives away the commercial path entirely.
+The name and clover mark are trademarks held outside the FSL grant, and
+contributions carry a DCO sign-off so the copyright chain stays clean enough to
+keep selling commercial licenses. See `LICENSING.md`.

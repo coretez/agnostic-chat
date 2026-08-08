@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Shamrock — an LLM-agnostic, coding-focused desktop harness with a glass-box context engine.",
   "main": "src/main/main.js",
-  "author": "Chris",
-  "license": "MIT",
+  "author": "Christopher Jordan",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -15,7 +15,7 @@
   "build": {
     "appId": "com.fluencysecurity.agnosticchat",
     "productName": "Shamrock",
-    "copyright": "Copyright © 2026 Chris Jordan",
+    "copyright": "Copyright © 2026 Christopher Jordan",
     "directories": {
       "buildResources": "build",
       "output": "dist"

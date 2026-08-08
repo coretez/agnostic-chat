@@ -1,27 +1,36 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <title>Shamrock</title>
-  <desc>A three-leaf clover whose stem tapers into a chat tail.</desc>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Shamrock ribbon mark</title>
+  <desc>A modern green three-leaf shamrock drawn as a continuous rounded line with a right-curving stem.</desc>
+
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#F7FCF8"/><stop offset="1" stop-color="#E2F1E6"/>
+    <radialGradient id="tile" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(512 418) rotate(90) scale(680)">
+      <stop stop-color="#FBFEFC"/>
+      <stop offset="1" stop-color="#E4F2E8"/>
+    </radialGradient>
+    <linearGradient id="ribbon" x1="288" y1="260" x2="690" y2="780" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#075F43"/>
+      <stop offset="0.48" stop-color="#0A9254"/>
+      <stop offset="1" stop-color="#20C96A"/>
     </linearGradient>
-    <!-- Local user space: the mark is drawn around the origin, so the gradient
-         spans the artwork itself rather than the outer canvas. -->
-    <linearGradient id="leaf" x1="-190" y1="-215" x2="180" y2="200" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5BE293"/>
-      <stop offset="0.42" stop-color="#22A863"/>
-      <stop offset="1" stop-color="#0A4A2E"/>
-    </linearGradient>
+    <filter id="lift" x="140" y="130" width="750" height="760" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#06402D" flood-opacity="0.12"/>
+    </filter>
   </defs>
 
   <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
+  <rect x="33" y="33" width="958" height="958" rx="223" stroke="#D2E7D7" stroke-width="2"/>
 
-  <g transform="translate(512,446) scale(1.46)" fill="url(#leaf)">
-    <!-- Stem: tapers to a point like a speech-bubble tail. -->
-    <path d="M-30,-4 C-24,66 -2,132 52,190 C62,200 48,214 36,204 C-16,160 -46,84 -50,0 Z"/>
-    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z"/>
-    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z" transform="rotate(122)"/>
-    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z" transform="rotate(238)"/>
+  <g filter="url(#lift)" fill="none" stroke-width="46"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- Stem enters from lower-left and flows toward the upper-right junction. -->
+    <path d="M400 790 C462 745 488 668 498 548" stroke="#16B963"/>
+
+    <!-- Clockwise color layering makes each ribbon pass over the previous one. -->
+    <ellipse cx="387" cy="540" rx="150" ry="96" transform="rotate(12 387 540)" stroke="#08784A"/>
+    <ellipse cx="512" cy="374" rx="96" ry="150" stroke="#075F43"/>
+    <ellipse cx="637" cy="540" rx="150" ry="96" transform="rotate(-12 637 540)" stroke="#11A95A"/>
   </g>
+
 </svg>
