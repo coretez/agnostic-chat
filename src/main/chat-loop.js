@@ -13,7 +13,7 @@ const { filterToolResult } = require('./filter');
  * @param {string}   o.model
  * @param {Array}    o.messages  neutral history [{role, content, toolCalls?, toolCallId?}]
  * @param {Array}    o.tools     [{name, description, inputSchema}]
- * @param {number}  [o.maxIters=6]
+ * @param {number}  [o.maxIters=10]
  * @returns {Promise<{reply:string, toolTrace:Array, iterations:number}>}
  */
 async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit, isAborted }) {
