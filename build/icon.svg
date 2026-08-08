@@ -1,53 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <title>Shamrock geometric company mark</title>
-  <desc>Three interlocking green loops form a modern abstract shamrock.</desc>
-
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <title>Shamrock</title>
+  <desc>A three-leaf clover whose stem tapers into a chat tail.</desc>
   <defs>
-    <radialGradient id="tile" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
-                    gradientTransform="translate(512 430) rotate(90) scale(650)">
-      <stop offset="0" stop-color="#FAFDFA"/>
-      <stop offset="1" stop-color="#E7F3E9"/>
-    </radialGradient>
-
-    <linearGradient id="evergreenTop" x1="400" y1="166" x2="610" y2="530" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0B694B"/>
-      <stop offset="1" stop-color="#06432F"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7FCF8"/><stop offset="1" stop-color="#E2F1E6"/>
     </linearGradient>
-    <linearGradient id="evergreenLeft" x1="188" y1="470" x2="550" y2="784" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0A6347"/>
-      <stop offset="1" stop-color="#043D2B"/>
+    <!-- Local user space: the mark is drawn around the origin, so the gradient
+         spans the artwork itself rather than the outer canvas. -->
+    <linearGradient id="leaf" x1="-190" y1="-215" x2="180" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5BE293"/>
+      <stop offset="0.42" stop-color="#22A863"/>
+      <stop offset="1" stop-color="#0A4A2E"/>
     </linearGradient>
-    <linearGradient id="fernRight" x1="556" y1="451" x2="844" y2="770" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#16C765"/>
-      <stop offset="1" stop-color="#078B47"/>
-    </linearGradient>
-
-    <filter id="softLift" x="110" y="90" width="804" height="790" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0B3D2B" flood-opacity="0.10"/>
-    </filter>
   </defs>
 
-  <!-- macOS-safe rounded tile with optical padding built into the artwork. -->
   <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
-  <rect x="33" y="33" width="958" height="958" rx="223" stroke="#D5E9D9" stroke-width="2"/>
 
-  <!--
-    Three equal-radius, equal-weight loops make the construction reproducible
-    and stable. Their shared triangular counterspace creates the shamrock.
-  -->
-  <g filter="url(#softLift)" fill="none" stroke-width="116">
-    <circle cx="512" cy="350" r="180" stroke="url(#evergreenTop)"/>
-    <circle cx="365" cy="605" r="180" stroke="url(#evergreenLeft)"/>
-    <circle cx="659" cy="605" r="180" stroke="url(#fernRight)"/>
+  <g transform="translate(512,446) scale(1.46)" fill="url(#leaf)">
+    <!-- Stem: tapers to a point like a speech-bubble tail. -->
+    <path d="M-30,-4 C-24,66 -2,132 52,190 C62,200 48,214 36,204 C-16,160 -46,84 -50,0 Z"/>
+    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z"/>
+    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z" transform="rotate(122)"/>
+    <path d="M0,0 C-88,-62 -138,-134 -92,-188 C-58,-226 -12,-210 0,-156 C12,-210 58,-226 92,-188 C138,-134 88,-62 0,0 Z" transform="rotate(238)"/>
   </g>
-
-  <!-- A soft triangular counter replaces a mechanical cutout at the junction. -->
-  <path d="M512 452
-           C521 476 541 493 565 502
-           C546 516 531 533 520 556
-           C516 564 508 564 504 556
-           C493 533 478 516 459 502
-           C483 493 503 476 512 452Z"
-        fill="#F7FBF7"/>
 </svg>
