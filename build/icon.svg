@@ -1,40 +1,53 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <title>Shamrock</title>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Shamrock geometric company mark</title>
+  <desc>Three interlocking green loops form a modern abstract shamrock.</desc>
+
   <defs>
-    <linearGradient id="leafA" x1="0.2" y1="0" x2="0.6" y2="1">
-      <stop offset="0" stop-color="#aedaba"/>
-      <stop offset="1" stop-color="#4ea76c"/>
+    <radialGradient id="tile" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(512 430) rotate(90) scale(650)">
+      <stop offset="0" stop-color="#FAFDFA"/>
+      <stop offset="1" stop-color="#E7F3E9"/>
+    </radialGradient>
+
+    <linearGradient id="evergreenTop" x1="400" y1="166" x2="610" y2="530" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B694B"/>
+      <stop offset="1" stop-color="#06432F"/>
     </linearGradient>
-    <linearGradient id="leafB" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4ea76c"/>
-      <stop offset="1" stop-color="#1f7a43"/>
+    <linearGradient id="evergreenLeft" x1="188" y1="470" x2="550" y2="784" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A6347"/>
+      <stop offset="1" stop-color="#043D2B"/>
     </linearGradient>
-    <linearGradient id="leafC" x1="1" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2f8c50"/>
-      <stop offset="1" stop-color="#134e2c"/>
+    <linearGradient id="fernRight" x1="556" y1="451" x2="844" y2="770" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#16C765"/>
+      <stop offset="1" stop-color="#078B47"/>
     </linearGradient>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#134e2c"/>
-      <stop offset="1" stop-color="#04190e"/>
-    </linearGradient>
+
+    <filter id="softLift" x="110" y="90" width="804" height="790" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0B3D2B" flood-opacity="0.10"/>
+    </filter>
   </defs>
 
-  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#tile)"/>
+  <!-- macOS-safe rounded tile with optical padding built into the artwork. -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
+  <rect x="33" y="33" width="958" height="958" rx="223" stroke="#D5E9D9" stroke-width="2"/>
 
-  <!-- Stem, drawn first so the leaflets sit over its top. -->
-  <path d="M512,470 C534,600 540,700 506,806 C498,762 500,690 486,624 C476,576 486,520 512,470 Z"
-        fill="#186236"/>
-
-  <!-- Trefoil: one heart leaflet, tip at the origin, rotated 3× about the centre.
-       Dark-to-light motif — the top leaf catches the light, lower leaves recede. -->
-  <g transform="translate(512,470) scale(1.32)">
-    <path d="M0,0 C-96,-72 -150,-150 -96,-208 C-58,-248 -8,-228 0,-168 C8,-228 58,-248 96,-208 C150,-150 96,-72 0,0 Z"
-          fill="url(#leafA)"/>
-    <path d="M0,0 C-96,-72 -150,-150 -96,-208 C-58,-248 -8,-228 0,-168 C8,-228 58,-248 96,-208 C150,-150 96,-72 0,0 Z"
-          fill="url(#leafB)" transform="rotate(120)"/>
-    <path d="M0,0 C-96,-72 -150,-150 -96,-208 C-58,-248 -8,-228 0,-168 C8,-228 58,-248 96,-208 C150,-150 96,-72 0,0 Z"
-          fill="url(#leafC)" transform="rotate(240)"/>
-    <circle r="22" fill="#d6ecdc" opacity="0.85"/>
+  <!--
+    Three equal-radius, equal-weight loops make the construction reproducible
+    and stable. Their shared triangular counterspace creates the shamrock.
+  -->
+  <g filter="url(#softLift)" fill="none" stroke-width="116">
+    <circle cx="512" cy="350" r="180" stroke="url(#evergreenTop)"/>
+    <circle cx="365" cy="605" r="180" stroke="url(#evergreenLeft)"/>
+    <circle cx="659" cy="605" r="180" stroke="url(#fernRight)"/>
   </g>
+
+  <!-- A soft triangular counter replaces a mechanical cutout at the junction. -->
+  <path d="M512 452
+           C521 476 541 493 565 502
+           C546 516 531 533 520 556
+           C516 564 508 564 504 556
+           C493 533 478 516 459 502
+           C483 493 503 476 512 452Z"
+        fill="#F7FBF7"/>
 </svg>
