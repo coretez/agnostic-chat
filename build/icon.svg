@@ -22,15 +22,37 @@
   <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
   <rect x="33" y="33" width="958" height="958" rx="223" stroke="#D2E7D7" stroke-width="2"/>
 
-  <g filter="url(#lift)" fill="none" stroke-width="46"
-     stroke-linecap="round" stroke-linejoin="round">
-    <!-- Stem enters from lower-left and flows toward the upper-right junction. -->
-    <path d="M400 790 C462 745 488 668 498 548" stroke="#16B963"/>
+  <!--
+    A single uninterrupted centerline draws the stem and all three leaflets.
+    The repeated center passage gives the mark a woven cadence without adding
+    gaps, hubs, dots, or disconnected decorative pieces.
+  -->
+  <path d="M400 790
+           C458 744 485 664 480 575
 
-    <!-- Clockwise color layering makes each ribbon pass over the previous one. -->
-    <ellipse cx="387" cy="540" rx="150" ry="96" transform="rotate(12 387 540)" stroke="#08784A"/>
-    <ellipse cx="512" cy="374" rx="96" ry="150" stroke="#075F43"/>
-    <ellipse cx="637" cy="540" rx="150" ry="96" transform="rotate(-12 637 540)" stroke="#11A95A"/>
+           C420 630 320 625 275 560
+           C230 495 290 420 370 440
+           C430 455 470 495 512 535
+
+           C470 480 430 430 435 360
+           C440 278 584 278 589 360
+           C594 430 554 480 512 535
+
+           C554 495 594 455 654 440
+           C734 420 794 495 749 560
+           C704 625 604 630 544 575
+
+           C520 550 500 550 480 575"
+        fill="none" stroke="url(#ribbon)" stroke-width="48"
+        stroke-linecap="round" stroke-linejoin="round" filter="url(#lift)"/>
+
+  <!-- Two short seams establish the bridge without outlining the whole ribbon. -->
+  <g stroke="#F8FCF9" stroke-width="12" stroke-linecap="butt">
+    <path d="M460 532 L508 586"/>
+    <path d="M516 480 L564 534"/>
   </g>
+  <path d="M484 559 C501 544 520 526 540 507"
+        fill="none" stroke="url(#ribbon)" stroke-width="48"
+        stroke-linecap="round"/>
 
 </svg>

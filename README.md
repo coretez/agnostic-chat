@@ -64,5 +64,6 @@ See [LICENSING.md](LICENSING.md) for what that means in practice and how to get
 a commercial license. Contributions are welcome under the DCO — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Copyright © 2026 Christopher Jordan. The Shamrock name and clover mark are
-trademarks of Christopher Jordan and are not licensed under the FSL.
+Copyright © 2026 Christopher Jordan. **Shamrock™** and the clover mark are
+trademarks of Christopher Jordan and are **not** licensed under the FSL — see
+[TRADEMARK.md](TRADEMARK.md). Security reports: [SECURITY.md](SECURITY.md).

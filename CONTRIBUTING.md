@@ -12,7 +12,13 @@ git commit -s -m "your message"
 
 That appends a `Signed-off-by:` line, which certifies you wrote the patch or
 otherwise have the right to submit it under this project's license — the
-[Developer Certificate of Origin 1.1](https://developercertificate.org/).
+[Developer Certificate of Origin 1.1](DCO), reproduced in full in this repo.
+
+CI checks every commit in a pull request. To fix commits you already made:
+
+```bash
+git rebase --signoff origin/main
+```
 
 Why this matters here: Shamrock is offered under the FSL with a commercial
 licensing path. The sign-off is what keeps the copyright chain clean enough for
@@ -47,3 +53,8 @@ against a throwaway database and needs no API keys or network.
 Start with `docs/PIPELINE_PSEUDOCODE.md` for how a turn flows end to end, then
 `docs/HARNESS_OBJECTIVES.md` for what the coding harness is required to do and
 why (objectives O1–O15; commits and design elements cite these IDs).
+
+## Name and mark
+
+The code license does not cover the Shamrock name or clover mark — see
+[TRADEMARK.md](TRADEMARK.md). Forks are welcome and need their own identity.

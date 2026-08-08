@@ -38,9 +38,9 @@ only ever covers the current window.
 
 ## Trademarks
 
-The **Shamrock** name and the clover mark are not licensed by the FSL. Forks
-and derivatives must use their own name and mark. You may of course state
-factually that your work is derived from Shamrock.
+The **Shamrock™** name and the clover mark are not licensed by the FSL. Forks
+and derivatives must use their own name and mark; factual references to
+Shamrock are always fine. Full policy: [TRADEMARK.md](TRADEMARK.md).
 
 ## Commercial licenses
 
