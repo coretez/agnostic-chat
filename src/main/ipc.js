@@ -301,7 +301,10 @@ function registerIpc() {
     if (!p) return { created: [] };
     const base = repo.settings.get('documents_base') || docs.defaultBase();
     const outDir = docs.resolveOutputDir(p, base);
-    return { created: projectDocs.ensureCanonicalDocs({ projectId, docsBase: p.working_dir || outDir }) };
+    const created = projectDocs.ensureCanonicalDocs({ projectId, docsBase: p.working_dir || outDir });
+    const backfilled = projectDocs.backfillFiles({ projectId, outputDir: outDir });
+    if (backfilled.length) console.log('[docs] wrote', backfilled.length, 'database-only document(s) to disk');
+    return { created, backfilled };
   });
 
   // Agents (authored per-project sub-agent definitions)
@@ -742,6 +745,7 @@ function registerIpc() {
               + 'returns — start long-running processes (dev servers, watchers) with start_server, which '
               + 'keeps them alive across turns; read their output with server_logs.'
               + (Object.keys(buildEnv).length ? ' Build environment variables set for this project: ' + Object.keys(buildEnv).join(', ') + '.' : '')
+              + (() => { const l = projectId ? projectDocs.listLibrary(projectId) : ''; return l ? '\n\nPROJECT LIBRARY — documents and uploaded files already saved for this project. Read them at these exact paths; do not ask the user to locate them:\n' + l : ''; })()
           }, ...convo];
           emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable });
         } else {
@@ -899,7 +903,12 @@ function registerIpc() {
         try {
           if (projectId) {
             projectDocs.ensureCanonicalDocs({ projectId, docsBase });
+            projectDocs.backfillFiles({ projectId, outputDir });
             docsBlock = projectDocs.load(projectId);
+            // The DOCUMENTS tab lists the library; the model needs the same
+            // list with real paths, or it hunts for files the user can see.
+            const lib = projectDocs.listLibrary(projectId);
+            if (lib) docsBlock += (docsBlock ? '\n\n' : '') + 'PROJECT LIBRARY (files on disk — read them with read_file at these paths; never ask the user where they are):\n' + lib;
           }
         } catch (e) { console.error('[project-docs load]', e && e.message); }
 

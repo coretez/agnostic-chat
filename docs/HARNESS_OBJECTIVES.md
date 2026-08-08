@@ -144,6 +144,41 @@ Accept: an align `record` bumps the SPEC doc with the decision appended;
 `planContext` carries the docs under a source-of-truth banner;
 DERIVE_PROMPT carries the documentation rule. **Status: THIS CHANGE.**
 
+## E. Orchestration + guards — the next ring
+
+**O16. The plan establishes the orchestrator; division owes merging.** The
+planner that divides work into steps must also author how results recombine:
+`submit_plan` declares an orchestrator block (merge strategy, conflict
+policy) and step-level fan-out groups; steps sharing a group and marked
+parallel run CONCURRENTLY (today `parallel` buys isolation only — sub-agents
+awaited in order), and each group's results are merged by its own contract
+into one step-result that later steps consume via working memory. Bounds:
+≤4 concurrent sub-agents per group, one bounded merge call, merge failure
+degrades to concatenation.
+*Source: LangGraph fan-in reducers; the assign tool's Promise.all + merge
+(already shipped, but model-invoked); §3 of HARNESS_FLOW.md.*
+Accept: a plan with a marked group runs its members concurrently; the merged
+product appears as one step-result and its values are captured; a failed
+member surfaces in the merge rather than aborting the group.
+**Status: PLANNED** (design: `HARNESS_FLOW.md` §3).
+
+**O17. Guard chain — firewalls and gateguards at named points.** The
+harness's existing choke points become a registry of ingress/egress points
+(IN-1 user prompt, IN-2 tool results, IN-3 sub-agent conclusions, EG-1 tool
+calls, EG-2 provider calls, EG-3 reply/docs) that guard modules plug into:
+`{name, point, inspect() → allow|block|rewrite|flag + reason}`.
+Deterministic-first; classifier guards are bounded and fail to `flag`; block
+reuses the O4 denial contract; rewrites are visible process events; the
+human approval gate is the LAST EG-1 guard; the scope jail is never a
+module. Guards add restriction, never permission.
+*Source: OpenAI Agents SDK guardrails/tripwires; NeMo Guardrails rail
+taxonomy; LLM gateway egress scrubbing; Harness.io gates.*
+Accept: filter.js, the approval gate, and the env scrub are re-expressed as
+registry guards with zero behavior change; an IN-2 injection scanner and an
+EG-2 secret scrub ship as the first new modules; every verdict lands in
+process events.
+**Status: PLANNED** (design: `HARNESS_FLOW.md` §4).
+
 ---
 
 ## Traceability
@@ -159,6 +194,8 @@ DERIVE_PROMPT carries the documentation rule. **Status: THIS CHANGE.**
 | O11 | verify layers 2–3: review + fix cycle | `src/main/review.js` + `ipc.js` review pass |
 | O13 | checkpoint/revert | planned — rides O9 |
 | O15 | canonical project docs | `src/main/project-docs.js` + `plan-derive.js` docs context/rule + `ipc.js` spec append |
+| O16 | fan-out groups + merge contracts | planned — `plan-derive.js` schema + `execute.js` group runner (design: `HARNESS_FLOW.md` §3) |
+| O17 | guard-chain registry | planned — new `guards.js`; re-homes `filter.js`, approveAction, env scrub (design: `HARNESS_FLOW.md` §4) |
 
 ---
 

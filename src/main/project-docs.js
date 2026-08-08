@@ -225,4 +225,37 @@ function appendDecisions({ projectId, docsBase, records = [], goal = '' }) {
   return { ...w, added: entries.length };
 }
 
-module.exports = { load, appendDecisions, ensureCanonicalDocs, readCanonical, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME };
+/**
+ * Write any indexed document that exists only as a database blob out to disk,
+ * inside the tool jail, and re-point its index row. Uploads made before
+ * attachments were written to disk were invisible to read_file even though the
+ * DOCUMENTS tab listed them — the tab reads the index, the tools read disk.
+ * Idempotent; safe to call on every project open.
+ * @returns {string[]} titles written this call
+ */
+function backfillFiles({ projectId, outputDir }) {
+  const wrote = [];
+  let rows = [];
+  try { rows = repo.documents.listByProject(projectId); } catch { return wrote; }
+  for (const r of rows) {
+    if (r.path || !r.content) continue;
+    try {
+      const safe = String(r.title || `document-${r.id}`).replace(/[/\\]/g, '-').slice(0, 120);
+      const abs = path.join(outputDir, 'uploads', safe);
+      const w = docs.writeFileVersioned(abs, r.content);
+      repo.documents.repath(r.id, w.absPath);
+      wrote.push(r.title);
+    } catch (e) { console.error('[docs backfill]', e && e.message); }
+  }
+  return wrote;
+}
+
+/** A one-line-per-document manifest of the project library, for the model. */
+function listLibrary(projectId) {
+  let rows = [];
+  try { rows = repo.documents.listByProject(projectId); } catch { return ''; }
+  const lines = rows.filter((r) => r.path).map((r) => `- ${r.title} (${r.doc_type || r.source || 'document'}) — ${r.path}`);
+  return lines.length ? lines.join('\n') : '';
+}
+
+module.exports = { load, appendDecisions, backfillFiles, listLibrary, ensureCanonicalDocs, readCanonical, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME };
