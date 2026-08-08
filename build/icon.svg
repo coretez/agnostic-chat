@@ -1,58 +1,110 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <title>Shamrock ribbon mark</title>
-  <desc>A modern green three-leaf shamrock drawn as a continuous rounded line with a right-curving stem.</desc>
+  <title>Shamrock dimensional application icon</title>
+  <desc>A richly layered green shamrock with sculpted leaves, flowing veins, and a lower-left stem.</desc>
 
   <defs>
-    <radialGradient id="tile" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
-                    gradientTransform="translate(512 418) rotate(90) scale(680)">
-      <stop stop-color="#FBFEFC"/>
-      <stop offset="1" stop-color="#E4F2E8"/>
-    </radialGradient>
-    <linearGradient id="ribbon" x1="288" y1="260" x2="690" y2="780" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#075F43"/>
-      <stop offset="0.48" stop-color="#0A9254"/>
-      <stop offset="1" stop-color="#20C96A"/>
+    <linearGradient id="tile" x1="112" y1="78" x2="904" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#174B2E"/>
+      <stop offset="0.48" stop-color="#0A3525"/>
+      <stop offset="1" stop-color="#031A14"/>
     </linearGradient>
-    <filter id="lift" x="140" y="130" width="750" height="760" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#06402D" flood-opacity="0.12"/>
+    <radialGradient id="tileLight" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="translate(300 190) rotate(49) scale(680 610)">
+      <stop stop-color="#A7D84A" stop-opacity="0.25"/>
+      <stop offset="0.52" stop-color="#2D8D45" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#001C13" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="leafTop" x1="412" y1="248" x2="594" y2="548" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A7EF4A"/>
+      <stop offset="0.34" stop-color="#45C838"/>
+      <stop offset="1" stop-color="#08743E"/>
+    </linearGradient>
+    <linearGradient id="leafLeft" x1="236" y1="456" x2="498" y2="664" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DE43E"/>
+      <stop offset="0.45" stop-color="#26AE3D"/>
+      <stop offset="1" stop-color="#076A3B"/>
+    </linearGradient>
+    <linearGradient id="leafRight" x1="522" y1="472" x2="802" y2="660" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#72DE36"/>
+      <stop offset="0.48" stop-color="#15993A"/>
+      <stop offset="1" stop-color="#075932"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="190" y1="828" x2="520" y2="522" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69D83B"/>
+      <stop offset="0.52" stop-color="#22A83C"/>
+      <stop offset="1" stop-color="#8BEC45"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#C5FA6A"/>
+      <stop offset="0.45" stop-color="#42B944"/>
+      <stop offset="1" stop-color="#06462E"/>
+    </linearGradient>
+    <filter id="tileShadow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#00120C" flood-opacity="0.48"/>
+    </filter>
+    <filter id="leafShadow" x="40" y="100" width="944" height="840" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="22" stdDeviation="18" flood-color="#001A10" flood-opacity="0.60"/>
+    </filter>
+    <filter id="softGlow" x="100" y="100" width="824" height="824" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="8"/>
     </filter>
   </defs>
 
-  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
-  <rect x="33" y="33" width="958" height="958" rx="223" stroke="#D2E7D7" stroke-width="2"/>
-
-  <!--
-    A single uninterrupted centerline draws the stem and all three leaflets.
-    The repeated center passage gives the mark a woven cadence without adding
-    gaps, hubs, dots, or disconnected decorative pieces.
-  -->
-  <path d="M400 790
-           C458 744 485 664 480 575
-
-           C420 630 320 625 275 560
-           C230 495 290 420 370 440
-           C430 455 470 495 512 535
-
-           C470 480 430 430 435 360
-           C440 278 584 278 589 360
-           C594 430 554 480 512 535
-
-           C554 495 594 455 654 440
-           C734 420 794 495 749 560
-           C704 625 604 630 544 575
-
-           C520 550 500 550 480 575"
-        fill="none" stroke="url(#ribbon)" stroke-width="48"
-        stroke-linecap="round" stroke-linejoin="round" filter="url(#lift)"/>
-
-  <!-- Two short seams establish the bridge without outlining the whole ribbon. -->
-  <g stroke="#F8FCF9" stroke-width="12" stroke-linecap="butt">
-    <path d="M460 532 L508 586"/>
-    <path d="M516 480 L564 534"/>
+  <!-- Deep, inset macOS tile. -->
+  <g filter="url(#tileShadow)">
+    <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tile)"/>
+    <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#tileLight)"/>
+    <rect x="53" y="53" width="918" height="918" rx="205" stroke="url(#rim)" stroke-width="12"/>
+    <rect x="72" y="72" width="880" height="880" rx="188" stroke="#001E15" stroke-width="8" stroke-opacity="0.8"/>
   </g>
-  <path d="M484 559 C501 544 520 526 540 507"
-        fill="none" stroke="url(#ribbon)" stroke-width="48"
-        stroke-linecap="round"/>
 
+  <!-- Warm upper-left reflection keeps the tile from reading as a flat square. -->
+  <path d="M105 264 C157 157 256 92 382 77" stroke="#D8FF7A" stroke-width="9" stroke-linecap="round" opacity="0.28"/>
+
+  <g filter="url(#leafShadow)">
+    <!-- The stem sweeps from lower-left toward the upper-right center. -->
+    <path d="M180 840 C330 804 435 700 505 523" stroke="#002C1C" stroke-width="86" stroke-linecap="round"/>
+    <path d="M180 824 C330 786 430 690 505 523" stroke="url(#stem)" stroke-width="64" stroke-linecap="round"/>
+    <path d="M191 806 C325 766 414 680 489 539" stroke="#D8FA67" stroke-width="10" stroke-linecap="round" opacity="0.52"/>
+
+    <!-- Layered extrusions make each leaflet feel sculpted and substantial. -->
+    <path d="M512 540 C455 496 407 430 412 354 C416 292 459 252 501 278 C508 283 511 291 512 304 C513 291 516 283 523 278 C565 252 608 292 612 354 C617 430 569 496 512 540Z"
+          fill="#03442A" transform="translate(0 27)" stroke="#002B1B" stroke-width="10"/>
+    <path d="M506 540 C449 493 388 457 318 458 C259 459 218 493 222 541 C224 566 242 582 270 584 C244 600 242 626 258 647 C284 681 338 686 388 659 C442 630 478 579 506 540Z"
+          fill="#033B27" transform="translate(0 25)" stroke="#002819" stroke-width="10"/>
+    <path d="M518 540 C575 493 636 457 706 458 C765 459 806 493 802 541 C800 566 782 582 754 584 C780 600 782 626 766 647 C740 681 686 686 636 659 C582 630 546 579 518 540Z"
+          fill="#033522" transform="translate(0 27)" stroke="#002518" stroke-width="10"/>
+
+    <!-- Main enamel faces. -->
+    <path d="M512 540 C455 496 407 430 412 354 C416 292 459 252 501 278 C508 283 511 291 512 304 C513 291 516 283 523 278 C565 252 608 292 612 354 C617 430 569 496 512 540Z"
+          fill="url(#leafTop)" stroke="url(#rim)" stroke-width="8"/>
+    <path d="M506 540 C449 493 388 457 318 458 C259 459 218 493 222 541 C224 566 242 582 270 584 C244 600 242 626 258 647 C284 681 338 686 388 659 C442 630 478 579 506 540Z"
+          fill="url(#leafLeft)" stroke="url(#rim)" stroke-width="8"/>
+    <path d="M518 540 C575 493 636 457 706 458 C765 459 806 493 802 541 C800 566 782 582 754 584 C780 600 782 626 766 647 C740 681 686 686 636 659 C582 630 546 579 518 540Z"
+          fill="url(#leafRight)" stroke="url(#rim)" stroke-width="8"/>
+  </g>
+
+  <!-- Flowing vein system: the linework is part of the icon, not an outline logo. -->
+  <g fill="none" stroke="#D5F65A" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 538 C507 470 509 386 512 302" stroke-width="9" opacity="0.70"/>
+    <path d="M510 452 C480 424 458 390 444 350" stroke-width="5" opacity="0.55"/>
+    <path d="M511 420 C540 394 559 363 575 326" stroke-width="5" opacity="0.48"/>
+    <path d="M509 489 C474 468 449 446 430 417" stroke-width="5" opacity="0.44"/>
+
+    <path d="M503 539 C434 532 348 523 258 532" stroke-width="9" opacity="0.64"/>
+    <path d="M429 536 C398 512 361 494 318 482" stroke-width="5" opacity="0.50"/>
+    <path d="M391 536 C362 570 326 590 282 602" stroke-width="5" opacity="0.46"/>
+    <path d="M467 537 C438 574 414 600 382 622" stroke-width="5" opacity="0.40"/>
+
+    <path d="M521 539 C590 532 676 523 766 532" stroke-width="9" opacity="0.58"/>
+    <path d="M595 536 C626 512 663 494 706 482" stroke-width="5" opacity="0.46"/>
+    <path d="M633 536 C662 570 698 590 742 602" stroke-width="5" opacity="0.42"/>
+    <path d="M557 537 C586 574 610 600 642 622" stroke-width="5" opacity="0.36"/>
+  </g>
+
+  <!-- Small specular accents reinforce the enamel depth at full icon sizes. -->
+  <path d="M437 341 C452 301 476 286 496 292" stroke="#E8FF92" stroke-width="11" stroke-linecap="round" opacity="0.55"/>
+  <path d="M250 523 C267 489 303 476 342 478" stroke="#E8FF92" stroke-width="10" stroke-linecap="round" opacity="0.42"/>
+  <path d="M550 501 C596 474 645 464 692 470" stroke="#CFFF78" stroke-width="9" stroke-linecap="round" opacity="0.34"/>
 </svg>

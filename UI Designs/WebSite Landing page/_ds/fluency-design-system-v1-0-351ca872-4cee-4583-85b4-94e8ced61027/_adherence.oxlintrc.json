@@ -1,0 +1,165 @@
+{
+  "plugins": [
+    "react",
+    "import"
+  ],
+  "rules": {
+    "react/forbid-elements": [
+      "warn",
+      {
+        "forbid": []
+      }
+    ],
+    "no-restricted-imports": [
+      "warn",
+      {
+        "patterns": [
+          {
+            "group": [
+              "components/general/ChartAxes/**",
+              "components/general/ColumnsMenu/**",
+              "components/general/DataSourceManageLink/**",
+              "components/general/ErrorBox/**",
+              "components/general/FacetGroup/**",
+              "components/general/Header/**",
+              "components/general/JsonLine/**",
+              "components/general/Loading/**",
+              "components/general/Pager/**",
+              "components/general/SlideOver/**"
+            ],
+            "message": "Import design-system components from 'index.js', not component internals."
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+        "message": "Raw hex color — use a design-system color token via var()."
+      },
+      {
+        "selector": "Literal[value=/font-family\\s*:\\s*(?!['\\\"]?(?:IBM Plex Mono|Companion Sans))/i]",
+        "message": "Font not provided by the design system. Available: IBM Plex Mono, Companion Sans."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ChartAxes'] > JSXAttribute > JSXIdentifier[name!=/^(?:yMax|yUnit|xFrom|xTo|children|key|ref|className|style|children)$/]",
+        "message": "<ChartAxes> doesn't accept that prop. Declared props: yMax, yUnit, xFrom, xTo, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ColumnsMenu'] > JSXAttribute > JSXIdentifier[name!=/^(?:allColumns|columns|columnLabel|onToggle|key|ref|className|style|children)$/]",
+        "message": "<ColumnsMenu> doesn't accept that prop. Declared props: allColumns, columns, columnLabel, onToggle."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='DataSourceManageLink'] > JSXAttribute > JSXIdentifier[name!=/^(?:allowed|className|href|children|key|ref|className|style|children)$/]",
+        "message": "<DataSourceManageLink> doesn't accept that prop. Declared props: allowed, className, href, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ErrorBox'] > JSXAttribute > JSXIdentifier[name!=/^(?:error|key|ref|className|style|children)$/]",
+        "message": "<ErrorBox> doesn't accept that prop. Declared props: error."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='FacetGroup'] > JSXAttribute > JSXIdentifier[name!=/^(?:label|buckets|selected|onToggle|removable|onRemove|note|key|ref|className|style|children)$/]",
+        "message": "<FacetGroup> doesn't accept that prop. Declared props: label, buckets, selected, onToggle, removable, onRemove, note."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Header'] > JSXAttribute > JSXIdentifier[name!=/^(?:eyebrow|title|children|key|ref|className|style|children)$/]",
+        "message": "<Header> doesn't accept that prop. Declared props: eyebrow, title, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='JsonLine'] > JSXAttribute > JSXIdentifier[name!=/^(?:record|onClick|key|ref|className|style|children)$/]",
+        "message": "<JsonLine> doesn't accept that prop. Declared props: record, onClick."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Pager'] > JSXAttribute > JSXIdentifier[name!=/^(?:curPage|pageCount|rangeStart|rangeEnd|totalShown|onPrev|onNext|key|ref|className|style|children)$/]",
+        "message": "<Pager> doesn't accept that prop. Declared props: curPage, pageCount, rangeStart, rangeEnd, totalShown, onPrev, onNext."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='SlideOver'] > JSXAttribute > JSXIdentifier[name!=/^(?:onClose|children|key|ref|className|style|children)$/]",
+        "message": "<SlideOver> doesn't accept that prop. Declared props: onClose, children."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/index.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "x-omelette": {
+    "components": {
+      "ChartAxes": {
+        "replaces": []
+      },
+      "ColumnsMenu": {
+        "replaces": []
+      },
+      "DataSourceManageLink": {
+        "replaces": []
+      },
+      "ErrorBox": {
+        "replaces": []
+      },
+      "FacetGroup": {
+        "replaces": []
+      },
+      "Header": {
+        "replaces": []
+      },
+      "JsonLine": {
+        "replaces": []
+      },
+      "Loading": {
+        "replaces": []
+      },
+      "Pager": {
+        "replaces": []
+      },
+      "SlideOver": {
+        "replaces": []
+      }
+    },
+    "tokens": [
+      "--band",
+      "--bg",
+      "--blue",
+      "--brand",
+      "--brand-soft",
+      "--brand-strong",
+      "--green",
+      "--ink",
+      "--line",
+      "--line-soft",
+      "--micro",
+      "--muted",
+      "--nav-idle",
+      "--panel",
+      "--panel-soft"
+    ],
+    "tokenKinds": {
+      "--brand": "color",
+      "--brand-strong": "color",
+      "--brand-soft": "color",
+      "--ink": "color",
+      "--muted": "color",
+      "--micro": "color",
+      "--line": "color",
+      "--line-soft": "color",
+      "--bg": "color",
+      "--panel": "color",
+      "--panel-soft": "color",
+      "--nav-idle": "color",
+      "--blue": "color",
+      "--green": "color",
+      "--band": "color"
+    },
+    "fontFamilies": [
+      "Companion Sans",
+      "IBM Plex Mono"
+    ]
+  }
+}

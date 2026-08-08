@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/fluency-design-system-v1-0-351ca872-4cee-4583-85b4-94e8ced61027/fonts/fonts.css">
+<link rel="stylesheet" href="_ds/fluency-design-system-v1-0-351ca872-4cee-4583-85b4-94e8ced61027/_ds_bundle.css">
+<link rel="stylesheet" href="_ds/fluency-design-system-v1-0-351ca872-4cee-4583-85b4-94e8ced61027/styles.css">
+<script src="_ds/fluency-design-system-v1-0-351ca872-4cee-4583-85b4-94e8ced61027/_ds_bundle.js"></script>
+<style>
+:root{--brand:#1e7a3f;--brand-strong:#0f4d26;--brand-soft:#e5f3e9;--ink:#17251b;--muted:#53625a;--micro:#7f8b82;--bg:#f4f7f4;--panel:#ffffff;--panel-soft:#f7faf7;--line:#dde6dd;--line-soft:#e8efe8;}
+body{margin:0;background:var(--bg,#f6f5f2);color:var(--ink,#1f2428);font-family:"Companion Sans",system-ui,sans-serif}
+a{color:var(--brand,#b3242e);text-decoration:none}
+a:hover{color:var(--brand-strong,#8f1c24)}
+</style>
+</helmet>
+<div style="min-height:100vh">
+  <nav style="display:flex;align-items:center;gap:28px;padding:0 40px;height:60px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10">
+    <div style="display:flex;align-items:center;gap:10px;margin-right:auto">
+      <div style="width:26px;height:26px;border-radius:6px;background:var(--brand);display:grid;place-items:center;color:#fff;font:700 13px 'IBM Plex Mono',monospace">S</div>
+      <span style="font-weight:700;font-size:15px;letter-spacing:-0.01em">Shamrock</span>
+    </div>
+    <a href="#features" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">Features</a>
+    <a href="#how" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">How it works</a>
+    <a href="#download" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">Download</a>
+    <a href="#license" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">License</a>
+    <a href="#faq" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">FAQ</a>
+    <a href="#" style="font-size:13.5px;color:var(--muted)" style-hover="color:var(--ink)">GitHub</a>
+    <a href="#download" style="background:var(--brand);color:#fff;padding:8px 18px;border-radius:6px;font-size:13.5px;font-weight:600" style-hover="background:var(--brand-strong);color:#fff">Download</a>
+  </nav>
+
+  <header style="max-width:820px;margin:0 auto;padding:96px 40px 72px;text-align:center">
+    <div style="display:inline-block;font:600 11px 'IBM Plex Mono',monospace;letter-spacing:0.08em;text-transform:uppercase;color:var(--brand);background:var(--brand-soft);border:1px solid var(--line);padding:5px 12px;border-radius:999px;margin-bottom:24px">Free · Open source · Electron</div>
+    <h1 style="font-size:52px;line-height:1.08;letter-spacing:-0.025em;margin:0 0 20px;font-weight:700">One desktop app for every LLM.</h1>
+    <p style="font-size:18px;line-height:1.6;color:var(--muted);max-width:640px;margin:0 auto 32px">Shamrock is a free Electron app that lets you chat with OpenAI, Anthropic, Google, Cohere, and local models — without locking your workflow to one vendor.</p>
+    <div style="display:flex;gap:12px;justify-content:center;margin-bottom:16px">
+      <a href="#download" style="background:var(--brand);color:#fff;padding:12px 28px;border-radius:6px;font-size:15px;font-weight:600" style-hover="background:var(--brand-strong);color:#fff">Download</a>
+      <a href="#" style="background:var(--panel);color:var(--ink);border:1px solid var(--line);padding:12px 28px;border-radius:6px;font-size:15px;font-weight:600" style-hover="border-color:var(--muted);color:var(--ink)">View on GitHub</a>
+    </div>
+    <p style="font-size:12.5px;color:var(--micro);margin:0">Free for personal use. Not licensed for commercial use.</p>
+  </header>
+
+  <section style="max-width:1060px;margin:0 auto;padding:0 40px 40px">
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 20px 60px rgba(31,36,40,0.08);overflow:hidden">
+      <div style="display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;background:var(--panel-soft);border-bottom:1px solid var(--line-soft)">
+        <span style="width:11px;height:11px;border-radius:50%;background:#e6e2db"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#e6e2db"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#e6e2db"></span>
+        <span style="font:500 11px 'IBM Plex Mono',monospace;color:var(--micro);margin-left:10px">Shamrock</span>
+      </div>
+      <div style="display:grid;grid-template-columns:220px 1fr;min-height:380px">
+        <div style="background:var(--panel-soft);border-right:1px solid var(--line-soft);padding:16px 12px;display:flex;flex-direction:column;gap:4px">
+          <div style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:0.08em;text-transform:uppercase;color:var(--micro);padding:4px 10px 8px">Projects</div>
+          <div style="padding:8px 10px;border-radius:6px;background:var(--brand-soft);color:var(--brand);font-size:13px;font-weight:600">Research notes</div>
+          <div style="padding:8px 10px;border-radius:6px;color:var(--muted);font-size:13px">Prompt library</div>
+          <div style="padding:8px 10px;border-radius:6px;color:var(--muted);font-size:13px">Side project</div>
+          <div style="font:600 10px 'IBM Plex Mono',monospace;letter-spacing:0.08em;text-transform:uppercase;color:var(--micro);padding:16px 10px 8px">Engines</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12.5px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--green)"></span>OpenAI</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12.5px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--green)"></span>Anthropic</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12.5px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--green)"></span>Google</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12.5px;color:var(--muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--micro)"></span>Ollama (local)</div>
+        </div>
+        <div style="display:flex;flex-direction:column;padding:20px 24px;gap:16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--line-soft)">
+            <span style="font-size:14px;font-weight:600">Research notes</span>
+            <span style="font:500 11.5px 'IBM Plex Mono',monospace;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:4px 10px">claude-sonnet-4 ▾</span>
+          </div>
+          <div style="align-self:flex-end;max-width:70%;background:var(--brand-soft);border-radius:10px 10px 2px 10px;padding:10px 14px;font-size:13.5px;line-height:1.5">Compare the retrieval approaches in these two papers.</div>
+          <div style="align-self:flex-start;max-width:78%;background:var(--panel-soft);border:1px solid var(--line-soft);border-radius:10px 10px 10px 2px;padding:10px 14px;font-size:13.5px;line-height:1.55;color:var(--muted)">Both papers use dense retrieval, but the first re-ranks with a cross-encoder while the second relies on…</div>
+          <div style="margin-top:auto;border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-size:13px;color:var(--micro);display:flex;justify-content:space-between"><span>Message the agent…</span><span style="color:var(--brand);font-weight:600">Send</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section style="max-width:820px;margin:0 auto;padding:72px 40px;text-align:center">
+    <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 36px;font-weight:700">Switching LLMs shouldn't mean switching apps.</h2>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px;text-align:left">
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;font-size:14px;line-height:1.55;color:var(--muted)">Every provider wants you inside their own interface.</div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;font-size:14px;line-height:1.55;color:var(--muted)">Your prompts, keys, and history get scattered across tabs.</div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;font-size:14px;line-height:1.55;color:var(--muted)">Trying a new model means learning a new UI all over again.</div>
+    </div>
+  </section>
+
+  <section id="features" style="background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:72px 40px">
+    <div style="max-width:1060px;margin:0 auto">
+      <div style="font:600 11px 'IBM Plex Mono',monospace;letter-spacing:0.08em;text-transform:uppercase;color:var(--brand);margin-bottom:10px">Features</div>
+      <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 40px;font-weight:700">Built for people who want choice</h2>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:28px 32px">
+        <sc-for list="{{ features }}" as="f" hint-placeholder-count="6">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="width:34px;height:34px;border-radius:7px;background:var(--brand-soft);color:var(--brand);display:grid;place-items:center;font:700 15px 'IBM Plex Mono',monospace;margin-bottom:4px">{{ f.glyph }}</div>
+            <h3 style="font-size:16px;margin:0;font-weight:700">{{ f.title }}</h3>
+            <p style="font-size:14px;line-height:1.6;color:var(--muted);margin:0">{{ f.body }}</p>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" style="max-width:900px;margin:0 auto;padding:72px 40px">
+    <div style="font:600 11px 'IBM Plex Mono',monospace;letter-spacing:0.08em;text-transform:uppercase;color:var(--brand);margin-bottom:10px">Getting started</div>
+    <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 40px;font-weight:700">How it works</h2>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:32px;margin-bottom:48px">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font:700 26px 'IBM Plex Mono',monospace;color:var(--brand)">1</div>
+        <h3 style="font-size:16px;margin:0;font-weight:700">Download the app</h3>
+        <p style="font-size:14px;line-height:1.6;color:var(--muted);margin:0">Grab the latest Electron build for macOS, Windows, or Linux from the releases page.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font:700 26px 'IBM Plex Mono',monospace;color:var(--brand)">2</div>
+        <h3 style="font-size:16px;margin:0;font-weight:700">Add your API keys</h3>
+        <p style="font-size:14px;line-height:1.6;color:var(--muted);margin:0">Store your provider keys locally in the app settings. We never see or collect them.</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="font:700 26px 'IBM Plex Mono',monospace;color:var(--brand)">3</div>
+        <h3 style="font-size:16px;margin:0;font-weight:700">Pick an engine and chat</h3>
+        <p style="font-size:14px;line-height:1.6;color:var(--muted);margin:0">Create a project, choose a model, and start the conversation. Switch engines whenever you like.</p>
+      </div>
+    </div>
+    <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <div style="padding:12px 18px;border-bottom:1px solid var(--line-soft);font-size:13.5px;font-weight:600;color:var(--muted)">Prefer to run from source?</div>
+      <pre style="margin:0;padding:18px;font:13px/1.7 'IBM Plex Mono',monospace;color:var(--ink);background:var(--panel-soft);overflow-x:auto">git clone https://github.com/shamrock-app/shamrock.git
+cd agnostic-agent &amp;&amp; npm install
+npm run dev</pre>
+    </div>
+  </section>
+
+  <section id="download" style="background:#0d3a1f;color:#fff;padding:72px 40px;text-align:center">
+    <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 14px;font-weight:700">Download Shamrock</h2>
+    <p style="font-size:15.5px;line-height:1.6;color:rgba(255,255,255,0.7);max-width:520px;margin:0 auto 28px">Get the latest Electron build for macOS, Windows, or Linux from GitHub Releases.</p>
+    <a href="#" style="display:inline-block;background:var(--brand);color:#fff;padding:13px 32px;border-radius:6px;font-size:15px;font-weight:600" style-hover="background:var(--brand-strong);color:#fff">Download from GitHub</a>
+    <p style="font-size:12.5px;color:rgba(255,255,255,0.5);margin:18px 0 0">Free for personal, non-commercial use.</p>
+  </section>
+
+  <section id="license" style="max-width:820px;margin:0 auto;padding:72px 40px">
+    <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 32px;font-weight:700">License &amp; disclaimer</h2>
+    <div style="display:flex;flex-direction:column;gap:20px">
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:24px">
+        <h3 style="font-size:15.5px;margin:0 0 8px;font-weight:700">Free for personal, non-commercial use</h3>
+        <p style="font-size:14px;line-height:1.65;color:var(--muted);margin:0">Shamrock is provided at no cost for personal, educational, and non-commercial use. Commercial use is not permitted without a separate license.</p>
+      </div>
+      <div style="background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:24px">
+        <h3 style="font-size:15.5px;margin:0 0 8px;font-weight:700">No responsibility disclaimer</h3>
+        <p style="font-size:14px;line-height:1.65;color:var(--muted);margin:0">This software is provided "as is," without warranty of any kind. The authors are not responsible for outputs generated by third-party LLMs, for how you use the app, or for any damages arising from its use. You are responsible for complying with the terms of service of any LLM provider you connect.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq" style="background:var(--panel);border-top:1px solid var(--line);padding:72px 40px">
+    <div style="max-width:720px;margin:0 auto">
+      <h2 style="font-size:32px;letter-spacing:-0.02em;margin:0 0 32px;font-weight:700">Frequently asked questions</h2>
+      <div style="display:flex;flex-direction:column">
+        <sc-for list="{{ faqs }}" as="q" hint-placeholder-count="6">
+          <div style="border-bottom:1px solid var(--line-soft)">
+            <button onClick="{{ q.toggle }}" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:16px;background:none;border:none;padding:18px 0;font:600 15px 'Companion Sans',system-ui,sans-serif;color:var(--ink);cursor:pointer;text-align:left">
+              <span>{{ q.question }}</span>
+              <span style="font:400 18px 'IBM Plex Mono',monospace;color:var(--micro)">{{ q.mark }}</span>
+            </button>
+            <sc-if value="{{ q.open }}" hint-placeholder-val="{{ false }}">
+              <p style="font-size:14px;line-height:1.65;color:var(--muted);margin:0;padding:0 32px 18px 0">{{ q.answer }}</p>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </section>
+
+  <footer style="background:var(--ink);color:rgba(255,255,255,0.65);padding:48px 40px">
+    <div style="max-width:1060px;margin:0 auto;display:flex;flex-wrap:wrap;gap:32px;justify-content:space-between;align-items:flex-start">
+      <div style="max-width:320px;display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="width:22px;height:22px;border-radius:5px;background:var(--brand);display:grid;place-items:center;color:#fff;font:700 11px 'IBM Plex Mono',monospace">S</div>
+          <span style="font-weight:700;font-size:14px;color:#fff">Shamrock</span>
+        </div>
+        <p style="font-size:13px;margin:0">One desktop app for every LLM.</p>
+      </div>
+      <div style="display:flex;gap:28px;font-size:13px">
+        <a href="#download" style="color:rgba(255,255,255,0.65)" style-hover="color:#fff">Download</a>
+        <a href="#license" style="color:rgba(255,255,255,0.65)" style-hover="color:#fff">License</a>
+        <a href="#" style="color:rgba(255,255,255,0.65)" style-hover="color:#fff">GitHub</a>
+      </div>
+    </div>
+    <div style="max-width:1060px;margin:32px auto 0;padding-top:20px;border-top:1px solid rgba(255,255,255,0.12);display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;font-size:12px;color:rgba(255,255,255,0.45)">
+      <span>Free for personal, non-commercial use. Provided as-is with no warranty or liability.</span>
+      <span>© Shamrock contributors.</span>
+    </div>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { open: 0 };
+  renderVals() {
+    const features = [
+      { glyph: '⊞', title: 'Multiple engines, one window', body: 'Connect OpenAI, Anthropic, Google, Cohere, Ollama, and other compatible endpoints without leaving the app.' },
+      { glyph: '⌂', title: 'Your keys stay local', body: 'API keys are stored on your machine, not on our servers. You keep full control over your credentials and data.' },
+      { glyph: '▤', title: 'Project-aware context', body: 'Organize chats, prompts, files, and guardrails into projects so the agent has the right context every time.' },
+      { glyph: '◇', title: 'Glass-box reasoning', body: 'Inspect what the agent sees and does. No hidden prompts or opaque state between you and the model.' },
+      { glyph: '⇄', title: 'No vendor lock-in', body: 'Export threads, settings, and project data anytime. Move your workflow wherever you want.' },
+      { glyph: '✓', title: 'Free for personal use', body: 'Download and use Shamrock at no cost for personal and educational projects. Commercial use requires a separate license.' },
+    ];
+    const qa = [
+      ['Is Shamrock really free?', 'Yes, the Electron app is free to download and use for personal, educational, and non-commercial purposes.'],
+      ['Can I use it at work or in my business?', 'No. Commercial use is not allowed under the free license. Contact us for a separate commercial license if you need one.'],
+      ['Where are my API keys stored?', 'Your API keys are stored locally on your machine inside the Electron app. They are never sent to us.'],
+      ['Which LLM providers are supported?', 'The app supports OpenAI, Anthropic, Google, Cohere, Ollama, and any OpenAI-compatible API endpoint.'],
+      ['Is there a web or cloud version?', 'No. The free release is a desktop Electron app that runs locally on your computer.'],
+      ['Who maintains Shamrock?', 'It is an open-source project. You can view the source, report issues, and contribute on GitHub.'],
+    ];
+    const faqs = qa.map(([question, answer], i) => ({
+      question, answer,
+      open: this.state.open === i,
+      mark: this.state.open === i ? '−' : '+',
+      toggle: () => this.setState(s => ({ open: s.open === i ? -1 : i })),
+    }));
+    return { features, faqs };
+  }
+}
+</script>
+</body>
+</html>

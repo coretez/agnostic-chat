@@ -262,6 +262,26 @@ function registerIpc() {
     return { ok: true, project: repo.projects.setOutputDir(id, res.filePaths[0]) };
   });
   ipcMain.handle('documents:remove', (_e, { id }) => repo.documents.remove(id));
+  // Attachments are written to disk under the project's document library —
+  // an upload that exists only as a DB blob cannot be opened by read_file,
+  // which made attached files invisible to the very tools meant to use them.
+  ipcMain.handle('documents:saveUpload', (_e, { projectId, name, content }) => {
+    const p = repo.projects.get(projectId);
+    if (!p) return { error: 'project not found' };
+    const base = repo.settings.get('documents_base') || docs.defaultBase();
+    const outDir = docs.resolveOutputDir(p, base);
+    const safe = String(name || 'upload').replace(/[/\\]/g, '-').slice(0, 120);
+    const abs = require('node:path').join(outDir, 'uploads', safe);
+    const w = docs.writeFileVersioned(abs, content || '');
+    let row = null;
+    try {
+      row = repo.documents.saveGenerated({
+        projectId, title: safe, path: w.absPath, mimeType: 'text/plain',
+        source: 'upload', docType: null, version: w.version
+      });
+    } catch (e) { console.error('[upload index]', e && e.message); }
+    return { id: row && row.id, path: w.absPath, version: w.version };
+  });
   // Read a document's content for the library reader (path preferred, inline
   // content as fallback). Read-only; renderer has no fs access of its own.
   ipcMain.handle('documents:read', (_e, { id }) => {
@@ -507,6 +527,15 @@ function registerIpc() {
       ? payload.messages
       : [{ role: 'user', content: text }];
 
+    // Files attached to this message. The planner is given their real paths —
+    // without this it plans against the typed sentence alone and asks the user
+    // for files they already sent.
+    const attachments = Array.isArray(payload?.attachments) ? payload.attachments : [];
+    const plannerText = attachments.length
+      ? text + '\n\nFILES ATTACHED TO THIS MESSAGE — already saved in the project. Read them with read_file at these exact paths; do NOT ask the user where they are:\n'
+        + attachments.map((a) => `- ${a.path || a.name}${a.chars ? ` (${a.chars} chars)` : ''}`).join('\n')
+      : text;
+
     if (providerId) {
       const provider = repo.providers.get(providerId);
       if (!provider) throw new Error('Selected connection no longer exists.');
@@ -587,7 +616,7 @@ function registerIpc() {
 
       let planned = { skillNames: [], toolNames: [] };
       try {
-        planned = await selectContext({ connector: { chat: chatAbortable }, model: fastModel, skills: es, tools: toolset.tools, userText: text });
+        planned = await selectContext({ connector: { chat: chatAbortable }, model: fastModel, skills: es, tools: toolset.tools, userText: plannerText });
         // A soft failure (unparseable JSON, etc.) is returned, not thrown — log
         // it here so it's visible in real time, not just reverse-engineered
         // later from a suspicious "0 skills loaded" turn.
@@ -920,7 +949,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock, repoMap }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock, repoMap }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -964,7 +993,7 @@ function registerIpc() {
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: text, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck via the shared one-shot prompt queue.

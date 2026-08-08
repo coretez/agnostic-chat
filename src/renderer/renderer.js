@@ -32,7 +32,7 @@ const el = {
   intReview: $('int-review'), intEvalDd: $('int-eval-dd'), intEvalBtn: $('int-eval-btn'), intEvalLabel: $('int-eval-label'),
   intEvalMenu: $('int-eval-menu'), intEvalRun: $('int-eval-run'), intEvalNote: $('int-eval-note'),
   intEvalAssessment: $('int-eval-assessment'), intEvalFindings: $('int-eval-findings'),
-  attachBtn: $('attach-btn'), attachInput: $('attach-input'), composerAttach: $('composer-attach'),
+  attachBtn: $('attach-btn'), attachInput: $('attach-input'), attachDirBtn: $('attach-dir-btn'), attachDirInput: $('attach-dir-input'), composerAttach: $('composer-attach'),
   railTabs: $('rail-tabs'), railDocList: $('rail-doc-list'), railAddDoc: $('rail-add-doc'),
   scopeSkillsHead: $('scope-skills-head'), scopeSkillsNote: $('scope-skills-note'),
   palette: $('palette'), paletteInput: $('palette-input'), paletteList: $('palette-list'),
@@ -1526,6 +1526,20 @@ function readAttachments(fileList) {
     reader.readAsText(file);
   }
 }
+const DIR_SKIP = /(^|\/)(node_modules|\.git|dist|build|out|\.next|\.cache|__pycache__|\.venv)(\/|$)/;
+function readDirAttachments(fileList) {
+  const files = Array.from(fileList || [])
+    .filter((f) => !DIR_SKIP.test(f.webkitRelativePath || f.name))
+    .slice(0, 40);
+  if (!files.length) { flashComposer('no readable files in that folder'); return; }
+  for (const f of files) {
+    // Preserve the folder structure in the name — a design folder's layout is
+    // part of the reference.
+    try { Object.defineProperty(f, 'name', { value: f.webkitRelativePath || f.name, configurable: true }); } catch {}
+  }
+  readAttachments(files);
+}
+
 function renderAttachChips() {
   el.composerAttach.innerHTML = '';
   el.composerAttach.hidden = state.attachments.length === 0;
@@ -1645,7 +1659,14 @@ async function submit() {
   await window.api.messages.add({ chatId: state.currentChatId, role: 'user', content: text });
   // Keep attachments as project documents so they persist + appear in the rail.
   if (attached.length && state.currentProjectId) {
-    for (const a of attached) { try { await window.api.documents.create({ projectId: state.currentProjectId, title: a.name, content: a.content, mimeType: 'text', source: 'upload' }); } catch {} }
+    // Written to disk (not just indexed) so the coding tools can actually open
+    // them, and so the paths can be handed to the planner with this turn.
+    for (const a of attached) {
+      try {
+        const r = await window.api.documents.saveUpload({ projectId: state.currentProjectId, name: a.name, content: a.content });
+        if (r && r.path) a.path = r.path;
+      } catch {}
+    }
     state.documents = await window.api.documents.list(state.currentProjectId); renderDocs();
   }
 
@@ -1774,11 +1795,11 @@ async function submit() {
   try {
     const history = (await window.api.messages.list(state.currentChatId)).map((m) => ({ role: m.role, content: m.content }));
     if (attached.length && history.length) {
-      const block = attached.map((a) => `\n\n[Attached file: ${a.name}]\n\`\`\`\n${a.content}\n\`\`\``).join('');
+      const block = attached.map((a) => `\n\n[Attached file: ${a.name}${a.path ? ` — saved at ${a.path}` : ''}]\n\`\`\`\n${a.content}\n\`\`\``).join('');
       const last = history[history.length - 1];
       history[history.length - 1] = { ...last, content: (last.content || '') + block };
     }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId, chatId: state.currentChatId });
+    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId, chatId: state.currentChatId, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
     if (res.compressed) {
       const note = document.createElement('div');
       note.className = 'turn turn--meta';
@@ -2666,6 +2687,8 @@ el.input.addEventListener('input', autosize);
 
 // Attachments: button/picker + drag-and-drop onto the chat.
 el.attachBtn.onclick = () => el.attachInput.click();
+el.attachDirBtn.onclick = () => el.attachDirInput.click();
+el.attachDirInput.onchange = () => { readDirAttachments(el.attachDirInput.files); el.attachDirInput.value = ''; };
 el.attachInput.onchange = () => { readAttachments(el.attachInput.files); el.attachInput.value = ''; };
 window.addEventListener('dragover', (e) => e.preventDefault());
 window.addEventListener('drop', (e) => e.preventDefault());
