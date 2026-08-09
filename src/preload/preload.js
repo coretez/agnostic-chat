@@ -86,7 +86,7 @@ contextBridge.exposeInMainWorld('api', {
     create: (input) => ipcRenderer.invoke('chats:create', input),
     rename: (id, title) => ipcRenderer.invoke('chats:rename', { id, title }),
     setModel: (id, model) => ipcRenderer.invoke('chats:setModel', { id, model }),
-    setCodingMode: (id, on) => ipcRenderer.invoke('chats:setCodingMode', { id, on }),
+    setMode: (id, mode) => ipcRenderer.invoke('chats:setMode', { id, mode }),
     variables: (id) => ipcRenderer.invoke('chats:variables', { id }),
     setVariable: (id, key, value) => ipcRenderer.invoke('chats:setVariable', { id, key, value }),
     archive: (id) => ipcRenderer.invoke('chats:archive', { id })
@@ -105,7 +105,10 @@ contextBridge.exposeInMainWorld('api', {
     remove: (id) => ipcRenderer.invoke('documents:remove', { id }),
     ensureCanonical: (projectId) => ipcRenderer.invoke('documents:ensureCanonical', { projectId }),
     read: (id) => ipcRenderer.invoke('documents:read', { id }),
-    saveUpload: (input) => ipcRenderer.invoke('documents:saveUpload', input)
+    saveUpload: (input) => ipcRenderer.invoke('documents:saveUpload', input),
+    toPdf: (id) => ipcRenderer.invoke('documents:toPdf', { id }),
+    listFormats: (projectId) => ipcRenderer.invoke('documents:listFormats', { projectId }),
+    installFormat: (projectId) => ipcRenderer.invoke('documents:installFormat', { projectId })
   },
 
   skills: {
@@ -145,6 +148,7 @@ contextBridge.exposeInMainWorld('api', {
     connect: (input) => ipcRenderer.invoke('mcp:connect', input),
     authorize: (id) => ipcRenderer.invoke('mcp:authorize', { id }),
     enabledForProject: (projectId) => ipcRenderer.invoke('mcp:enabledForProject', { projectId }),
-    setForProject: (input) => ipcRenderer.invoke('mcp:setForProject', input)
+    setForProject: (input) => ipcRenderer.invoke('mcp:setForProject', input),
+    checkSync: (serverId) => ipcRenderer.invoke('mcp:checkSync', { serverId })
   }
 });

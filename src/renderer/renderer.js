@@ -21,7 +21,7 @@ const el = {
   ovCheat: $('ov-cheat'), ovCheatSave: $('ov-cheat-save'), ovCheatMsg: $('ov-cheat-msg'),
   heroNewProject: $('hero-new-project'), newChatBtn: $('new-chat-btn'),
   tabbar: $('tabbar'), toolbarNote: $('toolbar-note'), pages: $('pages'),
-  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), modePlan: $('mode-plan'), modeCode: $('mode-code'), bypassChip: $('bypass-chip'),
+  messages: $('messages'), input: $('input'), send: $('send'), composerScope: $('composer-scope'), modeWork: $('mode-work'), modeDocs: $('mode-documents'), modeCode: $('mode-code'), bypassChip: $('bypass-chip'),
   ctxMeter: $('ctx-meter'),
   intModel: $('int-model'), intEmpty: $('int-empty'), intBody: $('int-body'), intWindow: $('int-window'),
   intOccbar: $('int-occbar'), intLegend: $('int-legend'), intTimeline: $('int-timeline'),
@@ -417,8 +417,61 @@ function renderOverview() {
   }
   renderOverviewScope();
   loadBuildEnv(p.id);
+  loadDocTargets(p.id);
   updateModelSwitch();
 }
+// DOCUMENT TARGETS (Overview ↔ chat, either fills them): the format target
+// file, the branding text, and the raw-data (Excel) checkbox.
+async function loadDocTargets(projectId) {
+  const brand = document.getElementById('ov-brand');
+  if (!brand) return;
+  const fresh = brand.dataset.projectId !== String(projectId);
+  try {
+    const r = await window.api.documents.listFormats(projectId);
+    const pathEl = document.getElementById('ov-fmt-path');
+    const sel = document.getElementById('ov-fmt-select');
+    const reveal = document.getElementById('ov-fmt-reveal');
+    pathEl.textContent = r.active || 'None — documents use plain styling';
+    pathEl.title = r.active ? `${r.dir}/${r.active}` : '';
+    pathEl.classList.toggle('is-empty', !r.active);
+    reveal.hidden = !r.active;
+    reveal.dataset.dir = r.dir || '';
+    sel.hidden = r.formats.length < 2;
+    if (r.formats.length >= 2) {
+      sel.innerHTML = r.formats.map((f) => `<option value="${escapeHtml(f)}"${f === r.active ? ' selected' : ''}>${escapeHtml(f)}</option>`).join('');
+    }
+  } catch {}
+  if (fresh) {
+    try { brand.value = (await window.api.settings.get('output_branding', projectId)) || ''; } catch { brand.value = ''; }
+    brand.dataset.projectId = String(projectId);
+    document.getElementById('ov-brand-msg').textContent = '';
+  }
+  try { document.getElementById('ov-rawdata').checked = (await window.api.settings.get('output_rawdata', projectId)) === '1'; } catch {}
+}
+document.getElementById('ov-fmt-add').onclick = async () => {
+  const pid = state.currentProjectId; if (!pid) return;
+  try { const r = await window.api.documents.installFormat(pid); if (!r || !r.canceled) loadDocTargets(pid); } catch {}
+};
+document.getElementById('ov-fmt-select').onchange = async (e) => {
+  const pid = state.currentProjectId; if (!pid) return;
+  try { await window.api.settings.set('output_format', 'formats/' + e.target.value, pid); } catch {}
+  loadDocTargets(pid);
+};
+document.getElementById('ov-fmt-reveal').onclick = (e) => { const d = e.target.dataset.dir; if (d) window.api.projects.revealPath(d); };
+document.getElementById('ov-brand-save').onclick = async () => {
+  const pid = state.currentProjectId; if (!pid) return;
+  const msg = document.getElementById('ov-brand-msg');
+  try {
+    await window.api.settings.set('output_branding', document.getElementById('ov-brand').value.trim(), pid);
+    await window.api.settings.set('output_rawdata', document.getElementById('ov-rawdata').checked ? '1' : '0', pid);
+    msg.textContent = 'saved'; msg.className = 'test-result';
+  } catch { msg.textContent = 'save failed'; msg.className = 'test-result test-result--error'; }
+  setTimeout(() => { msg.textContent = ''; }, 2500);
+};
+document.getElementById('ov-rawdata').onchange = async (e) => {
+  const pid = state.currentProjectId; if (!pid) return;
+  try { await window.api.settings.set('output_rawdata', e.target.checked ? '1' : '0', pid); } catch {}
+};
 // The output dir may be an explicit setting or a resolved default — ask main.
 async function updateOutputDir(p) {
   if (!el.ovOutPath || !p) return;
@@ -732,7 +785,7 @@ async function renderVars() {
   const head = document.getElementById('vars-head');
   if (!list || !state.currentChatId) return;
   let vars = [];
-  try { vars = await window.api.chats.variables(state.currentChatId); } catch {}
+  try { const v = await window.api.chats.variables(state.currentChatId); vars = Array.isArray(v) ? v : []; } catch {}
   head.textContent = `KNOWN VALUES · ${vars.length}`;
   list.innerHTML = '';
   for (const v of vars) {
@@ -789,37 +842,42 @@ document.getElementById('ov-skills-all').onclick = () => setAllSkills(true);
 document.getElementById('ov-skills-none').onclick = () => setAllSkills(false);
 document.getElementById('ov-mcp-all').onclick = () => setAllMcp(true);
 document.getElementById('ov-mcp-none').onclick = () => setAllMcp(false);
+function chatModeOf(chat) {
+  return (chat && (chat.mode || (chat.coding_mode ? 'code' : ''))) || 'work';
+}
 function updateComposerMeta() {
   const model = state.selected?.model;
   const chat = state.chats.find((c) => c.id === state.currentChatId);
-  const code = chat && chat.coding_mode ? ' · CODE' : '';
-  el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}${code}`;
+  const mode = chatModeOf(chat);
+  const modeTag = chat && mode !== 'work' ? ` · ${mode.toUpperCase()}` : '';
+  el.composerScope.textContent = `${state.documents.length} DOCS · ${state.skills.length} SKILLS · ${modelTag(model)}${modeTag}`;
 }
 
-// ── Mode of operation (titlebar, per chat): PLAN harness vs CODE harness ──
+// ── Mode of operation (titlebar, per chat): WORK · DOCUMENTS · CODE ──
 function updateCodeToggle() {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
-  const code = !!(chat && chat.coding_mode);
-  el.modePlan.disabled = !chat;
-  el.modeCode.disabled = !chat;
-  el.modePlan.classList.toggle('is-active', !!chat && !code);
-  el.modeCode.classList.toggle('is-active', code);
+  const mode = chatModeOf(chat);
+  for (const [btn, m] of [[el.modeWork, 'work'], [el.modeDocs, 'documents'], [el.modeCode, 'code']]) {
+    btn.disabled = !chat;
+    btn.classList.toggle('is-active', !!chat && mode === m);
+  }
   updateBypassChip();
 }
-async function setChatMode(codeOn) {
+async function setChatMode(mode) {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
-  if (!chat || !!chat.coding_mode === codeOn) return;
-  if (codeOn) {
+  if (!chat || chatModeOf(chat) === mode) return;
+  if (mode === 'code') {
     const proj = state.projects.find((p) => p.id === state.currentProjectId);
     if (!proj || !proj.working_dir) { showSetupNotice(['workingDir']); return; }
   }
-  await window.api.chats.setCodingMode(chat.id, codeOn);
-  chat.coding_mode = codeOn ? 1 : 0;
+  await window.api.chats.setMode(chat.id, mode);
+  chat.mode = mode;
+  chat.coding_mode = mode === 'code' ? 1 : 0;
   updateCodeToggle();
   updateComposerMeta();
   // Ask, don't just refuse: a working dir without git means every write
   // prompts and bypass is off — offer the one-click fix at mode entry.
-  if (codeOn) {
+  if (mode === 'code') {
     try {
       const st = await window.api.projects.gitStatus(state.currentProjectId);
       if (st && st.workingDir && !st.hasGit) showGitOffer();
@@ -848,14 +906,15 @@ function showGitOffer() {
   };
   note.querySelector('[data-git="skip"]').onclick = () => note.remove();
 }
-el.modePlan.onclick = () => setChatMode(false);
-el.modeCode.onclick = () => setChatMode(true);
+el.modeWork.onclick = () => setChatMode('work');
+el.modeDocs.onclick = () => setChatMode('documents');
+el.modeCode.onclick = () => setChatMode('code');
 // A standing bypass is invisible power — surface it whenever coding mode is
 // on, and let one click revoke it (prompts resume immediately; main enforces).
 async function updateBypassChip() {
   const chat = state.chats.find((c) => c.id === state.currentChatId);
   let on = false;
-  if (chat && chat.coding_mode && state.currentProjectId) {
+  if (chat && chatModeOf(chat) === 'code' && state.currentProjectId) {
     try { on = (await window.api.settings.get('coding_bypass', state.currentProjectId)) === '1'; } catch {}
   }
   el.bypassChip.hidden = !on;
@@ -1874,6 +1933,7 @@ function planEvent(ev) {
     else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
     else if (ev.kind === 'escalate') planFinalize(false);
     else if (ev.kind === 'coding-mode') { planAdd(`⌥ coding harness: ${ev.tools || 0} tools${ev.gitAvailable ? ' · git' : ' · no git'}`); planFinalize(true); }
+    else if (ev.kind === 'documents-mode') { planAdd(`⌥ documents harness: ${ev.tools || 0} library tools${ev.formatTarget ? ` · format target: ${ev.formatTarget}` : ''}`); planFinalize(true); }
     else if (ev.kind === 'review') { planAdd(`⚖ reviewing ${ev.files} changed file${ev.files === 1 ? '' : 's'} (quality · security)…`); }
     else if (ev.kind === 'review-clean') { planFinalize(true); planAdd('⚖ review clean'); planFinalize(true); }
     else if (ev.kind === 'review-findings') { planFinalize(false); planAdd(`⚖ ${ev.count} finding${ev.count === 1 ? '' : 's'} — fixing…`); }
@@ -2155,11 +2215,27 @@ function showMcp() {
   el.tabbar.querySelectorAll('.tab').forEach((b) => b.classList.remove('is-active'));
   el.tbSlug.textContent = '/ mcp';
   renderMcpList(); closeMcpEditor();
+  checkMcpSync();   // async — badges rows as results land
 }
 function leaveMcp() { if (state.currentProjectId) showPage('chat'); else showFirstRun(); }
 
 async function loadMcp() { state.mcpServers = await window.api.mcp.list(); renderScope(); }
 async function refreshMcp() { state.mcpServers = await window.api.mcp.list(); renderMcpList(); renderScope(); }
+// Version-drift check: compare the live server (tools + skill versions)
+// against what the app imported/cached. Badges the row and the titlebar MCP
+// button; the badge's UPDATE action re-syncs (reconnect + skill re-import).
+async function checkMcpSync() {
+  try {
+    const r = await window.api.mcp.checkSync();
+    if (!r || !r.ok) return;
+    state.mcpSync = {};
+    for (const s of r.servers) state.mcpSync[s.serverId] = s;
+    const anyDrift = r.servers.some((s) => s.drift);
+    el.mcpBtn.classList.toggle('chip-btn--alert', anyDrift);
+    el.mcpBtn.title = anyDrift ? 'An MCP server has updated skills or tools — open to refresh' : '';
+    renderMcpList();
+  } catch (e) { console.error('[mcp sync]', e && e.message); }
+}
 
 function renderMcpList() {
   el.mcpList.innerHTML = '';
@@ -2174,12 +2250,37 @@ function renderMcpList() {
     const subText = s.status === 'error' && s.status_detail
       ? (needsAuth ? `${s.status_detail} — click SIGN IN →` : s.status_detail)
       : (toolNames || 'no tools yet');
+    const sync = (state.mcpSync || {})[s.id];
+    const driftBits = sync && sync.drift
+      ? [sync.skillsOutdated.length ? `${sync.skillsOutdated.length} skill update${sync.skillsOutdated.length === 1 ? '' : 's'}` : '',
+         sync.toolsAdded ? `${sync.toolsAdded} new tool${sync.toolsAdded === 1 ? '' : 's'}` : '',
+         sync.toolsRemoved ? `${sync.toolsRemoved} tool${sync.toolsRemoved === 1 ? '' : 's'} removed` : ''].filter(Boolean).join(' · ')
+      : '';
+    const driftTitle = sync && sync.skillsOutdated.length
+      ? sync.skillsOutdated.map((k) => `${k.name}: v${k.local} → v${k.remote}`).join('\n') : driftBits;
     li.innerHTML = `
       <span class="conn__status${statusCls}" title="${escapeHtml(s.status_detail || s.status || 'untested')}"></span>
-      <div class="conn__info"><div class="conn__label">${escapeHtml(s.name)}</div><div class="conn__type">${escapeHtml(s.transport)}${s.tools && s.tools.length ? ' · ' + s.tools.length + ' tools' : ''}</div></div>
+      <div class="conn__info"><div class="conn__label">${escapeHtml(s.name)}${driftBits ? ` <span class="conn__drift" title="${escapeHtml(driftTitle)}">⟳ ${escapeHtml(driftBits)}</span>` : ''}</div><div class="conn__type">${escapeHtml(s.transport)}${s.tools && s.tools.length ? ' · ' + s.tools.length + ' tools' : ''}</div></div>
       <div class="conn__mid"><div class="conn__url">${escapeHtml(detail)}</div><div class="conn__model${s.status === 'error' ? ' conn__model--err' : ''}">${escapeHtml(subText)}</div></div>
       <div class="conn__actions"></div>`;
     const actions = li.querySelector('.conn__actions');
+
+    if (sync && sync.drift) {
+      const upd = document.createElement('button');
+      upd.className = 'conn__btn conn__btn--primary'; upd.textContent = 'UPDATE';
+      upd.title = 'Re-sync with the server: refresh the tool listing and re-import updated skills';
+      upd.onclick = async () => {
+        upd.textContent = '…';
+        try {
+          await window.api.mcp.connect({ id: s.id });                 // re-cache tools
+          if (sync.skillsOutdated.length) await window.api.skills.importFromMcp(s.id); // re-import skills
+          upd.textContent = 'OK';
+        } catch (e) { upd.textContent = 'ERR'; console.error('[mcp update]', e && e.message); }
+        await refreshMcp();
+        await checkMcpSync();
+      };
+      actions.appendChild(upd);
+    }
 
     const toggle = document.createElement('button');
     toggle.className = 'toggle' + (s.enabled ? ' is-on' : ''); toggle.innerHTML = '<div class="toggle__knob"></div>';
@@ -2735,4 +2836,8 @@ window.addEventListener('keydown', (e) => {
   if (state.projects.length > 0) selectProject(state.projects[0].id);
   else showFirstRun();
   console.log(`[boot] init done providers=${state.providers.length} projects=${state.projects.length} selected=${JSON.stringify(state.selected)}`);
+  // Deferred version-drift check (badges the MCP button when a server has
+  // newer skills/tools than the app imported) — after boot so it never
+  // delays first paint; connection failures are tolerated silently.
+  setTimeout(() => { checkMcpSync(); }, 8000);
 })();

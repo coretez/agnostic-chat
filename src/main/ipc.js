@@ -15,7 +15,7 @@ const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
-const { buildCodingTools, hasGit, initGit, commitStep } = require('./coding-tools');
+const { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep } = require('./coding-tools');
 const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
 const webTools = require('./web-tools');
@@ -210,6 +210,28 @@ function parseSkillNames(text) {
   return [...names].filter(Boolean);
 }
 
+// Like parseSkillNames, but keeps the server's declared version for each
+// skill — the raw material for drift detection (mcp:checkSync).
+function parseSkillVersions(text) {
+  if (!text) return {};
+  let d = null; try { d = JSON.parse(text); } catch {}
+  if (!d) return {};
+  const buckets = [];
+  const sk = d.skills;
+  if (sk && Array.isArray(sk.items)) buckets.push(sk.items);
+  else if (sk && Array.isArray(sk.list)) buckets.push(sk.list);
+  else if (Array.isArray(sk)) buckets.push(sk);
+  if (Array.isArray(d.items)) buckets.push(d.items);
+  const out = {};
+  for (const arr of buckets) for (const o of arr) {
+    if (!o || typeof o !== 'object') continue;
+    const name = o.name || o.slug || o.id || o.skill;
+    const version = o.version || o.ver || o.skill_version;
+    if (name && version) out[name] = String(version);
+  }
+  return out;
+}
+
 function registerIpc() {
   // Projects
   ipcMain.handle('projects:list', (_e, opts) => repo.projects.list(opts));
@@ -341,7 +363,7 @@ function registerIpc() {
   ipcMain.handle('chats:create', (_e, input) => repo.chats.create(input));
   ipcMain.handle('chats:rename', (_e, { id, title }) => repo.chats.rename(id, title));
   ipcMain.handle('chats:setModel', (_e, { id, model }) => repo.chats.setModel(id, model));
-  ipcMain.handle('chats:setCodingMode', (_e, { id, on }) => repo.chats.setCodingMode(id, on));
+  ipcMain.handle('chats:setMode', (_e, { id, mode }) => repo.chats.setMode(id, mode));
   // Tracked variables (working memory) — visible and editable by the user.
   ipcMain.handle('chats:variables', (_e, { id }) => {
     try { return VariableStore.fromJSON(repo.chats.getVariables(id)).toJSON(); } catch { return []; }
@@ -360,6 +382,57 @@ function registerIpc() {
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
 
   // Documents (project-scoped) + chat links
+  // DOCUMENT TARGETS (Overview form): list the project's installed format
+  // targets + which is active, and install a new one (file picker → copied
+  // into the library's formats/ folder → selected).
+  const resolveProjectOutputDir = (projectId) => {
+    const project = repo.projects.get(projectId);
+    return docs.resolveOutputDir(project, repo.settings.get('documents_base') || docs.defaultBase());
+  };
+  ipcMain.handle('documents:listFormats', (_e, { projectId }) => {
+    const fsx = require('node:fs'); const px = require('node:path');
+    const outputDir = resolveProjectOutputDir(projectId);
+    let formats = [];
+    try { formats = fsx.readdirSync(px.join(outputDir, 'formats')).filter((f) => f.toLowerCase().endsWith('.html')); } catch {}
+    const explicit = String(repo.settings.get('output_format', projectId) || '').trim();
+    const active = explicit ? px.basename(explicit) : (formats.length === 1 ? formats[0] : '');
+    return { formats, active, explicit: !!explicit, dir: px.join(outputDir, 'formats') };
+  });
+  ipcMain.handle('documents:installFormat', async (e, { projectId }) => {
+    const fsx = require('node:fs'); const px = require('node:path');
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Choose a sample document (html) to use as the format target',
+      filters: [{ name: 'HTML documents', extensions: ['html', 'htm'] }],
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true };
+    const outputDir = resolveProjectOutputDir(projectId);
+    const dir = px.join(outputDir, 'formats');
+    fsx.mkdirSync(dir, { recursive: true });
+    const name = px.basename(res.filePaths[0]);
+    fsx.copyFileSync(res.filePaths[0], px.join(dir, name));
+    repo.settings.set('output_format', px.join('formats', name), projectId);
+    return { installed: name };
+  });
+  // O24 first slice: deterministic html → pdf conversion of an INDEXED
+  // library document (id, not a raw path — the index is the containment).
+  // The pdf is indexed beside its source with the same title and docType.
+  ipcMain.handle('documents:toPdf', async (_e, { id }) => {
+    const row = repo.documents.get(id);
+    if (!row || !row.path) throw new Error(`no document with id ${id}`);
+    const { htmlToPdf } = require('./render-pdf');
+    const out = await htmlToPdf(row.path);
+    let indexed = null;
+    try {
+      indexed = repo.documents.saveGenerated({
+        projectId: row.project_id, title: row.title, path: out.pdfPath, mimeType: 'application/pdf',
+        source: 'convert', docType: row.doc_type || null, version: 1,
+        properties: typeof row.properties === 'string' ? JSON.parse(row.properties) : (row.properties || null)
+      });
+    } catch (e) { console.error('[toPdf index]', e && e.message); }
+    return { pdfPath: out.pdfPath, bytes: out.bytes, id: indexed && indexed.id };
+  });
   ipcMain.handle('documents:list', (_e, { projectId }) => repo.documents.listByProject(projectId));
   ipcMain.handle('documents:create', (_e, input) => repo.documents.create(input));
   ipcMain.handle('documents:linkToChat', (_e, input) => repo.documents.linkToChat(input));
@@ -485,6 +558,47 @@ function registerIpc() {
 
   // Connect to an MCP server and list its tools. Accepts { id } (saved — uses
   // stored/OAuth token, caches the connection) or an ephemeral config.
+  // Version drift (2026-08-09): imported skills and cached tool listings are
+  // SNAPSHOTS of a server that keeps moving. Compare the live server against
+  // what the app is actually using and report — the renderer badges it and
+  // offers a one-click refresh (mcp:connect re-caches tools; then
+  // skills:importFromMcp re-imports skills). Never silently out of sync.
+  ipcMain.handle('mcp:checkSync', async (_e, { serverId } = {}) => {
+    let ts;
+    try { ts = await mcpManager.buildToolset(); } catch (e) { return { ok: false, error: e.message }; }
+    const servers = repo.mcp.list().filter((s) => s.enabled && (!serverId || s.id === serverId));
+    const localSkills = repo.skills.list();
+    const out = [];
+    for (const s of servers) {
+      const prefix = mcpManager.sanitize(s.name) + '__';
+      const live = ts.tools.filter((t) => (ts.routes.get(t.name) || {}).serverId === s.id).map((t) => t.name.replace(prefix, '')).sort();
+      if (!live.length) continue;   // not connected this pass — nothing to compare
+      const cached = (s.tools || []).map((t) => t.name).sort();
+      const toolsAdded = live.filter((t) => !cached.includes(t));
+      const toolsRemoved = cached.filter((t) => !live.includes(t));
+      const skillsOutdated = [];
+      const vc = ts.tools.find((t) => t.name === prefix + 'version_check');
+      if (vc) {
+        try {
+          const r = await mcpManager.callTool(vc.name, { client: 'claude' }, ts.routes);
+          const remote = parseSkillVersions(r.text);
+          for (const sk of localSkills) {
+            const rv = remote[sk.name];
+            if (!rv) continue;
+            const lv = String((parseFrontmatter(sk.definition || '').meta || {}).version || '');
+            if (lv && lv !== rv) skillsOutdated.push({ name: sk.name, local: lv, remote: rv });
+          }
+        } catch (e) { console.error('[mcp checkSync] version_check', s.name, e && e.message); }
+      }
+      out.push({
+        serverId: s.id, name: s.name,
+        toolsAdded: toolsAdded.length, toolsRemoved: toolsRemoved.length,
+        skillsOutdated,
+        drift: !!(toolsAdded.length || toolsRemoved.length || skillsOutdated.length)
+      });
+    }
+    return { ok: true, servers: out };
+  });
   ipcMain.handle('mcp:connect', async (_e, input) => {
     if (input.id) {
       console.log('[main] mcp:connect', { id: input.id });
@@ -679,18 +793,26 @@ function registerIpc() {
         emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
       }
 
-      // ── Coding harness mode (per-chat toggle) ─────────────────────────────
-      // File + shell tools with a HIERARCHICAL permission model (coding-tools.js):
+      // ── Chat mode (per-chat, titlebar): WORK · DOCUMENTS · CODE ──────────
+      // WORK — the general agentic harness (MCP tools + skills + planning);
+      //   no extra directives, today's default behavior.
+      // DOCUMENTS — same capabilities, but the deliverable contract is saved
+      //   documents in the library (save_document), not chat prose. No
+      //   file/shell tools.
+      // CODE — the coding harness: file + shell tools with the HIERARCHICAL
+      //   permission model (coding-tools.js):
       //   1. Scope (hard jail): file actions stay inside working_dir ∪ docs dir.
       //   2. Action gating: reads free; writes/edits/shell each ask the user
       //      over the same one-shot chat:continue channel as limit/stuck.
       //   3. Bypass: the project's coding_bypass setting skips the asking —
       //      honored ONLY when working_dir is a git repo (rollback exists).
-      // Appended to scopedTools AFTER the ceiling so the planner derives steps
-      // with them, the executor can call them, and sub-agents inherit them —
-      // they are the point of the mode, never subject to relevance selection.
+      // Coding tools are appended to scopedTools AFTER the ceiling so the
+      // planner derives steps with them, the executor can call them, and
+      // sub-agents inherit them — they are the point of the mode, never
+      // subject to relevance selection.
       const project = projectId ? repo.projects.get(projectId) : null;
       const chatRow = chatId ? repo.chats.get(chatId) : null;
+      const chatMode = (chatRow && (chatRow.mode || (chatRow.coding_mode ? 'code' : ''))) || 'work';
       const globalBase = repo.settings.get('documents_base') || docs.defaultBase();
       const outputDir = docs.resolveOutputDir(project, globalBase);
       // Canonical docs live WITH the code when a working dir exists — in the
@@ -698,7 +820,79 @@ function registerIpc() {
       // repo analysis), else in the document library.
       const docsBase = (project && project.working_dir) || outputDir;
       let coding = null;
-      if (chatRow && chatRow.coding_mode) {
+      let library = null;
+      let formatTarget = '';
+      let branding = '';
+      let rawData = false;
+      if (chatMode === 'documents') {
+        // The documents harness (O20/O22), built on the coding-harness
+        // pattern: a jailed tool pack + a mode note + planner rules. Hands
+        // differ — read-only, jailed to the LIBRARY; no shell; publication
+        // goes through save_document (versioned, indexed, placed).
+        library = buildLibraryTools({ root: outputDir });
+        // Web tools join the planning menu like coding mode — collection is
+        // research, and the planner must see the collection tools to plan it.
+        scopedTools = [...scopedTools, ...library.tools, ...webTools.WEB_TOOLS];
+        // O24: the project's OUTPUT FORMAT TARGET — a sample document whose
+        // visual system every deliverable must reproduce (branding lives in
+        // the format, sections in the skill/task). Explicit per-project
+        // setting wins; else a single .html in the library's formats/ folder
+        // is the target. A SYSTEM capability, not a skill's.
+        try {
+          const fsx = require('node:fs'); const px = require('node:path');
+          const set = String(repo.settings.get('output_format', projectId) || '').trim();
+          if (set) formatTarget = set;
+          else {
+            const fl = fsx.readdirSync(px.join(outputDir, 'formats')).filter((f) => f.toLowerCase().endsWith('.html'));
+            if (fl.length === 1) formatTarget = px.join('formats', fl[0]);
+          }
+        } catch {}
+        // The other two DOCUMENT TARGETS (Overview form ↔ chat, either fills
+        // them): branding text applied on top of the format, and the
+        // raw-data checkbox that adds an Excel export beside each report.
+        try { branding = String(repo.settings.get('output_branding', projectId) || '').trim(); } catch {}
+        try { rawData = repo.settings.get('output_rawdata', projectId) === '1'; } catch {}
+        convo = [{
+          role: 'system',
+          content: 'DOCUMENTS MODE: the deliverable of this chat is documents, not chat prose. '
+            + 'Produce or update documents with the save_document tool — reports, briefs, specs, analyses, exports — '
+            + 'which saves into the project document library, versioned and filed. A substantial answer should land '
+            + 'as a saved document, with the chat reply a short summary that names the saved file. '
+            + 'The document library is at ' + outputDir + ' — read_file, list_dir, and grep_files are jailed to it, '
+            + 'so you can read and build on every document already there. When the user iterates on a document, '
+            + 'save the revision under the same title and type (versioning is automatic) rather than creating a '
+            + 'near-duplicate or pasting long content into chat. Use the research tools to collect material before '
+            + 'writing, and keep track of which source supports each claim.'
+            + (formatTarget
+              ? '\n\nOUTPUT FORMAT TARGET: "' + formatTarget + '" in the document library is the visual standard for '
+                + 'every document you produce. Read it with read_file BEFORE composing, and reproduce its fonts, '
+                + 'masthead, header block, numbered section headings, tables, chart styling, callouts, spacing, and '
+                + 'print rules EXACTLY — replacing the sample content with this turn\'s real content. Branding and '
+                + 'layout come from the format target; sections and data come from the task and skill. The format\'s '
+                + 'web-font stylesheet links are the only permitted external references; keep every font-family '
+                + 'fallback stack so offline rendering degrades gracefully.'
+              : '')
+            + (branding
+              ? '\n\nTARGET DOCUMENT BRANDING (apply to every deliverable, on top of the format): ' + branding
+              : '')
+            + (rawData
+              ? '\n\nRAW DATA EXPORT IS ON: alongside every report, also save the collected tabular data as a '
+                + 'spreadsheet — save_document with format "xlsx", type "raw-data", the same title plus " — Data", '
+                + 'the same properties, and content as JSON {"sheets":[{"name":"…","rows":[[header…],[values…]]}]} '
+                + '(one sheet per dataset; the app renders the Excel file deterministically).'
+              : '')
+            + ((!formatTarget || !branding)
+              ? '\n\nDOCUMENT TARGETS MISSING: '
+                + [!formatTarget ? 'Target Document Format' : '', !branding ? 'Target Document Branding' : ''].filter(Boolean).join(' and ')
+                + ' is not set for this project. Before producing a document, ask the user for the missing target(s) — '
+                + 'they can answer here in chat (state it and it will be recorded to the project) or set it on the '
+                + 'project OVERVIEW page under DOCUMENT TARGETS. Do not silently invent branding or a format.'
+              : '')
+            + (() => { const l = projectId ? projectDocs.listLibrary(projectId) : ''; return l ? '\n\nPROJECT LIBRARY — documents already saved for this project; read them at these exact paths:\n' + l : ''; })()
+        }, ...convo];
+        emitProgress({ type: 'process', kind: 'documents-mode', outputDir, tools: library.tools.length, formatTarget, branding: !!branding, rawData });
+      }
+      if (chatMode === 'code') {
         if (project && project.working_dir) {
           const gitAvailable = hasGit(project.working_dir);
           // Live re-check: the user can initialize git MID-TURN from the
@@ -758,9 +952,11 @@ function registerIpc() {
       // tools (no `__` namespace) route to the pack; everything else to MCP.
       const rawCallTool = (name, args) => (coding && coding.names.has(name))
         ? coding.call(name, args)
-        : webTools.names.has(name)
-          ? webTools.call(name, args)
-          : mcpManager.callTool(name, args, toolset.routes);
+        : (library && library.names.has(name))
+          ? library.call(name, args)
+          : webTools.names.has(name)
+            ? webTools.call(name, args)
+            : mcpManager.callTool(name, args, toolset.routes);
 
       // Authored per-project agents the orchestrator can delegate to by name.
       let authoredAgents = [];
@@ -772,7 +968,7 @@ function registerIpc() {
       const assignTool = { ...ASSIGN_TOOL, description: ASSIGN_TOOL.description + roster };
       // Web tools ride scopedTools in coding mode; plain chats get them here
       // (execution-only) so internet access exists everywhere without dupes.
-      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...(coding ? [] : webTools.WEB_TOOLS), ...scopedTools];
+      const orchestratorTools = [delegateTool, assignTool, SAVE_DOCUMENT_TOOL, SET_VARIABLE_TOOL, ...((coding || library) ? [] : webTools.WEB_TOOLS), ...scopedTools];
 
       // Document placement template (user-configurable; global default).
       // `project`/`outputDir` were resolved above (coding-mode block).
@@ -788,8 +984,21 @@ function registerIpc() {
           emitProgress({ type: 'document-saved', title: projectDocs.CANONICAL[canonType], path: w.absPath, relPath: w.relPath, version: w.version, mime: 'text/markdown' });
           return { text: `Updated ${w.relPath} (v${w.version}) — the project's canonical ${canonType} document.` };
         }
-        const meta = { type: args.type, title: args.title, format: args.format, properties: args.properties || {} };
-        const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: args.content || '' });
+        // Raw-data export: the model authors DATA (JSON sheets); the
+        // framework renders the spreadsheet (spreadsheet.js). Deterministic —
+        // a malformed payload is a clear tool error, never a corrupt file.
+        let saveFormat = args.format;
+        let saveContent = args.content || '';
+        if (/^(xlsx?|spreadsheet|excel)$/i.test(String(args.format || ''))) {
+          try {
+            saveContent = require('./spreadsheet').sheetsToXml(JSON.parse(String(args.content || '')));
+            saveFormat = 'xls';
+          } catch (e) {
+            return { text: `save_document (spreadsheet): content must be JSON {sheets:[{name, rows:[[…]]}]} — ${e.message}`, isError: true };
+          }
+        }
+        const meta = { type: args.type, title: args.title, format: saveFormat, properties: args.properties || {} };
+        const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: saveContent });
         let row = null;
         try {
           row = repo.documents.saveGenerated({ projectId, title: args.title || w.relPath, path: w.absPath, mimeType: w.mime, source: 'chat', docType: args.type || null, version: w.version, properties: args.properties || null });
@@ -958,7 +1167,7 @@ function registerIpc() {
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, projectDocs: docsBlock, repoMap }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, documentsMode: !!library, projectDocs: docsBlock, repoMap, formatTarget, branding, rawData }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -974,6 +1183,27 @@ function registerIpc() {
           for (const rec of plan.record) {
             const e = store.set({ key: rec.key, value: rec.value }, { confidence: 'user', source: 'align' });
             if (e) emitProgress({ type: 'process', kind: 'var-set', key: e.key });
+            // Chat ↔ Overview parity: DOCUMENT TARGETS stated in chat land in
+            // the SAME per-project settings the Overview form shows. Format
+            // values resolve against the library's formats/ files by name.
+            try {
+              if (projectId && rec.key === 'document_branding') {
+                repo.settings.set('output_branding', rec.value, projectId);
+                emitProgress({ type: 'process', kind: 'doc-target-set', target: 'branding' });
+              } else if (projectId && rec.key === 'document_format') {
+                const fsx = require('node:fs'); const px = require('node:path');
+                const want = String(rec.value).toLowerCase();
+                const fl = fsx.readdirSync(px.join(outputDir, 'formats')).filter((f) => f.toLowerCase().endsWith('.html'));
+                const hit = fl.find((f) => f.toLowerCase().includes(want)) || (fl.length === 1 ? fl[0] : null);
+                if (hit) {
+                  repo.settings.set('output_format', px.join('formats', hit), projectId);
+                  emitProgress({ type: 'process', kind: 'doc-target-set', target: 'format', value: hit });
+                }
+              } else if (projectId && rec.key === 'document_rawdata') {
+                repo.settings.set('output_rawdata', /^(1|true|yes|on)$/i.test(String(rec.value)) ? '1' : '0', projectId);
+                emitProgress({ type: 'process', kind: 'doc-target-set', target: 'rawdata' });
+              }
+            } catch (e) { console.error('[doc-target-set]', e && e.message); }
           }
           if (projectId) {
             try {
@@ -1002,7 +1232,7 @@ function registerIpc() {
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, formatTarget, branding, rawData };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck via the shared one-shot prompt queue.

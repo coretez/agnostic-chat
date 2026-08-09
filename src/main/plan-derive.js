@@ -72,9 +72,16 @@ const SUBMIT_PLAN_TOOL = {
 
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '' }) {
+function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
   const parts = [];
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
+  if (formatTarget) {
+    // O24: the documents harness's visual standard — plans that produce a
+    // document must read it early and compose against it.
+    parts.push('OUTPUT FORMAT TARGET (library file — the visual standard every produced document must reproduce; plan an early step to read it): ' + formatTarget);
+  }
+  if (branding) parts.push('TARGET DOCUMENT BRANDING (apply to every deliverable): ' + clip(branding, 800));
+  if (rawData) parts.push('RAW DATA EXPORT: ON — plans that produce a report must also save the collected tabular data as a spreadsheet (save_document, format "xlsx", type "raw-data", content JSON {"sheets":[{"name","rows"}]}).');
   if (repoMap) {
     // Coding mode: the planner must plan against REAL files, not guesses —
     // steps that name actual paths execute; steps that imagine them wander.
@@ -120,7 +127,22 @@ const CODING_RULES = `
 - CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.
 - DOCUMENTATION: the canonical project docs (SPEC/DESIGN/PSEUDOCODE/KNOWLEDGE) are maintained AUTOMATICALLY by the pipeline after execution — do NOT plan documentation steps and do NOT call save_document with those types. save_document is for deliverables (reports, exports) only.`;
 
-const DERIVE_PROMPT = (ctx, request, codingMode = false) =>
+// Documents-mode plan-shape contract (HARNESS_OBJECTIVES O22, mirror of
+// CODING_RULES): alignment before audience/format decisions, collect →
+// analyze → draft → verify shape, deliverables land via save_document.
+// Appended only when the documents harness is active this turn.
+const DOCUMENTS_RULES = `
+- PLAN BY DEFAULT (never wander): NEVER return simple=true when the request asks for a document, report, brief, analysis, plan, or any named deliverable. The canonical shape is (1..n) collect from each needed source, (n+1) analyze the collected material, (n+2) draft and save the deliverable with save_document, (last) verify it. simple=true is ONLY for a single question or lookup.
+- ALIGN FIRST (never race): if the request requires choosing the document's AUDIENCE (who reads it), FORMAT (its structure/sections), TYPE (markdown | html | pdf), or SCOPE — and that choice is NOT already fixed by KNOWN VALUES, the project brief, or the request — do NOT plan steps. Call submit_plan with "decisions". Never silently pick for the user.
+- RECORD DECISIONS: when the request states them ("HTML report for the CISO"), put audience/format/type in "record" as {key, value} so they persist.
+- COLLECT IN PARALLEL: collection steps that pull from independent sources should be delegate=true, and parallel when they don't depend on each other's discoveries.
+- BUILD ON THE LIBRARY: when the request extends or revises existing work, an early step reads the relevant library documents (read_file at the PROJECT LIBRARY paths). Revise an existing document by saving the same title/type again (versioning is automatic) — never create a near-duplicate.
+- DELIVERABLE CONTRACT: the final document is saved with save_document (title, type, format, properties including customer/tenant and period where they apply); the chat reply is a short summary naming the saved file — never the full document pasted into chat.
+- VERIFY: a plan that produces a document MUST end with a verification step that re-checks the saved document's claims against the collected data and sources, its internal consistency (numbers, dates, names), and its completeness against the request — fixing and re-saving if needed.
+- FORMAT TARGET: when the context names an OUTPUT FORMAT TARGET file, the plan MUST read it (read_file) before any compose step, and the compose step MUST reproduce its visual system — fonts, masthead, header, section styling, tables, charts, print rules — with the new content. The format is the project's standard, not a suggestion.
+- DOCUMENT TARGETS: the project's Target Document Format, Target Document Branding, and raw-data export are project-level facts — when set they appear in this context. If the user asks for a document while the format or branding is MISSING from the context, include a decision for each missing target (the user can answer in chat or set them on the project OVERVIEW under DOCUMENT TARGETS). When the user states a target in chat, put it in "record" — {key:"document_branding"}, {key:"document_format"}, or {key:"document_rawdata", value:"on"|"off"} — so it persists to the project.`;
+
+const DERIVE_PROMPT = (ctx, request, codingMode = false, documentsMode = false) =>
 `You are the planning stage of an LLM assistant. Decide whether the user's request needs a multi-step plan, and if so derive the steps — informed by the skill instructions in play (they often prescribe a procedure: follow it).
 
 ${ctx}
@@ -133,7 +155,7 @@ Guidance:
 - Otherwise prefer 2–6 concrete, ordered steps. Each step must be a complete instruction that could be executed on its own with the values known so far.
 - For each step, state what it "produces" — the named values (ids, paths) or artifact later steps will need. Steps that discover identifiers come before steps that use them.
 - DELEGATION: mark a step delegate=true when it is self-contained and would flood the main thread with bulk it doesn't need to keep (pulling a large report, sweeping many records) — an isolated sub-agent does the work and returns only its conclusion. Name a listed agent when one fits, else "auto". Mark delegated steps "parallel" only when they don't depend on each other's discoveries.
-- MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.${codingMode ? CODING_RULES : ''}
+- MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.${codingMode ? CODING_RULES : ''}${documentsMode ? DOCUMENTS_RULES : ''}
 
 Call submit_plan now.`;
 
@@ -189,10 +211,10 @@ function normalizeSteps(steps, startId = 1) {
  *   On any failure returns {simple:true} — the caller falls back to the flat
  *   loop, so planning can never make a turn WORSE than today's behavior.
  */
-async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, projectDocs = '', repoMap = '' }) {
+async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, documentsMode = false, projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap });
-    const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode));
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, formatTarget, branding, rawData });
+    const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode, documentsMode));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     // User decisions stated in the request — persisted by the caller at
     // `user` confidence so they survive turns and outrank model guesses (O8).
@@ -205,9 +227,9 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
       .map((r) => ({ key: r.key.trim().toLowerCase().replace(/\s+/g, '_'), value: String(r.value).trim() }))
       .filter((r) => RECORD_KEY.test(r.key) && r.value.length > 0 && r.value.length <= 100);
     // Alignment outcome (O7): open direction decisions end the turn awaiting
-    // the user — no steps run. Only honored in coding mode (the rules that
-    // elicit it are only issued there).
-    const decisions = (codingMode && Array.isArray(parsed.decisions) ? parsed.decisions : [])
+    // the user — no steps run. Only honored in the modes whose rules elicit
+    // it (coding: platform/stack; documents: audience/format/type).
+    const decisions = ((codingMode || documentsMode) && Array.isArray(parsed.decisions) ? parsed.decisions : [])
       .filter((d) => d && typeof d.question === 'string' && d.question.trim())
       .map((d) => ({
         question: d.question.trim(),
@@ -230,9 +252,9 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
  * Matches the `refinePlan` signature executePlan expects.
  * @returns {Promise<{steps:Array}>} empty steps = "nothing more needed".
  */
-async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '', repoMap = '' }) {
+async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, formatTarget, branding, rawData });
     const doneDigest = done.map((d) => `- [step ${d.step}] ${clip(d.task, 160)}: ${clip(d.conclusion, 400)}`).join('\n');
     const stuck = { task: stuckStep ? stuckStep.task : '', partial: partial || '' };
     const parsed = await callForPlan(connector, model, REFINE_PROMPT(ctx, (plan && plan.goal) || '', doneDigest, stuck, reason || 'stuck', userText || ''));

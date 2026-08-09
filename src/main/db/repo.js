@@ -188,9 +188,13 @@ const chats = {
       .prepare('SELECT * FROM chats WHERE project_id = ? AND archived_at IS NULL ORDER BY updated_at DESC')
       .all(projectId);
   },
-  // Coding-harness toggle: file/shell tools jailed to the project working_dir.
-  setCodingMode(id, on) {
-    getDb().prepare("UPDATE chats SET coding_mode = ?, updated_at = datetime('now') WHERE id = ?").run(on ? 1 : 0, id);
+  // Chat mode: work (general agentic) | documents (deliverables are saved
+  // docs) | code (jailed file/shell harness). coding_mode stays in sync for
+  // anything still reading the old boolean.
+  setMode(id, mode) {
+    const m = ['work', 'documents', 'code'].includes(mode) ? mode : 'work';
+    getDb().prepare("UPDATE chats SET mode = ?, coding_mode = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(m, m === 'code' ? 1 : 0, id);
   },
   rename(id, title) {
     getDb().prepare("UPDATE chats SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, id);
@@ -304,6 +308,10 @@ function withTools(row) {
 const skills = {
   create({ name, description = null, definition = null, tools = null }) {
     const db = getDb();
+    // Names are identities (tool ceilings, MCP upserts, and the planner all
+    // key on them) — a duplicate is always a mistake, refuse it clearly.
+    const dup = db.prepare('SELECT id FROM skills WHERE name = ?').get(name);
+    if (dup) throw new Error(`a skill named "${name}" already exists (id ${dup.id}) — update it instead`);
     const info = db
       .prepare('INSERT INTO skills (name, description, definition, tools_json) VALUES (?, ?, ?, ?)')
       .run(name, description, definition, tools ? JSON.stringify(tools) : null);

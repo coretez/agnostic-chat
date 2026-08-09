@@ -51,7 +51,10 @@ function extFor(format, mime) {
   return 'txt';
 }
 function mimeFor(ext) {
-  return { html: 'text/html', md: 'text/markdown', json: 'application/json', txt: 'text/plain' }[ext] || 'text/plain';
+  return {
+    html: 'text/html', md: 'text/markdown', json: 'application/json', txt: 'text/plain',
+    xls: 'application/vnd.ms-excel', csv: 'text/csv', pdf: 'application/pdf'
+  }[ext] || 'text/plain';
 }
 
 // Fill a template into a relative path. Placeholders: {type} {tenant} {period} {title} {ext}.

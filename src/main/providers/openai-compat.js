@@ -114,7 +114,12 @@ function normalizeUsage(u) {
 async function streamChat(base, key, body, onDelta, signal) {
   const ctrl = new AbortController();
   linkSignal(ctrl, signal);
-  const IDLE = 90000;
+  // Idle = time with NO stream data. Thinking models (Kimi K2.x, o-series
+  // style) can reason silently for minutes before the first delta — 90s
+  // aborted healthy requests mid-think (seen live 2026-08-08: a monthly-
+  // report turn died with "This operation was aborted"). A stalled stream
+  // still dies, just patiently.
+  const IDLE = 300000;
   let idle = setTimeout(() => ctrl.abort(), IDLE);
   const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
   let res;

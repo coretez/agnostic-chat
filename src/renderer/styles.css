@@ -500,6 +500,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .codebtn--bypass:hover { color: var(--danger); border-color: var(--danger); }
 
 /* Mode of operation (titlebar, top-left): PLAN harness vs CODE harness */
+.ovcard__sub { font-family: var(--mono); font-size: 10px; letter-spacing: 0.8px; color: var(--ink3); margin: 10px 0 4px; }
+.conn__drift { font-family: var(--mono); font-size: 10px; letter-spacing: 0.4px; color: #c9821f; border: 1px solid #c9821f; border-radius: 3px; padding: 1px 6px; margin-left: 8px; vertical-align: 1px; }
+.chip-btn--alert { color: #c9821f; border-color: #c9821f; box-shadow: 0 0 0 1px rgba(201, 130, 31, 0.25); }
+.ovfmt__select { height: 24px; font-family: var(--mono); font-size: 11px; background: var(--raise); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; max-width: 220px; }
+.ovfmt__raw { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 12px; color: var(--ink2); cursor: pointer; }
 .modeswitch { -webkit-app-region: no-drag; display: inline-flex; margin-left: 10px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .modeswitch__opt { height: 22px; padding: 0 10px; border: none; background: var(--raise); color: var(--ink3); font-family: var(--mono); font-size: 10px; letter-spacing: 0.8px; cursor: pointer; }
 .modeswitch__opt + .modeswitch__opt { border-left: 1px solid var(--line); }

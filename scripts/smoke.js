@@ -807,6 +807,34 @@ app.whenReady().then(async () => {
       model: 'mock', userText: 'x', codingMode: false
     });
     assert(!notCoding.align, 'align: decisions are ignored outside coding mode');
+
+    const docAligned = await dp({
+      connector: mockPlanner({ simple: false, goal: 'monthly report', decisions: [{ question: 'Who is the audience?', options: ['CISO', 'engineering'] }] }),
+      model: 'mock', userText: 'write the monthly report', documentsMode: true
+    });
+    assert(docAligned.align === true && docAligned.decisions.length === 1, 'align: documents-mode decisions (audience/format/type) end planning too (O22)');
+  }
+
+  // ── O20: documents-mode library pack — same jail, read-only hands ──────────
+  {
+    const { buildLibraryTools } = require('../src/main/coding-tools');
+    const lib = path.join(tmp, 'doc-library');
+    fs.mkdirSync(path.join(lib, 'acme', 'monthly-reports'), { recursive: true });
+    fs.writeFileSync(path.join(lib, 'acme', 'monthly-reports', 'aug.md'), '# August\nfindings: clean\n');
+    const lt = buildLibraryTools({ root: lib });
+
+    assert(lt.tools.length === 3 && !lt.names.has('write_file') && !lt.names.has('run_command'), 'library: pack is read-only — no write or shell tools offered');
+    const lr = await lt.call('read_file', { path: 'acme/monthly-reports/aug.md' });
+    assert(!lr.isError && lr.text.includes('findings: clean'), 'library: reads resolve against the library root');
+    const ll = await lt.call('list_dir', { depth: 3 });
+    assert(!ll.isError && ll.text.includes('aug.md'), 'library: list_dir walks the library tree');
+    const lg = await lt.call('grep_files', { pattern: 'findings' });
+    assert(!lg.isError && lg.text.includes('aug.md:2'), 'library: grep_files searches document contents');
+    const lesc1 = await lt.call('read_file', { path: '../outside/secret.txt' });
+    const lesc2 = await lt.call('read_file', { path: '/etc/passwd' });
+    assert(lesc1.isError && lesc2.isError, 'library: jail blocks relative + absolute escapes (single root)');
+    const lw = await lt.call('write_file', { path: 'x.md', content: 'no' });
+    assert(lw.isError && lw.text.includes('unknown'), 'library: write_file is not a library tool — refused, nothing written');
   }
 
   // ── O9: step-commits — the plan is the git history ─────────────────────────
@@ -960,6 +988,10 @@ app.whenReady().then(async () => {
     assert(coded.includes('PLAN BY DEFAULT') && coded.includes('NEVER return simple=true'), 'coding rules: mutating requests are never simple (plan-by-default)');
     assert(coded.includes('stages, phases, or an ordered sequence') && coded.includes('documentation, or a recommendation rather than code'), 'coding rules: staged/design requests plan too, even when the deliverable is prose');
     assert(DERIVE_PROMPT('ctx', 'req', false).includes('PLAN BY DEFAULT') === false, 'coding rules: plan-by-default applies only in coding mode');
+    const docRules = DERIVE_PROMPT('ctx', 'req', false, true);
+    assert(docRules.includes('AUDIENCE') && docRules.includes('save_document') && docRules.includes('COLLECT IN PARALLEL'), 'documents rules: align on audience/format/type, save_document contract, parallel collection (O22)');
+    assert(docRules.includes('VERIFY') && docRules.includes('versioning is automatic'), 'documents rules: verify step required; revise over recreate');
+    assert(DERIVE_PROMPT('ctx', 'req', false, false).includes('AUDIENCE') === false, 'documents rules: issued only in documents mode');
     const ctx = planContext({ repoMap: 'cli.js\ntest/cli.test.js' });
     assert(ctx.includes('WORKING DIRECTORY MAP') && ctx.includes('real files') && ctx.includes('cli.js'), 'planner context: working-directory map feeds Pass 2 so steps name real paths');
   }

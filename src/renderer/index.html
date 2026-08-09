@@ -18,7 +18,8 @@
       <span class="titlebar__slug" id="titlebar-slug"></span>
       <!-- Mode of operation for the open chat: planning harness vs coding harness -->
       <div class="modeswitch" id="mode-switch">
-        <button class="modeswitch__opt is-active" id="mode-plan" type="button" disabled title="Planning harness — MCP tools &amp; skills">PLAN</button>
+        <button class="modeswitch__opt is-active" id="mode-work" type="button" disabled title="Work harness — general agentic work with MCP tools &amp; skills">WORK</button>
+        <button class="modeswitch__opt" id="mode-documents" type="button" disabled title="Documents harness — research &amp; produce documents into the project library">DOCUMENTS</button>
         <button class="modeswitch__opt" id="mode-code" type="button" disabled title="Coding harness — file &amp; shell tools rooted at the project working directory">CODE</button>
       </div>
       <button class="codebtn codebtn--bypass" id="bypass-chip" type="button" hidden title="Approvals are bypassed for this project (git rollback available). Click to turn prompts back on.">BYPASS ✕</button>
@@ -216,6 +217,24 @@
                   <button class="btn btn--ghost btn--sm" id="ov-out-change" type="button">CHANGE</button>
                 </div>
                 <div class="ovcard__note">Where generated documents (reports, exports) are saved — organized by type/tenant, versioned, and indexed. Defaults to your Documents folder; change it to a repo subfolder or shared drive.</div>
+              </div>
+
+              <div class="ovcard">
+                <div class="ovcard__title">DOCUMENT TARGETS</div>
+                <div class="ovcard__note">What DOCUMENTS-mode deliverables must look like. Leave a target empty and the chat will ask for it — answers given in chat are saved back here.</div>
+                <div class="ovcard__sub">TARGET DOCUMENT FORMAT</div>
+                <div class="ovwd">
+                  <span class="ovwd__glyph">🎨</span>
+                  <span class="ovwd__path" id="ov-fmt-path" title="">None — documents use plain styling</span>
+                  <div class="spacer"></div>
+                  <select class="ovfmt__select" id="ov-fmt-select" hidden></select>
+                  <button class="chip-btn" id="ov-fmt-reveal" type="button" title="Reveal in Finder" hidden>⤴ FINDER</button>
+                  <button class="btn btn--ghost btn--sm" id="ov-fmt-add" type="button">ADD FORMAT…</button>
+                </div>
+                <div class="ovcard__sub">TARGET DOCUMENT BRANDING</div>
+                <textarea class="ovcheat" id="ov-brand" rows="3" placeholder="e.g. Fluency Security — masthead 'Fluency SOC', accent #1436d9, footer 'Confidential — prepared for Expo'"></textarea>
+                <label class="ovfmt__raw"><input type="checkbox" id="ov-rawdata"> Include raw data with each report (Excel spreadsheet)</label>
+                <div class="ovcheat__actions"><div class="spacer"></div><span class="test-result" id="ov-brand-msg"></span><button class="btn btn--brand btn--sm" id="ov-brand-save" type="button">SAVE</button></div>
               </div>
 
               <div class="ovcard">

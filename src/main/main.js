@@ -10,6 +10,21 @@ const mcpManager = require('./mcp/manager');
 
 const isDev = process.argv.includes('--dev');
 
+// HARNESS_FLOW.md §6 finding #1: an isolated test profile. --user-data-dir
+// redirects userData (and so the database) BEFORE anything opens it — the
+// only safe way to live-test against a scratch DB (a HOME override does not
+// redirect app.getPath('userData') on macOS).
+const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
+if (userDataArg) app.setPath('userData', path.resolve(userDataArg.split('=').slice(1).join('=')));
+
+// §6 finding #2: a remote-debugging port is total control over the renderer
+// and, through IPC, the database. Development only — a packaged build refuses
+// to start with it rather than silently exposing itself.
+if (app.isPackaged && (app.commandLine.hasSwitch('remote-debugging-port') || app.commandLine.hasSwitch('inspect'))) {
+  console.error('remote debugging is not permitted in packaged builds');
+  app.quit();
+}
+
 /**
  * Create the main application window.
  *

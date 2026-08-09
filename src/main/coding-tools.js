@@ -471,4 +471,56 @@ function buildCodingTools({ root, docsRoot, approveAction, buildEnv = {}, projec
   return { tools: TOOLS, names, call };
 }
 
-module.exports = { buildCodingTools, hasGit, initGit, commitStep, CODING_TOOLS: TOOLS };
+// ── Documents-mode library pack (O20) ───────────────────────────────────────
+// The read-only subset of the coding pack, jailed to the DOCUMENT LIBRARY as
+// the single root. Same tool names, same jail machinery, same {text,isError}
+// contract — DOCUMENTS mode is the coding harness pattern with different
+// hands: no shell, no raw writes (publication goes through save_document).
+const LIBRARY_TOOLS = [
+  {
+    name: 'read_file',
+    description:
+      'Read a document from the project document library. Paths are the ones shown in the '
+      + 'PROJECT LIBRARY listing (relative to the library, or absolute inside it). Optional '
+      + 'offset (1-based start line) and limit (line count) for large files.',
+    inputSchema: TOOLS.find((t) => t.name === 'read_file').inputSchema
+  },
+  {
+    name: 'list_dir',
+    description:
+      'List folders and documents in the project document library (recursive, shallow by default).',
+    inputSchema: TOOLS.find((t) => t.name === 'list_dir').inputSchema
+  },
+  {
+    name: 'grep_files',
+    description:
+      'Search document contents in the project library with a regular expression (falls back to '
+      + 'a literal search). Returns path:line: text matches.',
+    inputSchema: TOOLS.find((t) => t.name === 'grep_files').inputSchema
+  }
+];
+
+/**
+ * Build the documents-mode tool pack: reads jailed to the library root.
+ * Reads are level-"free" in the permission hierarchy — no approve callback,
+ * because nothing here can mutate. @returns {{tools, names, call}}
+ */
+function buildLibraryTools({ root }) {
+  const jail = makeJail([root]);
+  const names = new Set(LIBRARY_TOOLS.map((t) => t.name));
+  async function call(name, args = {}) {
+    try {
+      switch (name) {
+        case 'read_file': return readFileTool(jail, args);
+        case 'list_dir': return listDirTool(jail, args);
+        case 'grep_files': return grepFilesTool(jail, args);
+        default: return { text: `unknown library tool: ${name}`, isError: true };
+      }
+    } catch (e) {
+      return { text: `${name} failed: ${e.message}`, isError: true };
+    }
+  }
+  return { tools: LIBRARY_TOOLS, names, call };
+}
+
+module.exports = { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep, CODING_TOOLS: TOOLS, LIBRARY_TOOLS };

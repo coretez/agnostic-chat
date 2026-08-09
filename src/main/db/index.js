@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 
 let db = null;
 
@@ -229,6 +229,14 @@ function migrate(database) {
         PRIMARY KEY (project_id, server_id)
       );
     `);
+  }
+
+  // v18: three chat modes — work | documents | code. Replaces the boolean
+  // coding_mode toggle (kept in sync for anything still reading it).
+  if (current < 18) {
+    const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
+    if (!ccols.includes('mode')) database.exec('ALTER TABLE chats ADD COLUMN mode TEXT');
+    database.exec("UPDATE chats SET mode = CASE WHEN coding_mode = 1 THEN 'code' ELSE 'work' END WHERE mode IS NULL");
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.
