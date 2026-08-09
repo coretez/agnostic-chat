@@ -815,6 +815,55 @@ app.whenReady().then(async () => {
     assert(docAligned.align === true && docAligned.decisions.length === 1, 'align: documents-mode decisions (audience/format/type) end planning too (O22)');
   }
 
+  // ── O16: fan-out groups + merge contracts (execute.js) ─────────────────────
+  {
+    const { executePlan } = require('../src/main/execute');
+    const { VariableStore } = require('../src/main/variables');
+    let inFlight = 0, maxInFlight = 0;
+    const runParallel = async (s) => {
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 25));
+      inFlight--;
+      return { conclusion: `result-${s.id} case_id: C${s.id}00` };
+    };
+    const chat = async () => ({ text: 'seq done', toolCalls: [] });
+    const groupSteps = [
+      { id: 1, task: 'collect a', parallel: true, group: 'collect', agent: 'auto' },
+      { id: 2, task: 'collect b', parallel: true, group: 'collect', agent: 'auto' },
+      { id: 3, task: 'collect c', parallel: true, group: 'collect', agent: 'auto' }
+    ];
+    let mergeArgs = null;
+    const exec = await executePlan({
+      chat, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [...groupSteps, { id: 4, task: 'analyze the merged product', parallel: false, agent: 'auto' }] },
+      tools: [], store: new VariableStore(), history: [], runParallel,
+      mergeGroup: async (a) => { mergeArgs = a; return 'MERGED: ' + a.results.map((r) => r.conclusion).join(' | '); }
+    });
+    assert(maxInFlight >= 2, 'O16: group members run CONCURRENTLY (not awaited one at a time)');
+    assert(exec.stepResults.length === 2 && exec.stepResults[0].group === 'collect', 'O16: a fan-out group lands as ONE step-result');
+    assert(exec.stepResults[0].conclusion.startsWith('MERGED:') && mergeArgs.results.length === 3, 'O16: the merge contract sees every member result');
+    assert(exec.completed && exec.stepResults[1].conclusion === 'seq done', 'O16: sequential steps still run after the group');
+
+    const exec2 = await executePlan({
+      chat, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: groupSteps }, tools: [], store: new VariableStore(), history: [], runParallel,
+      mergeGroup: async () => { throw new Error('merge died'); }
+    });
+    assert(exec2.completed && exec2.stepResults[0].conclusion.includes('result-1') && exec2.stepResults[0].conclusion.includes('result-3'),
+      'O16: merge failure degrades to concatenation — the group cannot break the turn');
+
+    const { derivePlan: dp16 } = require('../src/main/plan-derive');
+    const mock16 = (args) => ({ chat: async () => ({ text: '', toolCalls: [{ id: 'p', name: 'submit_plan', args }] }) });
+    const gp = await dp16({
+      connector: mock16({ simple: false, goal: 'g', steps: [
+        { task: 'a', group: 'Pull' }, { task: 'b', group: 'pull' }, { task: 'c' }
+      ], orchestrator: { merge: 'dedupe by case id', on_conflict: 'prefer newest' } }),
+      model: 'mock', userText: 'x'
+    });
+    assert(gp.steps[0].parallel === true && gp.steps[0].group === 'pull' && gp.steps[1].group === 'pull', 'O16: a group implies parallel isolation; names normalize');
+    assert(gp.orchestrator && gp.orchestrator.merge === 'dedupe by case id', 'O16: the orchestrator contract survives plan normalization');
+  }
+
   // ── O20: documents-mode library pack — same jail, read-only hands ──────────
   {
     const { buildLibraryTools } = require('../src/main/coding-tools');

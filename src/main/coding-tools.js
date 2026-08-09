@@ -1,7 +1,7 @@
 'use strict';
 
 // Coding-harness tool pack: file + shell tools for a chat with coding mode ON.
-// Permissions are a HIERARCHY (docs/PLANNING_ARCHITECTURE.md §13c):
+// Permissions are a HIERARCHY (the internal planning-architecture record §13c):
 //
 //   1. Scope — never bypassable. Every file action must resolve inside an
 //      allowed root: the project's working directory or its documents

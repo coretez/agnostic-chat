@@ -252,6 +252,18 @@ function registerIpc() {
     return { ok: true, project: repo.projects.setWorkingDir(id, res.filePaths[0]) };
   });
   ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
+  // In-place update (git-checkout mode today; release channel when packaged).
+  ipcMain.handle('update:check', async () => {
+    try { return await require('./updater').checkForUpdate(); }
+    catch (e) { return { available: false, error: e.message }; }
+  });
+  ipcMain.handle('update:apply', async (e) => {
+    try {
+      return await require('./updater').applyUpdate((phase) => {
+        try { e.sender.send('update:phase', { phase }); } catch {}
+      });
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
   ipcMain.handle('projects:setPreferredModel', (_e, { id, model }) => repo.projects.setPreferredModel(id, model));
   // Coding-mode git story: report + one-click initialize (deterministic, main-side).
   ipcMain.handle('projects:gitStatus', (_e, { id }) => {
@@ -380,6 +392,7 @@ function registerIpc() {
   ipcMain.handle('chats:archive', (_e, { id }) => repo.chats.archive(id));
   ipcMain.handle('messages:list', (_e, { chatId }) => repo.messages.listByChat(chatId));
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
+  ipcMain.handle('messages:rate', (_e, { id, rating }) => repo.messages.setRating(id, rating));
 
   // Documents (project-scoped) + chat links
   // DOCUMENT TARGETS (Overview form): list the project's installed format
@@ -1231,7 +1244,7 @@ function registerIpc() {
           planInfo = { steps: 0, replans: 0, completed: true };
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
-          emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel })) });
+          emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', orchestrator: plan.orchestrator || null, steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel, group: s.group || '' })) });
           const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, formatTarget, branding, rawData };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
@@ -1285,6 +1298,22 @@ function registerIpc() {
             // (fingerprint_hash) had no fingerprint_hash and returned thin
             // text with 0 tool calls). Prepend working memory + the step's
             // produces contract to the task.
+            // O16: the group merge — ONE bounded fast-model call honoring the
+            // plan's orchestrator contract. The executor falls back to
+            // concatenation if this throws or returns nothing.
+            mergeGroup: async ({ group, results }) => {
+              const o = (plan && plan.orchestrator) || {};
+              const instruction = [
+                o.merge || `Combine the results of the "${group}" tasks into one coherent digest. Preserve every named value (ids, paths, numbers) verbatim; dedupe repeated facts; keep it complete but tight.`,
+                o.on_conflict ? `On conflicting findings: ${o.on_conflict}` : ''
+              ].filter(Boolean).join('\n');
+              emitProgress({ type: 'process', kind: 'group-merge', group, members: results.length, model: fastModel });
+              return await mergeResults({
+                connector: { chat: chatAbortable }, model: fastModel, instruction,
+                results: results.map((r) => ({ agent: 'group', task: r.task, conclusion: r.conclusion })),
+                onEvent: emitProgress
+              });
+            },
             runParallel: async (step) => {
               const known = store.render();
               const task = (known ? known + '\n\n' : '')

@@ -5,7 +5,7 @@
 // this pass reads the LOADED skill instructions and derives the ordered steps
 // that will actually be executed. refinePlan() is the REACTIVE half: when a
 // step gets stuck, it re-derives the remaining tail from results-so-far
-// (decisions #1/#2 in docs/PLANNING_ARCHITECTURE.md §9 — no proactive
+// (decisions #1/#2 in the internal planning-architecture record §9 — no proactive
 // needsMore loop; re-planning happens on demand, bounded by the caller).
 //
 // Uses the same forced-tool structured-output pattern as selectContext, with
@@ -34,12 +34,21 @@ const SUBMIT_PLAN_TOOL = {
             produces: { type: 'string', description: 'What this step must yield for later steps: named values (e.g. "case_id, tenant_id") or an artifact ("the saved report path"). Drives working-memory capture.' },
             delegate: { type: 'boolean', description: 'true to run this step as an ISOLATED sub-agent: its bulk work stays out of the main context and only its conclusion returns. Use for self-contained research/pulls that would flood the main thread.' },
             agent: { type: 'string', description: 'For delegated steps: the named agent to use, or "auto" for a general sub-agent.' },
-            parallel: { type: 'boolean', description: 'true only if this step does not depend on values discovered by its neighbors (delegated steps marked parallel may run concurrently).' }
+            parallel: { type: 'boolean', description: 'true only if this step does not depend on values discovered by its neighbors (delegated steps marked parallel may run concurrently).' },
+            group: { type: 'string', description: 'Optional fan-out group name (short, e.g. "collect"). CONSECUTIVE steps sharing a group run CONCURRENTLY as isolated sub-agents, then their results are MERGED into one result by the orchestrator contract before any later step runs. Use when several steps pull from independent sources.' }
           },
           required: ['task']
         }
       },
       merge: { type: 'string', description: "How to combine the step results into the final answer (structure, emphasis, format). Empty string if the last step's output IS the final answer." },
+      orchestrator: {
+        type: 'object',
+        description: 'The recombination contract for fan-out groups — the planner that divides work must also say how it merges (required whenever any step has a group).',
+        properties: {
+          merge: { type: 'string', description: 'How to combine a group\'s results into one digest: structure, dedupe rules, and which named values (ids, paths, numbers) must survive verbatim.' },
+          on_conflict: { type: 'string', description: 'How to treat contradictory findings between group members, e.g. "prefer the newest data", "surface both with sources".' }
+        }
+      },
       decisions: {
         type: 'array',
         description: 'ALIGNMENT (O7): when the request sets a development direction the user has not decided (platform, stack, structure, distribution), return the open decisions INSTEAD of steps — the turn ends awaiting the user. Omit when the direction is already fixed.',
@@ -155,6 +164,7 @@ Guidance:
 - Otherwise prefer 2–6 concrete, ordered steps. Each step must be a complete instruction that could be executed on its own with the values known so far.
 - For each step, state what it "produces" — the named values (ids, paths) or artifact later steps will need. Steps that discover identifiers come before steps that use them.
 - DELEGATION: mark a step delegate=true when it is self-contained and would flood the main thread with bulk it doesn't need to keep (pulling a large report, sweeping many records) — an isolated sub-agent does the work and returns only its conclusion. Name a listed agent when one fits, else "auto". Mark delegated steps "parallel" only when they don't depend on each other's discoveries.
+- GROUPING (fan-out): when several steps pull from INDEPENDENT sources, give them the same short "group" name and place them consecutively — they run concurrently and are MERGED into ONE result before the next step. Whenever any step has a group, provide "orchestrator": merge (how the group's results combine — structure, dedupe rules, which named values must survive verbatim) and on_conflict (how contradictory findings are treated). The step after a group consumes the merged result, so its task should reference it.
 - MERGING: say in "merge" how the step results should be combined into the final answer (structure, format, emphasis) — or leave it empty if the last step's output IS the answer. If a skill above prescribes an output format, the merge instruction must follow it.${codingMode ? CODING_RULES : ''}${documentsMode ? DOCUMENTS_RULES : ''}
 
 Call submit_plan now.`;
@@ -199,8 +209,10 @@ function normalizeSteps(steps, startId = 1) {
       produces: typeof s.produces === 'string' ? s.produces.trim() : '',
       // A step runs isolated if the planner asked for delegation OR marked it
       // parallel (parallel execution requires isolation) — `parallel` stays
-      // the executor's handoff flag for backward compatibility.
-      parallel: !!(s.delegate || s.parallel),
+      // the executor's handoff flag for backward compatibility. A group
+      // implies both: fan-out members are by definition isolated + parallel.
+      parallel: !!(s.delegate || s.parallel || s.group),
+      group: typeof s.group === 'string' ? s.group.trim().toLowerCase() : '',
       agent: s.agent || 'auto'
     }));
 }
@@ -239,9 +251,14 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
     if (decisions.length) return { simple: true, align: true, decisions, goal: parsed.goal || '', steps: [], record };
     const steps = normalizeSteps(parsed.steps);
     const merge = typeof parsed.merge === 'string' ? parsed.merge.trim() : '';
+    // O16: the recombination contract for fan-out groups — the planner that
+    // divides work also authors how it merges.
+    const orchestrator = parsed.orchestrator && typeof parsed.orchestrator === 'object'
+      ? { merge: String(parsed.orchestrator.merge || '').trim(), on_conflict: String(parsed.orchestrator.on_conflict || '').trim() }
+      : null;
     // A 0/1-step plan is the trivial-turn gate: nothing to orchestrate.
     if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge, record };
-    return { simple: false, goal: parsed.goal || '', steps, merge, record };
+    return { simple: false, goal: parsed.goal || '', steps, merge, record, orchestrator };
   } catch (e) {
     return { simple: true, goal: '', steps: [], error: `derivePlan failed: ${e.message}` };
   }

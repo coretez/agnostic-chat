@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 
 let db = null;
 
@@ -197,7 +197,7 @@ function migrate(database) {
 
   // v14: per-chat variable store (working memory of discovered tool parameters
   // and derived values) — carried across a turn's steps and persisted across the
-  // turns of a chat. See docs/PLANNING_ARCHITECTURE.md §5.
+  // turns of a chat. See the internal planning-architecture record §5.
   if (current < 14) {
     const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
     if (!ccols.includes('variables_json')) database.exec('ALTER TABLE chats ADD COLUMN variables_json TEXT');
@@ -237,6 +237,13 @@ function migrate(database) {
     const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
     if (!ccols.includes('mode')) database.exec('ALTER TABLE chats ADD COLUMN mode TEXT');
     database.exec("UPDATE chats SET mode = CASE WHEN coding_mode = 1 THEN 'code' ELSE 'work' END WHERE mode IS NULL");
+  }
+
+  // v19: per-message feedback (thumbs up/down on assistant replies) — part
+  // of the O14 glass box: user judgment lands beside the turn's metrics.
+  if (current < 19) {
+    const mcols = database.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+    if (!mcols.includes('rating')) database.exec('ALTER TABLE messages ADD COLUMN rating INTEGER');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

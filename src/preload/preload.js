@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('skills:progress', h);
   },
 
+  update: {
+    check: () => ipcRenderer.invoke('update:check'),
+    apply: () => ipcRenderer.invoke('update:apply'),
+    onPhase: (h) => { const f = (_e, p) => h(p); ipcRenderer.on('update:phase', f); return () => ipcRenderer.removeListener('update:phase', f); }
+  },
+
   projects: {
     list: (opts) => ipcRenderer.invoke('projects:list', opts),
     create: (input) => ipcRenderer.invoke('projects:create', input),
@@ -94,7 +100,8 @@ contextBridge.exposeInMainWorld('api', {
 
   messages: {
     list: (chatId) => ipcRenderer.invoke('messages:list', { chatId }),
-    add: (input) => ipcRenderer.invoke('messages:add', input)
+    add: (input) => ipcRenderer.invoke('messages:add', input),
+    rate: (id, rating) => ipcRenderer.invoke('messages:rate', { id, rating })
   },
 
   documents: {

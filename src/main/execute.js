@@ -4,7 +4,7 @@
 // inner model↔tools loop (factored from chat-loop.js) that runs against the
 // shared VariableStore: it captures discovered parameters as it goes, and a
 // budget-exhausted step reports itself STUCK so the orchestrator can re-plan
-// the remaining tail rather than dead-ending. See docs/PLANNING_ARCHITECTURE.md
+// the remaining tail rather than dead-ending. See the internal planning-architecture record
 // §6, §9 (decision #1), §11 (P1).
 //
 // Everything is injected (chat, callTool, refinePlan, onStuck) so the whole
@@ -154,7 +154,7 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
  *   digest structurally survives mid-turn compaction — P3)
  * @returns {Promise<{stepResults:Array, history:Array, replans:number, completed:boolean}>}
  */
-async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, onStepComplete, onEvent, isAborted }) {
+async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, mergeGroup, onStepComplete, onEvent, isAborted }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   // Post-step hook (O9 step-commits and the like): fired after a step's result
@@ -179,6 +179,59 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
   while (idx < steps.length) {
     if (stopped()) break;   // user STOP: keep completed step results, save work
     const step = steps[idx];
+
+    // O16: fan-out groups — CONSECUTIVE steps sharing a group run
+    // CONCURRENTLY (≤4 in flight), then ONE merge produces a single
+    // step-result the rest of the plan consumes via working memory. The
+    // divider of work also owns the recombination (the internal design record §3).
+    // A group counts as one step for budget purposes; a failed member
+    // degrades to its error conclusion and the merge sees it; a failed
+    // merge degrades to concatenation — the group can never break the turn.
+    if (step.parallel && step.group && typeof runParallel === 'function') {
+      const members = [step];
+      while (idx + members.length < steps.length) {
+        const n = steps[idx + members.length];
+        if (n.parallel && n.group === step.group) members.push(n); else break;
+      }
+      if (members.length > 1) {
+        emit({ type: 'process', kind: 'group-start', group: step.group, steps: members.map((m) => m.id) });
+        const results = new Array(members.length);
+        let cursor = 0;
+        const worker = async () => {
+          for (;;) {
+            if (stopped()) return;
+            const i = cursor++;
+            if (i >= members.length) return;
+            const m = members[i];
+            emit({ type: 'process', kind: 'step-start', step: m.id, task: m.task, parallel: true, group: step.group });
+            let pr;
+            try { pr = await runParallel(m); }
+            catch (e) { pr = { conclusion: `parallel step failed: ${e.message}`, error: true }; }
+            results[i] = { step: m.id, task: m.task, conclusion: (pr && pr.conclusion) || '', error: !!(pr && pr.error) };
+            emit({ type: 'process', kind: 'step-done', step: m.id, parallel: true });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(4, members.length) }, worker));
+        const ran = results.filter(Boolean);
+        // Merge — one bounded call through the injected contract; absent or
+        // failing merge falls back to a labeled concatenation.
+        const concat = ran.map((r) => `### ${r.task}\n${r.conclusion || '(no result)'}`).join('\n\n');
+        let merged = '';
+        if (typeof mergeGroup === 'function' && ran.length && !stopped()) {
+          try { merged = (await mergeGroup({ group: step.group, results: ran })) || ''; } catch {}
+        }
+        const conclusion = merged || concat;
+        // Harvest ids/paths from the MERGED product into shared memory — this
+        // is how later steps consume the group (KNOWN VALUES, not history).
+        if (store && conclusion) store.captureFromResult(`group-${step.group}`, conclusion, { step: step.id });
+        const gr = { step: step.id, task: `group "${step.group}" (${members.length} tasks)`, conclusion, parallel: true, group: step.group };
+        stepResults.push(gr);
+        emit({ type: 'process', kind: 'group-merged', group: step.group, members: ran.length, merged: !!merged, chars: conclusion.length });
+        await stepDone({ ...step, task: gr.task }, gr, []);   // one step for bookkeeping
+        idx += members.length;
+        continue;
+      }
+    }
 
     // Parallel steps hand off to the decompose-and-merge sibling (subagent.js)
     // via the injected runner: an isolated sub-agent, no shared history — only

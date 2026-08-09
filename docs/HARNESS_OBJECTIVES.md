@@ -167,11 +167,18 @@ into one step-result that later steps consume via working memory. Bounds:
 ≤4 concurrent sub-agents per group, one bounded merge call, merge failure
 degrades to concatenation.
 *Source: LangGraph fan-in reducers; the assign tool's Promise.all + merge
-(already shipped, but model-invoked); §3 of HARNESS_FLOW.md.*
+(already shipped, but model-invoked); §3 of the internal design record.*
 Accept: a plan with a marked group runs its members concurrently; the merged
 product appears as one step-result and its values are captured; a failed
 member surfaces in the merge rather than aborting the group.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §3).
+**Status: SHIPPED (v1)** — submit_plan carries `group` + `orchestrator`
+{merge, on_conflict}; execute.js runs consecutive same-group steps with a
+4-worker pool, merges via one bounded fast-model call (concatenation
+fallback), captures the merged product into working memory, and books the
+group as one step; group events land in the plan rail. Smoke-covered
+(concurrency, single-result, contract pass-through, merge-failure
+degradation, group-implies-parallel normalization). Deferred to v2:
+`consumes` dependency edges and non-consecutive group scheduling.
 
 **O17. Guard chain — the LLM firewall and guardrails at named points.**
 Two module families at two trust boundaries. The **LLM firewall** is the
@@ -196,7 +203,7 @@ Accept: filter.js, the approval gate, and the env scrub are re-expressed as
 registry guards with zero behavior change; an IN-2 injection scanner and an
 EG-2 secret scrub ship as the first new modules; every verdict lands in
 process events.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §4).
+**Status: PLANNED** (design: the internal design record §4).
 
 **O18. The guard chain is a deployable boundary — group proxy with access
 control and audit.** The firewall→LLM→guardrail pattern is location-
@@ -224,7 +231,7 @@ Accept: the in-process chain and the proxy accept the same guard module
 unchanged; a client configured with a proxy URL routes EG-2 through it and
 records audit ids in process events; an unauthenticated caller is refused;
 a proxy outage honors the group's fail posture.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §4c).
+**Status: PLANNED** (design: the internal design record §4c).
 
 **O19. Controls are shared, inherited, and versioned — the proxy is the
 control plane.** Agentic development means many actors — developer
@@ -249,7 +256,7 @@ Accept: two clients with the same identity resolve identical bundles; a
 local attempt to loosen a shared control is ignored and logged; a spawned
 sub-agent's effective policy equals its parent's; audit rows join process
 events on `policy_version`.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §4d).
+**Status: PLANNED** (design: the internal design record §4d).
 
 ## F. The documents harness — collect, analyze, create, manage
 
@@ -272,7 +279,7 @@ produces a new version of the same document, never a duplicate.
 (`buildLibraryTools` in coding-tools.js: read_file/list_dir/grep_files,
 single library root, same jail, routed in DOCUMENTS mode, smoke-covered);
 `revise_document` and management verbs still planned
-(design: `HARNESS_FLOW.md` §5).
+(design: the internal design record §5).
 
 **O21. Provenance is the conscience.** Collection auto-captures sources
 (URL, MCP tool + params, library file) alongside values — the same
@@ -281,7 +288,7 @@ published document carries its source manifest in properties. A claim
 without a source is a review finding, not a style preference.
 Accept: a published report's properties name the sources each section
 drew from; the verify pass flags unsourced claims.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §5).
+**Status: PLANNED** (design: the internal design record §5).
 
 **O22. Document lifecycle.** The plan shape for documents mode: align
 (audience, format, type — the O7 gate extended to documents) → collect in
@@ -297,7 +304,7 @@ plan-derive.js: plan-by-default for deliverables, align on
 audience/format/type/scope — the O7 gate now fires in documents mode —
 parallel collection, save_document contract, verify step, revise-over-
 recreate; smoke-covered). The post-execution document review lenses + fix
-cycle still planned (design: `HARNESS_FLOW.md` §5).
+cycle still planned (design: the internal design record §5).
 
 **O23. Placement is a managed taxonomy.** Storage is organized, not
 accidental: the placement template generalizes to arbitrary property
@@ -309,7 +316,7 @@ the same tree. Management verbs: supersede, archive, document sets
 Accept: two monthly reports for the same customer land in the same
 folder as versions/siblings; changing the template re-homes future saves
 without breaking the index.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §5).
+**Status: PLANNED** (design: the internal design record §5).
 
 **O24. Format vs type — produce vs render.** A FORMAT is a named,
 authorable structural template: ordered sections, widget slots, and a
@@ -334,7 +341,7 @@ better-looking sample (with their branding) and every deliverable follows
 it. Exception ratified: the format's web-font stylesheet links are the
 only permitted external references (fallback stacks required). Format
 ROWS, markdown target, and the save_document schema migration still
-planned (design: `HARNESS_FLOW.md` §5).
+planned (design: the internal design record §5).
 
 **O25. Widgets relate data to presentation.** A library of data-bound
 components fills format slots: callout, analysis, summary, table, and
@@ -350,7 +357,7 @@ one shared renderer replaces N hand-rolled ones.*
 Accept: identical widget data renders in all three types; a chart in a
 pdf has no external requests; the verify pass can read widget data
 without parsing markup.
-**Status: PLANNED** (design: `HARNESS_FLOW.md` §5).
+**Status: PLANNED** (design: the internal design record §5).
 
 ---
 
@@ -367,10 +374,10 @@ without parsing markup.
 | O11 | verify layers 2–3: review + fix cycle | `src/main/review.js` + `ipc.js` review pass |
 | O13 | checkpoint/revert | planned — rides O9 |
 | O15 | canonical project docs | `src/main/project-docs.js` + `plan-derive.js` docs context/rule + `ipc.js` spec append |
-| O16 | fan-out groups + merge contracts | planned — `plan-derive.js` schema + `execute.js` group runner (design: `HARNESS_FLOW.md` §3) |
-| O17 | guard-chain registry | planned — new `guards.js`; re-homes `filter.js`, approveAction, env scrub (design: `HARNESS_FLOW.md` §4) |
-| O18 | group proxy + access control + audit | planned — proxy service reusing `guards.js`; provider base-URL routing in `providers/` (design: `HARNESS_FLOW.md` §4c) |
-| O19 | shared policy bundles + inheritance | planned — bundle fetch/apply in `guards.js` registry; propagation via `subagent.js` (design: `HARNESS_FLOW.md` §4d) |
+| O16 | fan-out groups + merge contracts | shipped: `plan-derive.js` group/orchestrator schema + `execute.js` group runner + `ipc.js` mergeGroup (design: the internal design record §3) |
+| O17 | guard-chain registry | planned — new `guards.js`; re-homes `filter.js`, approveAction, env scrub (design: the internal design record §4) |
+| O18 | group proxy + access control + audit | planned — proxy service reusing `guards.js`; provider base-URL routing in `providers/` (design: the internal design record §4c) |
+| O19 | shared policy bundles + inheritance | planned — bundle fetch/apply in `guards.js` registry; propagation via `subagent.js` (design: the internal design record §4d) |
 | O20 | document tool pack | shipped: `buildLibraryTools` (coding-tools.js) + DOCUMENTS mode wiring (ipc.js); planned: `revise_document` |
 | O21 | provenance capture + manifest | planned — `variables.js` source capture + `documents.js` properties |
 | O22 | document lifecycle + review lenses | shipped: DOCUMENTS_RULES + documents-mode align (`plan-derive.js`); planned: lenses in `review.js` |

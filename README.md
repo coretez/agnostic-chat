@@ -2,20 +2,33 @@
 
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-1FA35F.svg)](LICENSE)
 
-An LLM-agnostic, project-centric desktop chat app for coding and document work — think a Claude Code–style workflow where you can switch the model in the background (OpenAI, Anthropic, Qwen, Kimi, Gemini) and keep a project's chats, documents, skills, and keys together instead of stranding them inside a single conversation.
+An LLM-agnostic, project-centric desktop harness for real work — coding, documents, and agentic operations — where you can switch the model in the background (OpenAI, Anthropic, Qwen, Kimi, Gemini, local) and keep a project's chats, documents, skills, and keys together instead of stranding them inside a single conversation.
 
 Built with Electron. Everything stays local on your Mac: API keys are encrypted at rest via the macOS Keychain (`safeStorage`) and only ever leave to call the provider you selected.
 
 ## Highlights
 
-- **Project-centric** — projects own their chats, documents, per-project skills, working directory, and preferred model.
-- **Multi-provider** — OpenAI-compatible (OpenAI, Qwen, Kimi, Gemini) and Anthropic connectors, with SSE **token streaming** and a provider-agnostic tool-calling loop.
-- **MCP** — connect Model Context Protocol tool servers over stdio or streamable HTTP, including OAuth 2.1 (discovery → DCR → PKCE → refresh).
-- **Skills** — per-project skill enablement, injected as guidance; import a library from a connected MCP server.
-- **Artifacts** — HTML reports open in an embedded Chromium panel (split-pane, DevTools) so the agent can inspect and interact.
-- **Coding harness** — a per-chat CODE mode with file/shell tools jailed to the project directory, permissions priced by irreversibility, plan steps committed to git, and a quality + security review pass over every change.
-- **Documentation as source of truth** — each project keeps `docs/SPEC.md`, `DESIGN.md`, `PSEUDOCODE.md`, and `KNOWLEDGE.md`; the planner reads them instead of re-deriving intent from code, and the pipeline maintains them.
-- **Context compression** — summarizes older history as it approaches a model's context window.
+- **Three work modes per chat** — **WORK** (general agentic work over your connected tools), **DOCUMENTS** (a deliverables factory), and **CODE** (a governed coding harness) — one titlebar switch.
+- **Multi-provider** — OpenAI-compatible (OpenAI, Qwen, Kimi, Gemini) and Anthropic connectors, with SSE **token streaming** and a provider-agnostic tool-calling loop; switch models mid-project.
+- **Plan-and-execute engine** — asks alignment questions before direction-setting work instead of racing ahead; runs independent collection steps **concurrently with declared merge contracts**; re-plans around stuck steps within bounds; every loop has a floor to land on.
+- **Coding harness (CODE)** — file/shell tools jailed to the project directory (symlink-safe), approvals priced by irreversibility (reads free; writes auto-approved only where git provides rollback; shell asks), plan steps committed to git so **the plan is the history**, and an automatic quality + security review pass over every change.
+- **Documents harness (DOCUMENTS)** — give a project a **format target** (a sample document with your branding) and every deliverable reproduces it; documents save into a versioned, organized library; the app renders **PDF** (offscreen, deterministic) and **Excel** exports (the model authors data, never markup).
+- **The glass box** — a live plan rail with per-step and per-tool timing, a context-window ledger, token costs per tool result, and captured working memory you can inspect and edit. No invisible context engineering.
+- **MCP that stays honest** — connect Model Context Protocol servers over stdio or streamable HTTP (OAuth 2.1: discovery → DCR → PKCE → refresh); **version-drift detection** badges stale imported skills and cached tool listings with one-click re-sync.
+- **Skills** — per-project skill enablement with tool scoping; author in-app or import a library from a connected MCP server.
+- **Documentation as source of truth** — each project keeps `docs/SPEC.md`, `DESIGN.md`, `PSEUDOCODE.md`, and `KNOWLEDGE.md`; the planner reads them instead of re-deriving intent from code, and the pipeline maintains them after every mutating turn.
+- **Context compression** — summarizes older history as it approaches a model's context window, structurally protecting discovered values.
+- **In-place updates** — a titlebar chip announces new commits; one click pulls, refreshes dependencies, and restarts (git installs today; signed release channel on the roadmap).
+
+## Status & roadmap
+
+Shamrock is a **public dev preview** — clone and run. It is built spec-first:
+[`docs/HARNESS_OBJECTIVES.md`](docs/HARNESS_OBJECTIVES.md) is the objectives
+ledger (each capability has an ID, acceptance criteria, and an honest
+SHIPPED / PARTIAL / PLANNED status). Headline roadmap items: signed
+installers with an auto-update channel, the LLM firewall + guardrails layer,
+document verification with provenance manifests, the data-bound widget
+library, and team policy via a shared proxy.
 
 ## Security model
 

@@ -49,7 +49,7 @@ function renderForSummary(messages) {
  * @param {number} [o.keepRecent=6] recent non-system messages kept verbatim
  * @param {string} [o.protect] content that must SURVIVE compaction verbatim
  *   (the variable store's KNOWN VALUES digest — discovered tool parameters
- *   must never be summarized away; see docs/PLANNING_ARCHITECTURE.md §5/P3).
+ *   must never be summarized away; see the internal planning-architecture record §5/P3).
  *   Re-injected as its own system message right after the summary.
  * @returns {Promise<{messages:Array, compressed:boolean, tokensBefore:number}>}
  */

@@ -951,7 +951,7 @@ function captureProcess(ev) {
   // so the PROCESS lens can show the derived plan, per-step status, re-plans and
   // variable captures. Handled BEFORE the sub-agent branch below so these kinds
   // never get misread as sub-agent updates.
-  const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1 };
+  const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1, 'group-start': 1, 'group-merge': 1, 'group-merged': 1 };
   if (ev.kind === 'align') { rec.aligned = ev.decisions || true; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (PLAN_KINDS[ev.kind]) {
     if (ev.kind === 'plan') {
@@ -1421,20 +1421,63 @@ function turn(text, role, model) {
   el.messages.scrollTop = el.messages.scrollHeight;
   return div;
 }
-// Copy the response's raw markdown to the clipboard — appears on hover.
+// Claude-style action row at the BOTTOM of each assistant reply:
+// copy · thumbs up · thumbs down · retry. Ratings persist on the message row
+// (O14: user judgment lands beside the turn's metrics).
+async function resolveMessageId(div) {
+  if (div._messageId) return div._messageId;
+  // Live-streamed bubbles don't know their row id — the reply was persisted
+  // main-side at turn end, so the last assistant row is this bubble.
+  try {
+    const list = await window.api.messages.list(state.currentChatId);
+    const last = [...list].reverse().find((m) => m.role === 'assistant');
+    if (last) div._messageId = last.id;
+  } catch {}
+  return div._messageId || null;
+}
+function setRatingUI(row, rating) {
+  row.querySelector('[data-act="up"]').classList.toggle('is-active', rating === 1);
+  row.querySelector('[data-act="down"]').classList.toggle('is-active', rating === -1);
+}
 function addCopyBtn(div) {
-  const b = document.createElement('button');
-  b.className = 'copybtn'; b.type = 'button'; b.title = 'Copy response';
-  b.textContent = '⧉';
-  b.onclick = async () => {
+  if (div.querySelector('.turnactions')) return;
+  const row = document.createElement('div');
+  row.className = 'turnactions';
+  row.innerHTML = `
+    <button type="button" data-act="copy" title="Copy response">⧉</button>
+    <button type="button" data-act="up" title="Good response">👍</button>
+    <button type="button" data-act="down" title="Bad response">👎</button>
+    <button type="button" data-act="retry" title="Retry — send the request again">↻</button>`;
+  const btn = (a) => row.querySelector(`[data-act="${a}"]`);
+  btn('copy').onclick = async () => {
     try {
       await navigator.clipboard.writeText(div._copyText || '');
-      b.textContent = '✓';
-      setTimeout(() => { b.textContent = '⧉'; }, 1200);
+      btn('copy').textContent = '✓';
+      setTimeout(() => { btn('copy').textContent = '⧉'; }, 1200);
     } catch {}
   };
-  div.appendChild(b);
-  return b;
+  const rate = async (value) => {
+    const id = await resolveMessageId(div);
+    if (!id) return;
+    const next = div._rating === value ? null : value;   // click again clears
+    div._rating = next;
+    try { await window.api.messages.rate(id, next); } catch {}
+    setRatingUI(row, next);
+  };
+  btn('up').onclick = () => rate(1);
+  btn('down').onclick = () => rate(-1);
+  btn('retry').onclick = () => {
+    if (el.send.dataset.mode === 'stop') return;   // a turn is running
+    const users = document.querySelectorAll('.turn--user .turn__body');
+    const lastUser = users.length ? users[users.length - 1].textContent : '';
+    if (!lastUser.trim()) return;
+    el.input.value = lastUser;
+    autosize();
+    submit();
+  };
+  setRatingUI(row, div._rating || null);
+  div.appendChild(row);
+  return row;
 }
 
 function toolChips(turnEl, trace) {
@@ -1472,7 +1515,13 @@ function renderMessages(messages) {
   for (const m of messages) {
     let meta = null; try { meta = m.metadata ? JSON.parse(m.metadata) : null; } catch {}
     const t = turn(m.content, m.role === 'user' ? 'user' : 'assistant', meta && meta.model);
-    if (m.role !== 'user' && meta && meta.tools) toolChips(t, meta.tools);
+    if (m.role !== 'user') {
+      t._messageId = m.id;
+      t._rating = m.rating === 1 || m.rating === -1 ? m.rating : null;
+      const row = t.querySelector('.turnactions');
+      if (row) setRatingUI(row, t._rating);
+      if (meta && meta.tools) toolChips(t, meta.tools);
+    }
   }
 }
 
@@ -1927,7 +1976,10 @@ function planEvent(ev) {
     if (ev.kind === 'planning') { if (!planSwitched) { showRail('plan'); planSwitched = true; } planAdd(`◈ deriving plan (${ev.model || 'fast model'})…`); }
     else if (ev.kind === 'planning-done') planFinalize(!ev.error);
     else if (ev.kind === 'plan') { planAdd(`◈ plan: ${(ev.steps || []).length} steps`); planFinalize(true); }
-    else if (ev.kind === 'step-start') planAdd(`▸ step ${ev.step}: ${(ev.task || '').slice(0, 60)}`);
+    else if (ev.kind === 'step-start') planAdd(`▸ step ${ev.step}${ev.group ? ` ⑃ ${ev.group}` : ''}: ${(ev.task || '').slice(0, 60)}`);
+    else if (ev.kind === 'group-start') planAdd(`⑃ fan-out "${ev.group}": ${(ev.steps || []).length} tasks concurrent`);
+    else if (ev.kind === 'group-merge') planAdd(`⑃ merging "${ev.group}" (${ev.members} results)`);
+    else if (ev.kind === 'group-merged') planAdd(`⑃ group "${ev.group}" → one result${ev.merged ? '' : ' (concatenated — merge unavailable)'}`);
     else if (ev.kind === 'step-done') planFinalize(true);
     else if (ev.kind === 'step-stuck') planFinalize(false);
     else if (ev.kind === 'replan') { planAdd(`↻ re-planning (${ev.attempt}/3)…`); }
@@ -2840,4 +2892,37 @@ window.addEventListener('keydown', (e) => {
   // newer skills/tools than the app imported) — after boot so it never
   // delays first paint; connection failures are tolerated silently.
   setTimeout(() => { checkMcpSync(); }, 8000);
+  // App-update check: badge the titlebar when origin has new commits; the
+  // chip is the button — click pulls, refreshes deps, and restarts. Re-check
+  // every 4 hours; failures stay silent (offline is not an error state).
+  const checkAppUpdate = async () => {
+    try {
+      const r = await window.api.update.check();
+      const chip = document.getElementById('update-chip');
+      if (r && r.available) {
+        chip.hidden = false;
+        chip.textContent = `⟳ UPDATE (${r.behind})`;
+        chip.title = `Shamrock update available — ${r.behind} commit${r.behind === 1 ? '' : 's'} behind.\nLatest: ${r.latest || ''}\nClick to update and restart.`;
+      } else chip.hidden = true;
+    } catch {}
+  };
+  setTimeout(checkAppUpdate, 12000);
+  setInterval(checkAppUpdate, 4 * 60 * 60 * 1000);
+  document.getElementById('update-chip').onclick = async (e) => {
+    const chip = e.target;
+    if (chip.dataset.armed !== '1') {
+      chip.dataset.armed = '1';
+      chip.textContent = '⟳ UPDATE & RESTART?';
+      setTimeout(() => { if (chip.dataset.armed === '1') { chip.dataset.armed = ''; checkAppUpdate(); } }, 6000);
+      return;
+    }
+    chip.dataset.armed = '';
+    chip.textContent = 'UPDATING…';
+    const off = window.api.update.onPhase(({ phase }) => {
+      chip.textContent = phase === 'pull' ? 'PULLING…' : phase === 'deps' ? 'DEPENDENCIES…' : 'RESTARTING…';
+    });
+    const r = await window.api.update.apply();   // success restarts the app
+    off();
+    if (r && !r.ok) { chip.textContent = '⟳ UPDATE FAILED'; chip.title = r.error || 'update failed'; setTimeout(checkAppUpdate, 5000); }
+  };
 })();

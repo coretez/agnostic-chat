@@ -10,7 +10,7 @@ const mcpManager = require('./mcp/manager');
 
 const isDev = process.argv.includes('--dev');
 
-// HARNESS_FLOW.md §6 finding #1: an isolated test profile. --user-data-dir
+// the internal design record §6 finding #1: an isolated test profile. --user-data-dir
 // redirects userData (and so the database) BEFORE anything opens it — the
 // only safe way to live-test against a scratch DB (a HOME override does not
 // redirect app.getPath('userData') on macOS).

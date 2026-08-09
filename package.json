@@ -1,7 +1,7 @@
 {
   "name": "agnostic-chat",
   "version": "0.1.0",
-  "description": "Shamrock — an LLM-agnostic, coding-focused desktop harness with a glass-box context engine.",
+  "description": "Shamrock \u2014 an LLM-agnostic, coding-focused desktop harness with a glass-box context engine.",
   "main": "src/main/main.js",
   "author": "Christopher Jordan",
   "license": "SEE LICENSE IN LICENSE",
@@ -15,7 +15,7 @@
   "build": {
     "appId": "com.fluencysecurity.agnosticchat",
     "productName": "Shamrock",
-    "copyright": "Copyright © 2026 Christopher Jordan",
+    "copyright": "Copyright \u00a9 2026 Christopher Jordan",
     "directories": {
       "buildResources": "build",
       "output": "dist"
@@ -40,5 +40,9 @@
   "devDependencies": {
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coretez/agnostic-chat.git"
   }
 }

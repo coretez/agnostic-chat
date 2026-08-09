@@ -4,7 +4,7 @@
 // values, carried across the steps of a turn and (via chats.variables_json)
 // across the turns of a chat. This is the piece that lets step N form a tool
 // call from a value step N-1 discovered, and the piece compaction must never
-// drop. See docs/PLANNING_ARCHITECTURE.md §5.
+// drop. See the internal planning-architecture record §5.
 //
 // Ordering uses a turn-relative sequence counter (`seq`), never wall-clock —
 // deterministic and test-reproducible (a project constraint). `seq` persists

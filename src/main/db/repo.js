@@ -229,6 +229,11 @@ const messages = {
     return getDb()
       .prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY id ASC')
       .all(chatId);
+  },
+  // Feedback: 1 (helpful), -1 (not), null (cleared).
+  setRating(id, rating) {
+    const r = rating === 1 || rating === -1 ? rating : null;
+    getDb().prepare('UPDATE messages SET rating = ? WHERE id = ?').run(r, id);
   }
 };
 
