@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 
 let db = null;
 
@@ -244,6 +244,42 @@ function migrate(database) {
   if (current < 19) {
     const mcols = database.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
     if (!mcols.includes('rating')) database.exec('ALTER TABLE messages ADD COLUMN rating INTEGER');
+  }
+
+  // v20: the Librarian (O31) — faceted tags over documents AND chats so the
+  // library and session list stay organized as they grow, plus a one-line
+  // session summary. Tags are project-scoped, facet-namespaced (topic / kind /
+  // entity / period / status) so views can pivot; junctions carry provenance
+  // (librarian vs user) so a filing decision is always attributable.
+  if (current < 20) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS tags (
+        id         INTEGER PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        facet      TEXT NOT NULL,
+        slug       TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (project_id, facet, slug)
+      );
+      CREATE TABLE IF NOT EXISTS document_tags (
+        document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        tag_id      INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        source      TEXT NOT NULL DEFAULT 'librarian',
+        created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (document_id, tag_id)
+      );
+      CREATE TABLE IF NOT EXISTS chat_tags (
+        chat_id    INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        source     TEXT NOT NULL DEFAULT 'librarian',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (chat_id, tag_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tags_project ON tags(project_id, facet);
+    `);
+    const ccols = database.prepare('PRAGMA table_info(chats)').all().map((c) => c.name);
+    if (!ccols.includes('summary')) database.exec('ALTER TABLE chats ADD COLUMN summary TEXT');
   }
 
   // Future migrations go here as `if (current < N) { ... }` blocks.

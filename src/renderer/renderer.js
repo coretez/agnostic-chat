@@ -604,10 +604,17 @@ async function setFastModel(providerId, model) {
 
 function renderChats() {
   el.chatList.innerHTML = '';
-  for (const c of state.chats) {
+  // The librarian's cross-cutting view: an active library tag filters the
+  // session list too — "everything about acme", chats and documents alike.
+  const chats = state.libraryTag ? state.chats.filter((c) => hasTag(c, state.libraryTag)) : state.chats;
+  for (const c of chats) {
     const li = document.createElement('li');
     li.className = 'list__item list__item--chat' + (c.id === state.currentChatId ? ' is-selected' : '');
-    li.innerHTML = `<div class="chatrow"><div class="chatrow__text"><div class="title">${escapeHtml(c.title || 'Untitled chat')}</div><div class="sub">${escapeHtml((c.model || 'no model').toLowerCase())}</div></div><div class="chatrow__actions"><button class="rowbtn" title="Rename">✎</button><button class="rowbtn" title="Delete">✕</button></div></div>`;
+    // The one-line summary (librarian) beats the model name as the subtitle —
+    // it says what the session IS, which is what you scan the list for.
+    const sub = c.summary || (c.model || 'no model').toLowerCase();
+    li.innerHTML = `<div class="chatrow"><div class="chatrow__text"><div class="title">${escapeHtml(c.title || 'Untitled chat')}</div><div class="sub">${escapeHtml(sub)}</div></div><div class="chatrow__actions"><button class="rowbtn" title="Rename">✎</button><button class="rowbtn" title="Delete">✕</button></div></div>`;
+    if (c.summary) li.title = c.summary + ((c.tags || []).length ? `\n${c.tags.map((t) => `${t.facet}:${t.name}`).join(' · ')}` : '');
     const [renameBtn, delBtn] = li.querySelectorAll('.rowbtn');
     li.querySelector('.chatrow__text').onclick = () => selectChat(c.id);
     renameBtn.onclick = (e) => { e.stopPropagation(); startRenameChat(li, c); };
@@ -615,6 +622,14 @@ function renderChats() {
     el.chatList.appendChild(li);
   }
 }
+
+// Librarian filings land after the turn returns — refresh the affected views
+// whenever one completes (title/summary/tags on chats, tags on documents).
+window.api.onLibrarianUpdate(async (ev) => {
+  if (ev.projectId !== state.currentProjectId) return;
+  try { state.chats = await window.api.chats.list(state.currentProjectId); renderChats(); } catch {}
+  if (state.page === 'documents') renderDocumentsPage();
+});
 
 function startRenameChat(li, c) {
   const titleEl = li.querySelector('.title');
@@ -731,14 +746,65 @@ const DOC_CANON = [
   { type: 'pseudocode', sub: 'component outlines' },
   { type: 'knowledge', sub: 'contracts · gotchas · glossary' }
 ];
+// Librarian views (O31): how the GENERATED & UPLOADED list is organized.
+// 'recency' is the flat list; the rest group by doc_type or a tag facet —
+// the same documents, pivoted, because no single organization fits every
+// retrieval ("last week's work" vs "everything about acme").
+state.libraryView = 'recency';
+state.libraryTag = null;   // `${facet}:${slug}` filter, or null
+
+function tagChips(tags, { onClick } = {}) {
+  const wrap = document.createElement('span');
+  wrap.className = 'tagchips';
+  for (const t of (tags || [])) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'tagchip' + (state.libraryTag === `${t.facet}:${t.slug}` ? ' tagchip--on' : '');
+    chip.textContent = t.name;
+    chip.title = `${t.facet}: ${t.name} — click to filter the library and sessions`;
+    chip.onclick = (e) => { e.stopPropagation(); (onClick || toggleLibraryTag)(t); };
+    wrap.appendChild(chip);
+  }
+  return wrap;
+}
+function toggleLibraryTag(t) {
+  const key = `${t.facet}:${t.slug}`;
+  state.libraryTag = state.libraryTag === key ? null : key;
+  renderDocumentsPage();
+  renderChats();
+}
+const hasTag = (item, key) => (item.tags || []).some((t) => `${t.facet}:${t.slug}` === key);
+
 async function renderDocumentsPage() {
   if (!state.currentProjectId) return;
   try { state.documents = await window.api.documents.list(state.currentProjectId); } catch {}
+  try { state.libraryTags = await window.api.library.tags(state.currentProjectId); } catch { state.libraryTags = []; }
   const g = (id) => document.getElementById(id);
   const canonUl = g('docs-canonical'), otherUl = g('docs-other');
   if (!canonUl) return;
   canonUl.innerHTML = ''; otherUl.innerHTML = '';
   const canonTypes = new Set(DOC_CANON.map((c) => c.type));
+
+  // Tag filter bar — the project's whole vocabulary, grouped by facet.
+  const bar = g('library-filter');
+  if (bar) {
+    bar.innerHTML = '';
+    const used = (state.libraryTags || []).filter((t) => (t.doc_count || 0) + (t.chat_count || 0) > 0);
+    bar.hidden = used.length === 0;
+    let lastFacet = null;
+    for (const t of used) {
+      if (t.facet !== lastFacet) {
+        const lab = document.createElement('span'); lab.className = 'libfilter__facet'; lab.textContent = t.facet.toUpperCase();
+        bar.appendChild(lab); lastFacet = t.facet;
+      }
+      bar.appendChild(tagChips([t]).firstChild);
+    }
+    if (state.libraryTag) {
+      const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'tagchip tagchip--clear'; clear.textContent = '✕ clear filter';
+      clear.onclick = () => { state.libraryTag = null; renderDocumentsPage(); renderChats(); };
+      bar.appendChild(clear);
+    }
+  }
 
   const row = (d, sub) => {
     const li = document.createElement('li'); li.className = 'conn';
@@ -748,6 +814,7 @@ async function renderDocumentsPage() {
       <div class="conn__info"><div class="conn__label">${escapeHtml(d.title)}</div><div class="conn__type">${escapeHtml(d.doc_type || d.source || 'doc')}</div></div>
       <div class="conn__mid"><div class="conn__url">${escapeHtml(sub || d.path || '')}</div><div class="conn__meta">v${d.version || 1}${when ? ' · ' + escapeHtml(when) : ''}</div></div>
       <div class="conn__actions"></div>`;
+    if (d.tags && d.tags.length) li.querySelector('.conn__info').appendChild(tagChips(d.tags));
     const actions = li.querySelector('.conn__actions');
     const view = document.createElement('button'); view.className = 'conn__btn'; view.textContent = 'VIEW';
     view.onclick = async () => {
@@ -773,11 +840,65 @@ async function renderDocumentsPage() {
     const d = state.documents.find((x) => x.doc_type === c.type);
     if (d) canonUl.appendChild(row(d, c.sub));
   }
-  // Everything else: deliverables, uploads, user docs.
-  const others = state.documents.filter((d) => !canonTypes.has(d.doc_type));
+  // Everything else: deliverables, uploads, user docs — filtered by the
+  // selected tag, then organized per the current view.
+  let others = state.documents.filter((d) => !canonTypes.has(d.doc_type));
+  if (state.libraryTag) others = others.filter((d) => hasTag(d, state.libraryTag));
   g('docs-other-empty').hidden = others.length > 0;
-  for (const d of others) otherUl.appendChild(row(d));
+
+  const groupHeader = (label) => {
+    const h = document.createElement('li'); h.className = 'libgroup'; h.textContent = label;
+    return h;
+  };
+  if (state.libraryView === 'recency' || !others.length) {
+    for (const d of others) otherUl.appendChild(row(d));
+  } else if (state.libraryView === 'kind') {
+    const byKind = new Map();
+    for (const d of others) { const k = d.doc_type || d.source || 'other'; (byKind.get(k) || byKind.set(k, []).get(k)).push(d); }
+    for (const [k, list] of [...byKind.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      otherUl.appendChild(groupHeader(k.toUpperCase()));
+      for (const d of list) otherUl.appendChild(row(d));
+    }
+  } else {
+    // entity / topic: group by that facet's tags; untagged docs sink to the end.
+    const facet = state.libraryView;
+    const byTag = new Map(); const untagged = [];
+    for (const d of others) {
+      const ts = (d.tags || []).filter((t) => t.facet === facet);
+      if (!ts.length) { untagged.push(d); continue; }
+      for (const t of ts) (byTag.get(t.name) || byTag.set(t.name, []).get(t.name)).push(d);
+    }
+    for (const [name, list] of [...byTag.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      otherUl.appendChild(groupHeader(`${facet.toUpperCase()}: ${name}`));
+      for (const d of list) otherUl.appendChild(row(d));
+    }
+    if (untagged.length) {
+      otherUl.appendChild(groupHeader(`(no ${facet} tag)`));
+      for (const d of untagged) otherUl.appendChild(row(d));
+    }
+  }
 }
+// View switcher — one active button, re-render on change.
+document.querySelectorAll('#library-view .libview__btn').forEach((b) => {
+  b.onclick = () => {
+    state.libraryView = b.dataset.view;
+    document.querySelectorAll('#library-view .libview__btn').forEach((x) => x.classList.toggle('libview__btn--on', x === b));
+    renderDocumentsPage();
+  };
+});
+// TIDY: batch librarian pass — tags/summaries only, nothing moves on disk.
+document.getElementById('docs-tidy').onclick = async () => {
+  const btn = document.getElementById('docs-tidy');
+  if (!state.currentProjectId || btn.disabled) return;
+  btn.disabled = true; btn.textContent = '✦ TIDYING…';
+  try {
+    const r = await window.api.library.tidy({ projectId: state.currentProjectId, providerId: state.selected?.providerId, model: state.selected?.model });
+    btn.textContent = r && r.ok ? `✦ FILED ${r.documents} DOCS · ${r.chats} SESSIONS` : `✦ ${(r && r.error) || 'tidy failed'}`;
+  } catch (e) { btn.textContent = '✦ tidy failed'; }
+  setTimeout(() => { btn.textContent = '✦ TIDY LIBRARY'; btn.disabled = false; }, 4000);
+  renderDocumentsPage();
+  try { state.chats = await window.api.chats.list(state.currentProjectId); renderChats(); } catch {}
+};
 document.getElementById('docs-reveal').onclick = async () => {
   if (!state.currentProjectId) return;
   try { const eff = await window.api.projects.effectiveOutputDir(state.currentProjectId); if (eff && eff.outputDir) window.api.projects.revealPath(eff.outputDir); } catch {}

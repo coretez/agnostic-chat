@@ -40,6 +40,19 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('skills:progress', h);
   },
 
+  /** Librarian (O31): filing events + tag vocabulary + batch tidy. */
+  onLibrarianUpdate: (cb) => {
+    const h = (_e, data) => cb(data);
+    ipcRenderer.on('librarian:update', h);
+    return () => ipcRenderer.removeListener('librarian:update', h);
+  },
+  library: {
+    tags: (projectId) => ipcRenderer.invoke('library:tags', { projectId }),
+    tidy: (input) => ipcRenderer.invoke('library:tidy', input),
+    untagDocument: (documentId, tagId) => ipcRenderer.invoke('library:untagDocument', { documentId, tagId }),
+    untagChat: (chatId, tagId) => ipcRenderer.invoke('library:untagChat', { chatId, tagId })
+  },
+
   update: {
     check: () => ipcRenderer.invoke('update:check'),
     apply: () => ipcRenderer.invoke('update:apply'),

@@ -213,6 +213,77 @@ const chats = {
   },
   setVariables(id, json) {
     getDb().prepare("UPDATE chats SET variables_json = ?, updated_at = datetime('now') WHERE id = ?").run(json || null, id);
+  },
+  // One-line session summary (Librarian) — updated_at untouched: filing a
+  // session must not bump it above chats the user actually worked in.
+  setSummary(id, summary) {
+    getDb().prepare('UPDATE chats SET summary = ? WHERE id = ?').run(summary || null, id);
+  }
+};
+
+// ── Tags: faceted organization over documents and chats (Librarian, O31) ────
+const TAG_FACETS = ['topic', 'kind', 'entity', 'period', 'status'];
+function tagSlug(s) {
+  return String(s == null ? '' : s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+const tags = {
+  FACETS: TAG_FACETS,
+  slug: tagSlug,
+  /** Find-or-create by (project, facet, normalized name). The slug is the
+   *  dedupe key, so "Monthly Report" / "monthly_report" land on one tag. */
+  ensure(projectId, facet, name) {
+    const f = TAG_FACETS.includes(facet) ? facet : null;
+    const slug = tagSlug(name);
+    if (!f || !slug) return null;
+    const db = getDb();
+    const hit = db.prepare('SELECT * FROM tags WHERE project_id = ? AND facet = ? AND slug = ?').get(projectId, f, slug);
+    if (hit) return hit;
+    const info = db.prepare('INSERT INTO tags (project_id, facet, slug, name) VALUES (?, ?, ?, ?)')
+      .run(projectId, f, slug, String(name).trim().slice(0, 80));
+    return db.prepare('SELECT * FROM tags WHERE id = ?').get(info.lastInsertRowid);
+  },
+  /** All of a project's tags with usage counts — the vocabulary the librarian
+   *  is told to prefer, and the filter rail's data. */
+  listByProject(projectId) {
+    return getDb().prepare(`
+      SELECT t.*,
+        (SELECT COUNT(*) FROM document_tags dt WHERE dt.tag_id = t.id) AS doc_count,
+        (SELECT COUNT(*) FROM chat_tags ct WHERE ct.tag_id = t.id) AS chat_count
+      FROM tags t WHERE t.project_id = ?
+      ORDER BY t.facet, t.slug`).all(projectId);
+  },
+  tagDocument(documentId, tagId, source = 'librarian') {
+    getDb().prepare('INSERT OR IGNORE INTO document_tags (document_id, tag_id, source) VALUES (?, ?, ?)').run(documentId, tagId, source);
+  },
+  tagChat(chatId, tagId, source = 'librarian') {
+    getDb().prepare('INSERT OR IGNORE INTO chat_tags (chat_id, tag_id, source) VALUES (?, ?, ?)').run(chatId, tagId, source);
+  },
+  untagDocument(documentId, tagId) {
+    getDb().prepare('DELETE FROM document_tags WHERE document_id = ? AND tag_id = ?').run(documentId, tagId);
+  },
+  untagChat(chatId, tagId) {
+    getDb().prepare('DELETE FROM chat_tags WHERE chat_id = ? AND tag_id = ?').run(chatId, tagId);
+  },
+  forDocument(documentId) {
+    return getDb().prepare('SELECT t.*, dt.source AS tag_source FROM document_tags dt JOIN tags t ON t.id = dt.tag_id WHERE dt.document_id = ? ORDER BY t.facet, t.slug').all(documentId);
+  },
+  forChat(chatId) {
+    return getDb().prepare('SELECT t.*, ct.source AS tag_source FROM chat_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.chat_id = ? ORDER BY t.facet, t.slug').all(chatId);
+  },
+  /** Bulk fetch for list views: {itemId: [tag,…]} for a whole project. */
+  forProjectDocuments(projectId) {
+    const out = {};
+    for (const r of getDb().prepare('SELECT dt.document_id AS item, t.* FROM document_tags dt JOIN tags t ON t.id = dt.tag_id WHERE t.project_id = ?').all(projectId)) {
+      (out[r.item] = out[r.item] || []).push(r);
+    }
+    return out;
+  },
+  forProjectChats(projectId) {
+    const out = {};
+    for (const r of getDb().prepare('SELECT ct.chat_id AS item, t.* FROM chat_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.project_id = ?').all(projectId)) {
+      (out[r.item] = out[r.item] || []).push(r);
+    }
+    return out;
   }
 };
 
@@ -555,4 +626,4 @@ const mcp = {
   }
 };
 
-module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, metrics, slugify };
+module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, metrics, tags, slugify };

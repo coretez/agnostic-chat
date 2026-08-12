@@ -20,6 +20,7 @@ const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
 const webTools = require('./web-tools');
 const projectFacts = require('./project-facts');
+const librarian = require('./librarian');
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -283,6 +284,24 @@ function documentPathAllowed(p) {
   });
 }
 
+// ── Librarian vocabulary (O31) ──────────────────────────────────────────────
+// What the project already calls things — existing tags, doc types, entities —
+// so filing PREFERS the established vocabulary instead of coining near-
+// duplicates. Cheap queries; rebuilt per filing call.
+function buildVocabulary(projectId) {
+  const v = { tags: [], docTypes: [], entities: [] };
+  if (!projectId) return v;
+  try { v.tags = repo.tags.listByProject(projectId); } catch {}
+  try {
+    for (const d of repo.documents.listByProject(projectId)) {
+      if (d.doc_type) v.docTypes.push(d.doc_type);
+      const ent = d.properties && (d.properties.tenant || d.properties.company);
+      if (ent) v.entities.push(String(ent));
+    }
+  } catch {}
+  return v;
+}
+
 function registerIpc() { // (documentPathAllowed exported below for smoke coverage)
   // Projects
   ipcMain.handle('projects:list', (_e, opts) => repo.projects.list(opts));
@@ -448,7 +467,12 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   });
 
   // Chats & messages
-  ipcMain.handle('chats:list', (_e, { projectId }) => repo.chats.listByProject(projectId));
+  ipcMain.handle('chats:list', (_e, { projectId }) => {
+    const rows = repo.chats.listByProject(projectId);
+    let byChat = {};
+    try { byChat = repo.tags.forProjectChats(projectId); } catch {}
+    return rows.map((c) => ({ ...c, tags: byChat[c.id] || [] }));
+  });
   ipcMain.handle('chats:create', (_e, input) => repo.chats.create(input));
   ipcMain.handle('chats:rename', (_e, { id, title }) => repo.chats.rename(id, title));
   ipcMain.handle('chats:setModel', (_e, { id, model }) => repo.chats.setModel(id, model));
@@ -524,7 +548,12 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     } catch (e) { console.error('[toPdf index]', e && e.message); }
     return { pdfPath: out.pdfPath, bytes: out.bytes, id: indexed && indexed.id };
   });
-  ipcMain.handle('documents:list', (_e, { projectId }) => repo.documents.listByProject(projectId));
+  ipcMain.handle('documents:list', (_e, { projectId }) => {
+    const rows = repo.documents.listByProject(projectId);
+    let byDoc = {};
+    try { byDoc = repo.tags.forProjectDocuments(projectId); } catch {}
+    return rows.map((d) => ({ ...d, tags: byDoc[d.id] || [] }));
+  });
   ipcMain.handle('documents:create', (_e, input) => {
     if (input && input.path && !documentPathAllowed(input.path)) {
       throw new Error('document path must be inside the documents library or a project directory');
@@ -532,6 +561,52 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     return repo.documents.create(input);
   });
   ipcMain.handle('documents:linkToChat', (_e, input) => repo.documents.linkToChat(input));
+
+  // ── Librarian surface (O31) ───────────────────────────────────────────────
+  ipcMain.handle('library:tags', (_e, { projectId }) => repo.tags.listByProject(projectId));
+  ipcMain.handle('library:untagDocument', (_e, { documentId, tagId }) => { repo.tags.untagDocument(documentId, tagId); return { ok: true }; });
+  ipcMain.handle('library:untagChat', (_e, { chatId, tagId }) => { repo.tags.untagChat(chatId, tagId); return { ok: true }; });
+  // Batch tidy: file untagged documents and unfiled sessions (bounded per
+  // run). Tags/summaries only — nothing moves on disk, everything reversible,
+  // provenance recorded — so it applies directly and reports what it did.
+  ipcMain.handle('library:tidy', async (_e, { projectId, providerId, model }) => {
+    const provider = providerId ? repo.providers.get(providerId) : null;
+    const key = provider ? repo.providers.reveal(providerId) : null;
+    if (!provider || !key) return { ok: false, error: 'no provider available for the librarian' };
+    const connector = getConnector(provider, key);
+    const fm = provider.fast_model || model || provider.default_model;
+    const filedDocs = []; const filedChats = [];
+    try {
+      const tagged = repo.tags.forProjectDocuments(projectId);
+      const docsToFile = repo.documents.listByProject(projectId).filter((d) => !(tagged[d.id] || []).length).slice(0, 15);
+      for (const d of docsToFile) {
+        let head = String(d.content || '').slice(0, 2000);
+        try { if (!head && d.path && documentPathAllowed(d.path)) head = require('node:fs').readFileSync(d.path, 'utf8').slice(0, 2000); } catch {}
+        const filed = await librarian.fileDocument({
+          connector, model: fm,
+          meta: { title: d.title, type: d.doc_type, properties: d.properties || {} },
+          contentHead: head, vocabulary: buildVocabulary(projectId)
+        });
+        for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagDocument(d.id, tag.id); }
+        if (filed.tags.length) filedDocs.push({ id: d.id, title: d.title, tags: filed.tags.length });
+      }
+      const chatTagged = repo.tags.forProjectChats(projectId);
+      const chatsToFile = repo.chats.listByProject(projectId).filter((c) => !c.summary || !(chatTagged[c.id] || []).length).slice(0, 10);
+      for (const c of chatsToFile) {
+        const filed = await librarian.fileSession({
+          connector, model: fm, messages: repo.messages.listByChat(c.id),
+          currentTitle: c.title || '', vocabulary: buildVocabulary(projectId)
+        });
+        if (filed.summary) repo.chats.setSummary(c.id, filed.summary);
+        if (filed.title && !c.title) repo.chats.rename(c.id, filed.title);
+        for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagChat(c.id, tag.id); }
+        if (filed.summary || filed.tags.length) filedChats.push({ id: c.id, tags: filed.tags.length });
+      }
+      return { ok: true, documents: filedDocs.length, chats: filedChats.length };
+    } catch (e) {
+      return { ok: false, error: e.message, documents: filedDocs.length, chats: filedChats.length };
+    }
+  });
   ipcMain.handle('documents:listByChat', (_e, { chatId }) => repo.documents.listByChat(chatId));
 
   // Skills + per-project scoping
@@ -1118,7 +1193,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // Document placement template (user-configurable; global default).
       // `project`/`outputDir` were resolved above (coding-mode block).
       const placementTemplate = repo.settings.get('placement_template') || docs.DEFAULT_TEMPLATE;
-      const saveDocument = (args) => {
+      const saveDocument = async (args) => {
         // Canonical dev docs (spec/design/pseudocode/knowledge) have a fixed,
         // designed home at docs/<NAME>.md — a documentation step's save goes
         // there and versions, never into the deliverables bin.
@@ -1142,12 +1217,35 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             return { text: `save_document (spreadsheet): content must be JSON {sheets:[{name, rows:[[…]]}]} — ${e.message}`, isError: true };
           }
         }
-        const meta = { type: args.type, title: args.title, format: saveFormat, properties: args.properties || {} };
+        // O31: librarian filing BEFORE placement — one fast-model call
+        // normalizes type/entity/period against the project's existing
+        // vocabulary and proposes faceted tags; deterministic validation
+        // (librarian.js) decides what lands. The LLM chooses meaning, the
+        // template still chooses location; a filing failure saves unfiled.
+        const meta = { type: args.type, title: args.title, format: saveFormat, properties: { ...(args.properties || {}) } };
+        let filed = { tags: [] };
+        if (projectId && !isAborted()) {
+          filed = await librarian.fileDocument({
+            connector: { chat: chatAbortable }, model: fastModel,
+            meta: { title: args.title, type: args.type, properties: args.properties || {} },
+            contentHead: String(args.content || '').slice(0, 2000),
+            vocabulary: buildVocabulary(projectId)
+          });
+          if (filed.docType) meta.type = filed.docType;
+          if (filed.entity && !meta.properties.tenant && !meta.properties.company) meta.properties.tenant = filed.entity;
+          if (filed.period && !meta.properties.period && !meta.properties.date) meta.properties.period = filed.period;
+        }
         const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: saveContent });
         let row = null;
         try {
-          row = repo.documents.saveGenerated({ projectId, title: args.title || w.relPath, path: w.absPath, mimeType: w.mime, source: 'chat', docType: args.type || null, version: w.version, properties: args.properties || null });
+          row = repo.documents.saveGenerated({ projectId, title: args.title || w.relPath, path: w.absPath, mimeType: w.mime, source: 'chat', docType: meta.type || null, version: w.version, properties: Object.keys(meta.properties).length ? meta.properties : null });
         } catch (e) { console.error('[save_document index]', e && e.message); }
+        if (row && filed.tags.length) {
+          try {
+            for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagDocument(row.id, tag.id); }
+            emitProgress({ type: 'process', kind: 'librarian-filed', target: 'document', title: args.title, docType: meta.type || null, tags: filed.tags.map((t) => `${t.facet}:${t.name}`) });
+          } catch (e) { console.error('[librarian tags]', e && e.message); }
+        }
         emitProgress({ type: 'document-saved', id: row && row.id, title: args.title, path: w.absPath, relPath: w.relPath, version: w.version, mime: w.mime });
         return { text: `Saved "${args.title}" → ${w.relPath} (v${w.version}) in the document library. Full path: ${w.absPath}` };
       };
@@ -1187,7 +1285,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           return { text: entry ? `Remembered ${entry.key} = ${JSON.stringify(entry.value)}` : 'Ignored (empty key or value).' };
         }
         if (name === 'save_document') {
-          try { return saveDocument(args || {}); }
+          try { return await saveDocument(args || {}); }
           catch (e) { console.error('[save_document]', e && e.message); return { text: `save_document failed: ${e.message}`, isError: true }; }
         }
         if (name === 'delegate') {
@@ -1636,6 +1734,34 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length, planningFailed: metricRow.planningFailed, toolFellBack: metricRow.toolFellBack }));
         _e.sender.send('chat:progress', { turnId, type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
+
+      // O31: file the session — title (when untitled), one-line summary, and
+      // faceted tags — AFTER the reply returns, non-blocking (one fast-model
+      // call must never add latency to the turn). Completion announces itself
+      // on librarian:update so the sidebar refreshes whenever it lands.
+      if (chatId && projectId && !result.aborted) {
+        const sender = _e.sender;
+        (async () => {
+          try {
+            const chatRow = repo.chats.get(chatId);
+            // The reply may not be persisted yet (the renderer saves it after
+            // this handler returns) — include this turn's text directly.
+            const msgs = [...repo.messages.listByChat(chatId), { role: 'assistant', content: String(result.reply || '').slice(0, 2000) }];
+            const filed = await librarian.fileSession({
+              connector, model: fastModel, messages: msgs,
+              currentTitle: (chatRow && chatRow.title) || '',
+              vocabulary: buildVocabulary(projectId)
+            });
+            if (filed.summary) repo.chats.setSummary(chatId, filed.summary);
+            if (filed.title && !(chatRow && chatRow.title)) repo.chats.rename(chatId, filed.title);
+            for (const t of (filed.tags || [])) {
+              const tag = repo.tags.ensure(projectId, t.facet, t.name);
+              if (tag) repo.tags.tagChat(chatId, tag.id);
+            }
+            try { sender.send('librarian:update', { chatId, projectId, titled: !!(filed.title && !(chatRow && chatRow.title)), summarized: !!filed.summary, tags: (filed.tags || []).length }); } catch {}
+          } catch (e) { console.error('[librarian:session]', e && e.message); }
+        })();
+      }
 
       return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted, truncated: !!result.truncated };
     }

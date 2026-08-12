@@ -383,11 +383,21 @@
                   <div class="mscreen__sub">The project library. Canonical documentation is the source of truth the planner reads — maintained by the pipeline and your edits, versioned on disk. Deliverables and uploads sit below it.</div>
                 </div>
                 <div class="spacer"></div>
+                <button class="btn btn--ghost btn--sm" id="docs-tidy" type="button" title="Librarian pass: tag untagged documents and summarize unfiled sessions — tags only, nothing moves on disk">✦ TIDY LIBRARY</button>
                 <button class="btn btn--ghost btn--sm" id="docs-reveal" type="button">⤴ OPEN FOLDER</button>
               </div>
               <div class="docsec">PROJECT DOCUMENTATION</div>
               <ul class="connlist" id="docs-canonical"></ul>
-              <div class="docsec">GENERATED &amp; UPLOADED</div>
+              <div class="docsec docsec--row">GENERATED &amp; UPLOADED
+                <span class="spacer"></span>
+                <span class="libview" id="library-view">
+                  <button class="libview__btn libview__btn--on" data-view="recency" type="button">RECENCY</button>
+                  <button class="libview__btn" data-view="kind" type="button">KIND</button>
+                  <button class="libview__btn" data-view="entity" type="button">ENTITY</button>
+                  <button class="libview__btn" data-view="topic" type="button">TOPIC</button>
+                </span>
+              </div>
+              <div class="libfilter" id="library-filter" hidden></div>
               <ul class="connlist" id="docs-other"></ul>
               <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
               <div class="docreader" id="doc-reader" hidden>

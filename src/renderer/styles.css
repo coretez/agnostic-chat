@@ -617,6 +617,22 @@ html.busy, html.busy * { cursor: progress !important; }
 .raillist__item .sub { font-family: var(--mono); font-size: 9.5px; color: var(--ink3); text-transform: uppercase; }
 .raillist__edit { width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--raise); border: 1px solid var(--brand); border-radius: 3px; padding: 2px 4px; outline: none; }
 
+/* ── Librarian (O31): tag chips, filter bar, view switcher, group rows ──── */
+.tagchips { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tagchip { font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink2); background: var(--raise); border: 1px solid var(--line); border-radius: 9px; padding: 1px 7px; cursor: pointer; }
+.tagchip:hover { border-color: var(--brand); color: var(--brand); }
+.tagchip--on { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+.tagchip--clear { border-style: dashed; }
+.libfilter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 0 10px; }
+.libfilter__facet { font-family: var(--mono); font-size: 9px; color: var(--ink3); margin: 0 2px 0 8px; }
+.libfilter__facet:first-child { margin-left: 0; }
+.docsec--row { display: flex; align-items: center; }
+.libview { display: inline-flex; gap: 2px; }
+.libview__btn { font-family: var(--mono); font-size: 9px; color: var(--ink3); background: none; border: 1px solid transparent; border-radius: 3px; padding: 1px 6px; cursor: pointer; }
+.libview__btn:hover { color: var(--ink); }
+.libview__btn--on { color: var(--brand); border-color: var(--line); background: var(--raise); }
+.libgroup { font-family: var(--mono); font-size: 9.5px; color: var(--ink3); letter-spacing: 0.05em; padding: 8px 0 2px; list-style: none; }
+
 /* ── Command palette ───────────────────────────────────────────── */
 .overlay { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,0.5); backdrop-filter: blur(2px); display: flex; align-items: flex-start; justify-content: center; padding-top: 96px; animation: ac-fade 0.1s ease-out; }
 .overlay[hidden] { display: none; }

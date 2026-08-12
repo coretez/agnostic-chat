@@ -27,11 +27,40 @@ CREATE TABLE IF NOT EXISTS chats (
   model       TEXT,                       -- provider/model used for this chat
   variables_json TEXT,                     -- variable-store snapshot: discovered params/derived values carried across turns
   coding_mode INTEGER,                     -- 1 = coding-harness toggle: file/shell tools jailed to the project working_dir
+  summary     TEXT,                        -- one-line session summary (Librarian, O31)
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
   archived_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id);
+
+-- ── Tags: faceted organization over documents AND chats (Librarian, O31) ────
+-- Facet-namespaced (topic / kind / entity / period / status) so views can
+-- pivot; project-scoped; junctions carry provenance (librarian vs user).
+CREATE TABLE IF NOT EXISTS tags (
+  id         INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  facet      TEXT NOT NULL,
+  slug       TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, facet, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_tags_project ON tags(project_id, facet);
+CREATE TABLE IF NOT EXISTS document_tags (
+  document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  tag_id      INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  source      TEXT NOT NULL DEFAULT 'librarian',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (document_id, tag_id)
+);
+CREATE TABLE IF NOT EXISTS chat_tags (
+  chat_id    INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  source     TEXT NOT NULL DEFAULT 'librarian',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (chat_id, tag_id)
+);
 
 -- ── Messages: within a chat ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS messages (

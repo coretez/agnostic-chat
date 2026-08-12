@@ -1150,6 +1150,70 @@ app.whenReady().then(async () => {
     assert(Object.keys(fail).length === 0, 'doc-writer: model failure degrades to no-op, never degrades docs');
   }
 
+  // ── Librarian (O26): faceted tags + deterministic filing validation ───────
+  {
+    const librarian = require('../src/main/librarian');
+    const libProj = repo.projects.create({ name: 'LibrarianProj' });
+
+    // repo.tags: slug is the dedupe key — spelling variants land on ONE tag.
+    const t1 = repo.tags.ensure(libProj.id, 'kind', 'Monthly Report');
+    const t2 = repo.tags.ensure(libProj.id, 'kind', 'monthly_report');
+    const t3 = repo.tags.ensure(libProj.id, 'kind', '  monthly-report  ');
+    assert(t1 && t2 && t3 && t1.id === t2.id && t2.id === t3.id, 'tags: spelling variants dedupe to one tag by slug');
+    assert(repo.tags.ensure(libProj.id, 'flavor', 'x') === null, 'tags: unknown facet refused');
+    assert(repo.tags.ensure(libProj.id, 'topic', '!!!') === null, 'tags: unsluggable name refused');
+
+    // Tag round-trips over documents and chats.
+    const libDoc = repo.documents.create({ projectId: libProj.id, title: 'August report', content: 'x', source: 'user' });
+    repo.tags.tagDocument(libDoc.id, t1.id);
+    repo.tags.tagDocument(libDoc.id, t1.id); // idempotent
+    assert(repo.tags.forDocument(libDoc.id).length === 1, 'tags: document tagging is idempotent');
+    const libChat = repo.chats.create({ projectId: libProj.id });
+    const tEnt = repo.tags.ensure(libProj.id, 'entity', 'Acme Corp');
+    repo.tags.tagChat(libChat.id, tEnt.id);
+    assert(repo.tags.forChat(libChat.id)[0].name === 'Acme Corp', 'tags: chat tagging round-trips');
+    repo.chats.setSummary(libChat.id, 'Investigated the acme phishing case.');
+    assert(repo.chats.get(libChat.id).summary.includes('phishing'), 'chats: session summary persists');
+    assert(repo.tags.listByProject(libProj.id).find((t) => t.id === t1.id).doc_count === 1, 'tags: vocabulary listing carries usage counts');
+
+    // validateTags: junk facets dropped, capped, deduped, existing spelling wins.
+    const existing = [{ facet: 'kind', slug: 'monthly-report', name: 'Monthly Report' }];
+    const vt = librarian.validateTags([
+      { facet: 'kind', name: 'monthly_report' },      // → existing spelling
+      { facet: 'flavor', name: 'junk' },              // unknown facet → dropped
+      { facet: 'topic', name: 'phishing' },
+      { facet: 'topic', name: 'Phishing' },           // dupe by slug → dropped
+      { facet: 'entity', name: 'acme' },
+      { facet: 'period', name: '2026-08' },
+      { facet: 'status', name: 'final' },
+      { facet: 'topic', name: 'overflow' }            // over cap → dropped
+    ], existing);
+    assert(vt.length === 5, 'librarian: tags capped at 5 after junk/dupe removal');
+    assert(vt[0].name === 'Monthly Report', 'librarian: existing vocabulary spelling wins over fresh coinage');
+    assert(!vt.some((t) => t.facet === 'flavor'), 'librarian: unknown facets dropped');
+
+    // fileDocument: mock connector — normalized type reuses vocabulary; junk output degrades to no-op.
+    const mockConn = (reply) => ({ chat: async () => reply });
+    const filed = await librarian.fileDocument({
+      connector: mockConn({ toolCalls: [{ id: 'x', name: 'file_document', args: { doc_type: 'Monthly_Report', entity: 'ACME corp', period: '2026-08', tags: [{ facet: 'kind', name: 'monthly_report' }] } }] }),
+      model: 'mock', meta: { title: 'August', type: 'report' },
+      vocabulary: { tags: existing, docTypes: ['monthly-report'], entities: ['Acme Corp'] }
+    });
+    assert(filed.docType === 'monthly-report' && filed.entity === 'Acme Corp' && filed.tags.length === 1, 'librarian: fileDocument normalizes type/entity to existing vocabulary');
+    const failed = await librarian.fileDocument({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', meta: {} });
+    assert(Array.isArray(failed.tags) && failed.tags.length === 0 && !failed.docType, 'librarian: filing failure degrades to saved-unfiled, never throws');
+
+    // fileSession: summary clipped to one line, tags validated the same way.
+    const sess = await librarian.fileSession({
+      connector: mockConn({ toolCalls: [{ id: 'x', name: 'file_session', args: { title: 'Acme phishing triage', summary: 'Triaged  the\nacme phishing case.', tags: [{ facet: 'entity', name: 'acme corp' }] } }] }),
+      model: 'mock', messages: [{ role: 'user', content: 'look at the acme case' }, { role: 'assistant', content: 'done' }],
+      vocabulary: { tags: [{ facet: 'entity', slug: 'acme-corp', name: 'Acme Corp' }] }
+    });
+    assert(sess.title === 'Acme phishing triage' && sess.summary === 'Triaged the acme phishing case.' && sess.tags[0].name === 'Acme Corp', 'librarian: fileSession returns title, one-line summary, vocabulary-preferring tags');
+
+    repo.projects.archive(libProj.id);
+  }
+
   // ── Record junk filter: decisions are short snake_case, never task prose ──
   {
     const { derivePlan } = require('../src/main/plan-derive');

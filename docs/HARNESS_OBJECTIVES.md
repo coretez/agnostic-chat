@@ -445,6 +445,34 @@ fix commit; it never mutates outside the O4 permission gates; clean is a
 first-class outcome.
 **Status: PLANNED.**
 
+**O31. The Librarian — the library organizes itself.** Documents pile up and
+sessions pile up; a flat list stops working around twenty items, and a growing
+project must stay findable without the user filing anything. One fast-model
+call files each artifact — at save time for documents (normalizing
+type/entity/period against the project's EXISTING vocabulary before the
+deterministic template places the file) and at turn end for sessions (title
+when untitled, one-line summary, tags) — with deterministic validation
+(librarian.js) deciding what lands: known facets only (topic / kind / entity /
+period / status), slug-deduped, capped at 5, existing spellings win over fresh
+coinage even when the model ignores instructions. Organization is VIRTUAL:
+faceted tags over documents AND chats (shared vocabulary → the cross-cutting
+view: one tag filters deliverables and sessions together), views pivot
+(recency / kind / entity / topic), and nothing ever moves on disk — the
+`.versions/` chains and saved paths stay intact. A bounded on-demand tidy pass
+files the backlog. Filing can never break a save or a turn (failure = saved
+unfiled), never blocks the reply (session filing runs after the turn returns,
+announcing itself on `librarian:update`), and every tag carries provenance
+(librarian vs user).
+*Source: the mess observed live — libraries and session lists rot as they
+grow; multi-tag facets because no single organization fits every retrieval.*
+Accept: spelling variants of a tag land on one row (slug dedupe); a filing
+failure still saves the document; the session list shows librarian summaries;
+a tag click filters documents and chats together; tidy is bounded and
+reversible. **Status: SHIPPED (v1)** — librarian.js + tags schema (v20) +
+save/turn wiring in ipc.js + library views in the renderer; smoke-covered.
+Extensions: user tag editing in the reader, entity rollups, auto-archive
+suggestions for stale sessions.
+
 ---
 
 ## Traceability
@@ -475,6 +503,7 @@ first-class outcome.
 | O28 | test-integrity rule + guardrail | planned — rule line in `plan-derive.js` CODING_RULES + ipc.js CODING MODE note; EG-1 module rides O17 `guards.js` |
 | O29 | repo map + rulebook injection | planned — depth-2 map + rulebook read in `ipc.js` stage F/I; ledger event |
 | O30 | drift pass | planned — maintenance turn over SPEC/DESIGN + rulebook; findings → O27; fixes via ordinary plan machinery |
+| O31 | the Librarian — self-organizing library + sessions | shipped v1: `src/main/librarian.js` + tags/chat_tags/document_tags (db v20) + save-time/turn-end filing (`ipc.js`) + faceted views + tidy (renderer) |
 
 ---
 
