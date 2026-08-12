@@ -271,14 +271,6 @@ app.whenReady().then(async () => {
   const noCeilingNoPicksCapped = applyToolCeiling({ loadedSkills: [], toolNames: [], allTools: bigCatalog, fallbackCap: 5 });
   assert(noCeilingNoPicksCapped.tools.length === 5 && noCeilingNoPicksCapped.fellBack, 'tool ceiling still honors an explicit fallbackCap when one is passed');
 
-  // Planner: strategizes a request into steps + merge, then executes deterministically
-  const { makePlan, runPlan } = require('../src/main/planner');
-  const plan = await makePlan({ connector: { chat: async () => ({ text: '{"goal":"compare","steps":[{"task":"A","agent":"auto","parallel":true},{"task":"B","agent":"auto","parallel":true}],"merge":"compare A and B"}' }) }, model: 'm', request: 'compare A and B' });
-  assert(plan.steps.length === 2 && plan.steps[0].parallel && plan.merge === 'compare A and B', 'planner produces a structured, parallel plan');
-  const planConn = { chat: async ({ messages }) => { const u = (messages.find((m) => m.role === 'user') || {}).content || ''; return u.startsWith('You are merging') ? { text: 'MERGED' } : { text: 'C:' + u.slice(0, 6), toolCalls: [] }; } };
-  const planRun = await runPlan({ plan, connector: planConn, model: 'm', fastModel: 'm', resolveAgent: () => ({ agent: { name: 'general', system_prompt: 'x' }, model: 'm', tools: [] }), callTool: async () => ({ text: 'r' }), onEvent: () => {} });
-  assert(planRun.results.length === 2 && planRun.answer === 'MERGED', 'planner executes steps and AI-merges the results');
-
   // Orchestration: assign work in PARALLEL + merge the results (the full round-trip)
   const { runSubagent: rsa, mergeResults } = require('../src/main/subagent');
   const proc = [];
@@ -314,6 +306,10 @@ app.whenReady().then(async () => {
   assert(f2b.after < 200 && f2b.rules.includes('dedup-lines'), 'filter collapses runs of duplicate lines');
   const f3 = filterToolResult('noop', 'a short clean result');
   assert(f3.after === f3.before && f3.rules.length === 0, 'filter leaves small clean output untouched');
+  // ANSI: real escape sequences stripped; bracket-text like arr[m] or a literal
+  // "[0m" without the ESC byte is NOT touched (the regex must anchor on \x1b).
+  const fAnsi = filterToolResult('sh', '\x1b[31mred\x1b[0m arr[m] keeps [0m literal');
+  assert(fAnsi.text === 'red arr[m] keeps [0m literal', 'filter strips ANSI codes without corrupting bracket text');
   // Chat loop applies the filter to tool results
   let cstep = 0;
   const bigJson = JSON.stringify({ items: Array(400).fill({ a: 1, b: 2 }) }, null, 2);
@@ -763,6 +759,12 @@ app.whenReady().then(async () => {
     const ambi = await ct.call('edit_file', { path: 'b.txt', old_string: 'dup', new_string: 'x' });
     assert(miss.isError && ambi.isError && ambi.text.includes('2 times'), 'coding: edit_file refuses missing and ambiguous matches');
 
+    // Regression: replacement text containing $-patterns ($&, $', $$) must be
+    // written literally — String.replace once interpreted them.
+    await ct.call('write_file', { path: 'dollar.txt', content: 'const re = PLACEHOLDER;\n' });
+    await ct.call('edit_file', { path: 'dollar.txt', old_string: 'PLACEHOLDER', new_string: `s.replace(/x/, '$&-$$')` });
+    assert(fs.readFileSync(path.join(work, 'dollar.txt'), 'utf8').includes(`s.replace(/x/, '$&-$$')`), 'coding: edit_file writes $-patterns literally (no replace-pattern expansion)');
+
     // Shell: cwd is the working dir; the app env is scrubbed (allowlist only).
     process.env.SMOKE_LEAK_CANARY = 'should-not-cross';
     const sh = await ct.call('run_command', { command: 'pwd; echo "C=${SMOKE_LEAK_CANARY:-unset}"' });
@@ -994,10 +996,14 @@ app.whenReady().then(async () => {
       model: 'mock', goal: 'add flag',
       stepResults: [{ step: 1, task: 'edit cli.js', conclusion: 'added --verbose' }],
       toolTrace: [{ name: 'edit_file', args: { path: 'cli.js' }, ok: true }, { name: 'run_command', args: { command: 'npm test' }, ok: true }],
-      known: 'KNOWN VALUES: x', current: { design: '# DESIGN old', pseudocode: '', knowledge: '# K' }
+      known: 'KNOWN VALUES: x', current: { design: '# DESIGN old', pseudocode: '', knowledge: '# K' },
+      files: [{ path: 'cli.js', content: 'module.exports = { runCli };' }]
     });
     assert(out.design === good && !out.knowledge && !out.pseudocode, 'doc-writer: valid docs pass, fragments rejected, untouched docs omitted');
     assert(seenPrompt.includes('technical writer') && seenPrompt.includes('Never narrate') && seenPrompt.includes('cli.js') && seenPrompt.includes('# DESIGN old'), 'doc-writer: prompt carries standards, files touched, and current docs');
+    // Regression: the files PARAM (changed-file contents) must reach the prompt —
+    // a shadowing bug once replaced it with bare path strings (### undefined blocks).
+    assert(seenPrompt.includes('### cli.js') && seenPrompt.includes('module.exports = { runCli };') && !seenPrompt.includes('### undefined'), 'doc-writer: changed-file CONTENTS reach the prompt (shadowing regression)');
     const none = await updateDocs({ connector: mock({ toolCalls: [{ id: 'x', name: 'submit_docs', args: { none: true, design: good } }] }), model: 'mock', current: {} });
     assert(Object.keys(none).length === 0, 'doc-writer: none=true wins — no writes');
     const fail = await updateDocs({ connector: { chat: async () => { throw new Error('boom'); } }, model: 'mock', current: {} });

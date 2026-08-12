@@ -79,13 +79,13 @@ function validDoc(s) {
  */
 async function updateDocs({ connector, model, goal, stepResults = [], toolTrace = [], known = '', current = {}, files = [] }) {
   try {
-    const files = [...new Set(toolTrace
+    const touchedPaths = [...new Set(toolTrace
       .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
       .map((t) => (t.args && t.args.path) || '').filter(Boolean))];
     const cmds = [...new Set(toolTrace
       .filter((t) => t.ok !== false && t.name === 'run_command')
       .map((t) => clip((t.args && t.args.command) || '', 80)).filter(Boolean))];
-    const filesTouched = [files.join(', '), cmds.length ? `commands: ${cmds.join(' · ')}` : '']
+    const filesTouched = [touchedPaths.join(', '), cmds.length ? `commands: ${cmds.join(' · ')}` : '']
       .filter(Boolean).join(' — ');
     const stepDigest = stepResults
       .map((r) => `- [step ${r.step}] ${clip(r.task, 120)}: ${clip(r.conclusion, 300)}`).join('\n');

@@ -308,7 +308,8 @@ function editFileTool(jail, args) {
   const count = text.split(oldS).length - 1;
   if (count === 0) return { text: `edit_file: old_string not found in ${args.path}. Read the file and copy the exact text.`, isError: true };
   if (count > 1 && !args.replace_all) return { text: `edit_file: old_string matches ${count} times in ${args.path}. Add surrounding context to make it unique, or set replace_all.`, isError: true };
-  const out = args.replace_all ? text.split(oldS).join(newS) : text.replace(oldS, newS);
+  // () => newS: a plain-string replacement would interpret $&, $', $$ patterns.
+  const out = args.replace_all ? text.split(oldS).join(newS) : text.replace(oldS, () => newS);
   fs.writeFileSync(abs, out, 'utf8');
   return { text: `Replaced ${args.replace_all ? count : 1} occurrence${(args.replace_all ? count : 1) === 1 ? '' : 's'} in ${jail.display(abs)}` };
 }

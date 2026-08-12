@@ -584,7 +584,7 @@ html.busy, html.busy * { cursor: progress !important; }
 .attachchip__x { border: none; background: transparent; color: var(--ink3); cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1; }
 .attachchip__x:hover { color: var(--brand); }
 .toolchip--file { color: var(--ink2); }
-.messages.dropping { outline: 2px dashed var(--brand); outline-offset: -6px; border-radius: 8px; }
+.turns.dropping { outline: 2px dashed var(--brand); outline-offset: -6px; border-radius: 8px; }
 
 /* ── Right rail (DOCS / PLAN / SCOPE) ──────────────────────────── */
 .rail { width: var(--w-rail); flex: none; border-left: 1px solid var(--line); background: var(--side); display: flex; flex-direction: column; min-height: 0; }
@@ -615,6 +615,7 @@ html.busy, html.busy * { cursor: progress !important; }
 .raillist__item .title { font-size: 12px; }
 .raillist__item .title--mono { font-family: var(--mono); }
 .raillist__item .sub { font-family: var(--mono); font-size: 9.5px; color: var(--ink3); text-transform: uppercase; }
+.raillist__edit { width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--raise); border: 1px solid var(--brand); border-radius: 3px; padding: 2px 4px; outline: none; }
 
 /* ── Command palette ───────────────────────────────────────────── */
 .overlay { position: fixed; inset: 0; z-index: 120; background: rgba(0,0,0,0.5); backdrop-filter: blur(2px); display: flex; align-items: flex-start; justify-content: center; padding-top: 96px; animation: ac-fade 0.1s ease-out; }

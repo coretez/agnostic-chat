@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/Users/christopherjordan/Projects/shamrock-internal/scripts/serve.js"
+      ],
+      "port": 8123,
+      "autoPort": true
+    }
+  ]
+}

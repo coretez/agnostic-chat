@@ -220,6 +220,7 @@ function renderAssistantBody(el, text) {
     bar.insertBefore(openBtn, toggle);
     const frame = document.createElement('iframe'); frame.className = 'htmlpreview'; frame.setAttribute('sandbox', '');
     frame.src = URL.createObjectURL(new Blob([raw], { type: 'text/html' }));
+    frame.onload = () => { try { URL.revokeObjectURL(frame.src); } catch {} };
     const pre = document.createElement('pre'); pre.className = 'codeblock'; pre.hidden = true; pre.textContent = raw;
     let showingSource = false;
     toggle.onclick = () => { showingSource = !showingSource; frame.hidden = showingSource; pre.hidden = !showingSource; toggle.textContent = showingSource ? '▷ preview' : '</> source'; };
@@ -234,7 +235,11 @@ function applyTheme() {
   else el.html.removeAttribute('data-b-theme');
   el.themeBtn.textContent = state.theme === 'dark' ? 'LIGHT' : 'DARK';
 }
-function toggleTheme() { state.theme = state.theme === 'dark' ? 'light' : 'dark'; applyTheme(); }
+function toggleTheme() {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  applyTheme();
+  try { window.api.settings.set('ui_theme', state.theme); } catch {}
+}
 
 // ── Model switcher (dynamic, from providers) ──────────────────────
 function providerModels(p) {
@@ -794,11 +799,27 @@ async function renderVars() {
     li.innerHTML = `<div class="title">${escapeHtml(v.key)}</div>`
       + `<div class="sub">${escapeHtml(String(v.value).slice(0, 90))} · ${escapeHtml(v.confidence || 'observed')}</div>`;
     li.title = 'Click to edit — your value outranks anything the model observed. Empty clears it.';
-    li.onclick = async () => {
-      const next = window.prompt(`${v.key}\n\nEdit the value (empty clears it):`, String(v.value));
-      if (next === null) return;
-      try { await window.api.chats.setVariable(state.currentChatId, v.key, next.trim()); } catch {}
-      renderVars();
+    // Inline editor (window.prompt does not exist in Electron): click swaps the
+    // sub line for an input; Enter saves, Escape/blur cancels.
+    li.onclick = () => {
+      if (li.querySelector('input')) return;
+      const sub = li.querySelector('.sub');
+      const input = document.createElement('input');
+      input.type = 'text'; input.className = 'raillist__edit'; input.value = String(v.value);
+      sub.replaceWith(input);
+      input.focus(); input.select();
+      let done = false;
+      const finish = async (save) => {
+        if (done) return; done = true;
+        if (save) { try { await window.api.chats.setVariable(state.currentChatId, v.key, input.value.trim()); } catch {} }
+        renderVars();
+      };
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter') finish(true);
+        else if (e.key === 'Escape') finish(false);
+      };
+      input.onblur = () => finish(false);
+      input.onclick = (e) => e.stopPropagation();
     };
     list.appendChild(li);
   }
@@ -1532,6 +1553,10 @@ async function loadProviders() {
   if (!state.selected) state.selected = await initialSelection();
   if (state.selected) el.modelLabel.textContent = state.selected.model;
   try { state.evaluatorModel = await window.api.settings.get('evaluator_model'); } catch { /* optional */ }
+  try {
+    const savedTheme = await window.api.settings.get('ui_theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') { state.theme = savedTheme; applyTheme(); }
+  } catch { /* optional */ }
   buildModelMenu();
   updateComposerMeta();
 }

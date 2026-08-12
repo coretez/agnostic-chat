@@ -9,7 +9,7 @@
 // middle of anything still huge (keeping head AND tail, since summaries/verdicts
 // usually live at the end). Every rule that fires is reported for the glass box.
 
-const ANSI = /\[[0-9;]*m/g;
+const ANSI = /\x1b\[[0-9;]*m/g;
 const DATA_URI = /data:[^;\s]+;base64,[A-Za-z0-9+/=]+/g;
 const BASE64_BLOB = /[A-Za-z0-9+/]{300,}={0,2}/g;
 const LONG_LINE = 2000;
