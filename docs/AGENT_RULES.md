@@ -74,8 +74,15 @@ gates don't yet.
 - NEVER justify a long function by call overhead or stack depth. Compilers
   and JITs inline; that is their job, not yours. Optimize for the reader and
   the debugger, and let the compiler optimize for the machine.
-  (Deterministically checkable — enforce via the O26 check command / lint,
-  not by prose, as soon as the gate exists.)
+- ALWAYS give a function the narrowest surface that does its job: pass
+  exactly the variables it needs, nothing more. The signature is the
+  contract — it declares what this function depends on and what is allowed
+  to change.
+- NEVER thread whole objects, contexts, or "everything" through a call just
+  in case. A kitchen-sink signature means the writer did not know what was
+  needed or what could change — decide, then pass only that.
+  (Both ceilings are deterministically checkable — enforce via the O26
+  check command / lint, not by prose, as soon as the gate exists.)
 - Prefer boring, composable, well-understood technology. If a library is opaque
   to reason about from inside the repo, reimplementing the needed subset may be
   the better choice — decide in the plan, not mid-edit.

@@ -1232,6 +1232,43 @@ app.whenReady().then(async () => {
     const txt = htmlToText('<html><script>evil()</script><style>x{}</style><h1>Title</h1><p>Para &amp; more</p><li>item</li></html>');
     assert(!txt.includes('evil') && txt.includes('Title') && txt.includes('Para & more') && txt.includes('- item'), 'web: htmlToText strips scripts/styles, keeps structure');
     assert(unwrapDdg('//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.b%2Fc') === 'https://a.b/c', 'web: uddg param decoded');
+
+    // SSRF guard: model-directed fetches must never reach loopback/private/
+    // link-local targets — by literal IP, by hostname, or via redirect hop.
+    const { isPrivateIp, assertPublicUrl } = require('../src/main/web-tools');
+    for (const ip of ['127.0.0.1', '10.0.0.5', '172.16.9.1', '172.31.255.1', '192.168.1.1', '169.254.169.254', '0.0.0.0', '::1', 'fc00::1', 'fe80::1', '::ffff:127.0.0.1']) {
+      assert(isPrivateIp(ip) === true, `web: ${ip} classified private`);
+    }
+    for (const ip of ['8.8.8.8', '172.32.0.1', '1.1.1.1', '2606:4700::1111']) {
+      assert(isPrivateIp(ip) === false, `web: ${ip} classified public`);
+    }
+    const refused = async (u) => { try { await assertPublicUrl(u); return false; } catch { return true; } };
+    assert(await refused('http://127.0.0.1:8080/admin'), 'web: loopback literal refused');
+    assert(await refused('http://localhost/x'), 'web: localhost refused');
+    assert(await refused('http://foo.internal/x'), 'web: .internal refused');
+    assert(await refused('file:///etc/passwd'), 'web: non-http scheme refused');
+    assert(await refused('http://[::1]/x'), 'web: v6 loopback literal refused');
+  }
+
+  // ── Documents-surface jail: index paths confined to managed roots ──────────
+  {
+    const { documentPathAllowed } = require('../src/main/ipc');
+    const jailWork = path.join(tmp, 'jaildocs-work');
+    fs.mkdirSync(jailWork, { recursive: true });
+    fs.mkdirSync(jailWork + '-evil', { recursive: true });
+    const jailBase = path.join(tmp, 'jaildocs-base');
+    fs.mkdirSync(jailBase, { recursive: true });
+    const prevBase = repo.settings.get('documents_base');
+    repo.settings.set('documents_base', jailBase);
+    const p = repo.projects.create({ name: 'JailDocs' });
+    repo.projects.setWorkingDir(p.id, jailWork);
+    assert(documentPathAllowed(path.join(jailWork, 'notes.md')) === true, 'docjail: working_dir path allowed');
+    assert(documentPathAllowed(path.join(jailBase, 'AnyProject', 'r.html')) === true, 'docjail: documents-base path allowed');
+    assert(documentPathAllowed('/etc/passwd') === false, 'docjail: /etc refused');
+    assert(documentPathAllowed(path.join(os.homedir(), '.ssh', 'id_rsa')) === false, 'docjail: ~/.ssh refused');
+    assert(documentPathAllowed(jailWork + '-evil/x') === false, 'docjail: sibling prefix (root-evil) refused');
+    repo.projects.archive(p.id);
+    repo.settings.set('documents_base', prevBase || null);
   }
 
   // ── Dev servers + build environment ───────────────────────────────────────

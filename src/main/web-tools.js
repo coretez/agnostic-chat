@@ -95,23 +95,76 @@ function htmlToText(html) {
   return t.length > MAX_TEXT ? t.slice(0, MAX_TEXT) + '\n… [truncated]' : t;
 }
 
-async function fetchCapped(url) {
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, redirect: 'follow', signal: ctrl.signal });
-    const reader = res.body && res.body.getReader ? res.body.getReader() : null;
-    if (!reader) return { status: res.status, body: await res.text() };
-    const chunks = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value); size += value.length;
-      if (size >= MAX_BODY) { try { ctrl.abort(); } catch {} break; }
-    }
-    return { status: res.status, body: Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8') };
-  } finally { clearTimeout(to); }
+// ── SSRF guard ──────────────────────────────────────────────────────────────
+// fetch_url is model-directed: a hostile page can steer the model at localhost
+// or the intranet (including this app's own transient OAuth loopback server
+// and dev servers). Every hop — original URL and each redirect — must resolve
+// to a public address before it is fetched. DNS-rebinding TOCTOU remains
+// (lookup and fetch are separate resolutions) — accepted for a desktop tool.
+const dnsp = require('node:dns').promises;
+const net = require('node:net');
+
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 127 || a === 10 || a === 0
+      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  const s = String(ip).toLowerCase();
+  if (s === '::1' || s === '::') return true;
+  if (/^(fc|fd)/.test(s)) return true;                       // ULA fc00::/7
+  if (/^fe[89ab]/.test(s)) return true;                      // link-local fe80::/10
+  if (s.startsWith('::ffff:')) return isPrivateIp(s.slice(7)); // v4-mapped
+  return false;
+}
+
+async function assertPublicUrl(u) {
+  let url;
+  try { url = new URL(u); } catch { throw new Error(`invalid URL: ${u}`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error('only http(s) URLs are allowed');
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (/^(localhost$|.+\.(local|localhost|internal|home\.arpa)$)/i.test(host)) throw new Error(`refusing to fetch ${host} — local network`);
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error(`refusing to fetch ${host} — private/loopback address`);
+    return url;
+  }
+  let addrs;
+  try { addrs = await dnsp.lookup(host, { all: true, verbatim: true }); } catch { throw new Error(`cannot resolve ${host}`); }
+  if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) {
+    throw new Error(`refusing to fetch ${host} — resolves to a private/loopback address`);
+  }
+  return url;
+}
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+async function fetchCapped(url, { maxRedirects = 5 } = {}) {
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    await assertPublicUrl(current);           // every hop re-checked
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(current, { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, redirect: 'manual', signal: ctrl.signal });
+      if (REDIRECT_STATUS.has(res.status)) {
+        const loc = res.headers.get('location');
+        if (!loc || hop >= maxRedirects) return { status: res.status, body: '' };
+        current = new URL(loc, current).toString();
+        continue;
+      }
+      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) return { status: res.status, body: await res.text() };
+      const chunks = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value); size += value.length;
+        if (size >= MAX_BODY) { try { ctrl.abort(); } catch {} break; }
+      }
+      return { status: res.status, body: Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8') };
+    } finally { clearTimeout(to); }
+  }
 }
 
 async function call(name, args = {}) {
@@ -140,4 +193,4 @@ async function call(name, args = {}) {
   }
 }
 
-module.exports = { WEB_TOOLS, names, call, parseDdg, htmlToText, unwrapDdg };
+module.exports = { WEB_TOOLS, names, call, parseDdg, htmlToText, unwrapDdg, isPrivateIp, assertPublicUrl };

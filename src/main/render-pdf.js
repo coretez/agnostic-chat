@@ -16,6 +16,8 @@ const path = require('node:path');
  * @param {string} htmlPath absolute path to an existing .html document
  * @returns {Promise<{pdfPath: string, bytes: number}>}
  */
+const LOAD_TIMEOUT_MS = 30000;
+
 async function htmlToPdf(htmlPath) {
   const abs = path.resolve(htmlPath);
   if (!fs.existsSync(abs)) throw new Error(`no such file: ${htmlPath}`);
@@ -26,11 +28,25 @@ async function htmlToPdf(htmlPath) {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      javascript: false
+      javascript: false,
+      // Isolated, non-persisted session so the network deny below applies to
+      // this render only and nothing is cached across documents.
+      partition: 'render-pdf'
     }
   });
   try {
-    await win.loadFile(abs);
+    // ENFORCE the self-contained contract (O25) instead of trusting it: only
+    // file:// and data: subresources load. A document with a remote <img> —
+    // an exfiltration beacon and a determinism hole — renders without it.
+    win.webContents.session.webRequest.onBeforeRequest((details, cb) => {
+      const ok = /^(file:|data:|chrome-extension:|devtools:)/i.test(details.url);
+      cb({ cancel: !ok });
+    });
+    // A hanging load must not wedge the conversion path.
+    await Promise.race([
+      win.loadFile(abs),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`render timed out after ${LOAD_TIMEOUT_MS / 1000}s`)), LOAD_TIMEOUT_MS))
+    ]);
     const buf = await win.webContents.printToPDF({
       printBackground: true,
       pageSize: 'Letter',

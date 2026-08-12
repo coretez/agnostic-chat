@@ -44,13 +44,17 @@ sentence, so flat-loop turns are not. Sliver: add it to the note in ipc.js).
 (1) scope jail, never bypassable; (2) action approval for what git cannot
 undo — reads free, file writes/edits auto-approved WHEN the working dir is a
 git repo (rollback exists; per-file prompts don't scale to real projects),
-shell always asks; (3) bypass (extends to shell) only where rollback exists
-(git), enforced in main, revocable and visible.
+shell always asks; (3) bypass — in effect a SHELL bypass, since writes are
+already free with git. Honest framing: git does NOT roll back shell effects
+(network, installs, deletes outside the tree), so the standing grant is
+confirmed by a main-process dialog stating exactly that risk — a renderer
+message alone cannot flip it. Still git-gated, revocable, and visible.
 *Source: Claude Code permission modes; Harness.io approval stages; usage
 feedback — per-file approval was unusable at project scale.*
 Accept: deny mutates nothing and tells the model not to retry; writes flow
 without prompts in a git repo and ask without one; shell prompts unless
-bypassed; bypass ignored without `.git`; standing bypass shows a chip.
+bypassed; bypass ignored without `.git`; enabling bypass requires the
+main-side confirmation; standing bypass shows a chip.
 **Status: SHIPPED.**
 
 **O5. Reviewable approvals.** An approval must show what will actually

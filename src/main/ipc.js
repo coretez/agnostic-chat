@@ -232,7 +232,58 @@ function parseSkillVersions(text) {
   return out;
 }
 
-function registerIpc() {
+// ── Documents-surface path containment ──────────────────────────────────────
+// Renderer-supplied and DB-indexed paths may only be read/revealed/rendered
+// when they lie inside a root the app legitimately manages: the global
+// documents base, or a project's output_dir / working_dir. Without this,
+// documents:create + documents:read was a two-call arbitrary file read
+// (~/.ssh, the DB itself). realpath-based so a symlinked index entry cannot
+// point outside; prefix-checked with a trailing separator (no /project vs
+// /project-evil confusion).
+function documentsRoots() {
+  const roots = [];
+  try { roots.push(repo.settings.get('documents_base') || docs.defaultBase()); } catch { roots.push(docs.defaultBase()); }
+  try {
+    for (const p of repo.projects.list({ includeArchived: true }) || []) {
+      if (p.output_dir) roots.push(p.output_dir);
+      if (p.working_dir) roots.push(p.working_dir);
+    }
+  } catch {}
+  return roots;
+}
+function realOrNull(p) {
+  const fs = require('node:fs');
+  try { return fs.realpathSync(p); } catch { return null; }
+}
+// realpath the deepest EXISTING ancestor and re-append the untraversed tail
+// (same rationale as coding-tools.realResolve) — a not-yet-written file under
+// /var on macOS must still resolve through the /var→/private/var symlink so
+// the prefix check compares real against real.
+function realResolveLoose(p) {
+  const path = require('node:path');
+  let cur = path.resolve(String(p));
+  const tail = [];
+  for (;;) {
+    const real = realOrNull(cur);
+    if (real) return tail.length ? path.join(real, ...tail) : real;
+    const parent = path.dirname(cur);
+    if (parent === cur) return path.resolve(String(p));
+    tail.unshift(path.basename(cur));
+    cur = parent;
+  }
+}
+function documentPathAllowed(p) {
+  if (!p) return false;
+  const path = require('node:path');
+  const target = realResolveLoose(p);
+  return documentsRoots().some((r) => {
+    const rr = realOrNull(r);
+    if (!rr) return false;
+    return target === rr || target.startsWith(rr + path.sep);
+  });
+}
+
+function registerIpc() { // (documentPathAllowed exported below for smoke coverage)
   // Projects
   ipcMain.handle('projects:list', (_e, opts) => repo.projects.list(opts));
   ipcMain.handle('projects:create', (_e, input) => repo.projects.create(input));
@@ -251,7 +302,14 @@ function registerIpc() {
     if (res.canceled || !res.filePaths.length) return { ok: false };
     return { ok: true, project: repo.projects.setWorkingDir(id, res.filePaths[0]) };
   });
-  ipcMain.handle('app:revealPath', (_e, p) => { if (p) shell.openPath(p); });
+  // Reveal is jailed to the documents surface — shell.openPath can launch
+  // executables via the OS default handler, so an arbitrary path is an
+  // execution primitive, not a convenience.
+  ipcMain.handle('app:revealPath', (_e, p) => {
+    if (!p || !documentPathAllowed(p)) return { ok: false, error: 'path outside the documents library / project directories' };
+    shell.openPath(String(p));
+    return { ok: true };
+  });
   // In-place update (git-checkout mode today; release channel when packaged).
   ipcMain.handle('update:check', async () => {
     try { return await require('./updater').checkForUpdate(); }
@@ -323,7 +381,12 @@ function registerIpc() {
     if (!d) return { error: 'Document not found.' };
     try {
       const fs = require('node:fs');
-      if (d.path && fs.existsSync(d.path)) return { content: fs.readFileSync(d.path, 'utf8'), mime: d.mime_type || 'text/plain', title: d.title };
+      if (d.path && fs.existsSync(d.path)) {
+        // Jail check at READ time — an index row (whatever wrote it) must not
+        // become a read primitive for arbitrary files the app can see.
+        if (!documentPathAllowed(d.path)) return { error: 'Document path is outside the documents library / project directories.' };
+        return { content: fs.readFileSync(d.path, 'utf8'), mime: d.mime_type || 'text/plain', title: d.title };
+      }
       return { content: d.content || '', mime: d.mime_type || 'text/plain', title: d.title };
     } catch (e) { return { error: e.message }; }
   });
@@ -353,7 +416,21 @@ function registerIpc() {
 
   // Settings (small key/value store; project_id null = global)
   ipcMain.handle('settings:get', (_e, { key, projectId = null }) => repo.settings.get(key, projectId));
-  ipcMain.handle('settings:set', (_e, { key, value, projectId = null }) => repo.settings.set(key, value, projectId));
+  ipcMain.handle('settings:set', async (_e, { key, value, projectId = null }) => {
+    // Enabling the standing bypass is a main-side decision, not a renderer
+    // message — a compromised renderer must not be able to silently grant
+    // itself unprompted writes (the ipc surface is the second wall).
+    if (key === 'coding_bypass' && String(value) === '1') {
+      const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+      const r = await dialog.showMessageBox(win, {
+        type: 'warning', buttons: ['Enable bypass', 'Cancel'], defaultId: 1, cancelId: 1,
+        message: 'Run shell commands without asking, for this project?',
+        detail: 'File writes already flow without prompts (git rolls them back). This bypass additionally lets SHELL COMMANDS run unprompted — and shell effects (network calls, installs, deletes outside the repo) are NOT undone by git. The BYPASS chip stays visible; click it to revoke.'
+      });
+      if (r.response !== 0) return { ok: false, cancelled: true };
+    }
+    return repo.settings.set(key, value, projectId);
+  });
 
   // Meta-evaluator — critique a turn's context engineering with a chosen model.
   ipcMain.handle('evaluate:run', async (_e, { providerId, model, digest }) => {
@@ -434,6 +511,7 @@ function registerIpc() {
   ipcMain.handle('documents:toPdf', async (_e, { id }) => {
     const row = repo.documents.get(id);
     if (!row || !row.path) throw new Error(`no document with id ${id}`);
+    if (!documentPathAllowed(row.path)) throw new Error('document path is outside the documents library / project directories');
     const { htmlToPdf } = require('./render-pdf');
     const out = await htmlToPdf(row.path);
     let indexed = null;
@@ -447,7 +525,12 @@ function registerIpc() {
     return { pdfPath: out.pdfPath, bytes: out.bytes, id: indexed && indexed.id };
   });
   ipcMain.handle('documents:list', (_e, { projectId }) => repo.documents.listByProject(projectId));
-  ipcMain.handle('documents:create', (_e, input) => repo.documents.create(input));
+  ipcMain.handle('documents:create', (_e, input) => {
+    if (input && input.path && !documentPathAllowed(input.path)) {
+      throw new Error('document path must be inside the documents library or a project directory');
+    }
+    return repo.documents.create(input);
+  });
   ipcMain.handle('documents:linkToChat', (_e, input) => repo.documents.linkToChat(input));
   ipcMain.handle('documents:listByChat', (_e, { chatId }) => repo.documents.listByChat(chatId));
 
@@ -562,8 +645,34 @@ function registerIpc() {
 
   // MCP servers — metadata only out; env/token stay in main.
   ipcMain.handle('mcp:list', () => repo.mcp.list());
-  ipcMain.handle('mcp:add', (_e, input) => repo.mcp.add(input));
-  ipcMain.handle('mcp:update', (_e, { id, patch }) => repo.mcp.update(id, patch));
+  // A stdio MCP server is an arbitrary command this app will spawn — that
+  // decision is confirmed in MAIN, not taken on a renderer message alone
+  // (mcp:add + mcp:connect was renderer-to-RCE with no second wall).
+  const confirmMcpCommand = async (command, args) => {
+    if (!command) return true; // http transport — no spawn
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    const r = await dialog.showMessageBox(win, {
+      type: 'warning', buttons: ['Allow', 'Cancel'], defaultId: 1, cancelId: 1,
+      message: 'Allow this MCP server command?',
+      detail: `The app will run:\n\n${command} ${(args || []).join(' ')}\n\nOnly allow commands you recognize.`
+    });
+    return r.response === 0;
+  };
+  ipcMain.handle('mcp:add', async (_e, input) => {
+    if (!(await confirmMcpCommand(input && input.command, input && input.args))) return { ok: false, cancelled: true };
+    return repo.mcp.add(input);
+  });
+  ipcMain.handle('mcp:update', async (_e, { id, patch }) => {
+    // Re-confirm only when the spawned command actually changes.
+    if (patch && (patch.command !== undefined || patch.args !== undefined)) {
+      const cur = repo.mcp.get(id) || {};
+      const nextCmd = patch.command !== undefined ? patch.command : cur.command;
+      const nextArgs = patch.args !== undefined ? patch.args : (cur.args || []);
+      const changed = nextCmd !== cur.command || JSON.stringify(nextArgs) !== JSON.stringify(cur.args || []);
+      if (changed && !(await confirmMcpCommand(nextCmd, nextArgs))) return { ok: false, cancelled: true };
+    }
+    return repo.mcp.update(id, patch);
+  });
   ipcMain.handle('mcp:remove', (_e, { id }) => repo.mcp.remove(id));
   // Per-project MCP scoping (opt-out, mirrors skills:enabledForProject)
   ipcMain.handle('mcp:enabledForProject', (_e, { projectId }) => repo.mcp.listEnabledForProject(projectId));
@@ -936,8 +1045,13 @@ function registerIpc() {
             // so writes flow freely when git exists. Shell can do things git
             // cannot undo, so it still asks. No git → everything asks.
             if (kind === 'write' && gitNow()) return true;
-            // Level-3 bypass (covers shell too): only honored with git — even
-            // if the setting was somehow set without it, we still ask.
+            // Level-3 bypass. In practice this is a SHELL bypass — writes are
+            // already free with git — and git does NOT roll back shell effects
+            // (network calls, installs, deletes outside the tree). The honest
+            // framing lives where the setting is granted: the main-process
+            // confirmation dialog (settings:set) states exactly that risk, so
+            // the standing grant is an informed one and cannot be flipped by a
+            // renderer message alone.
             try { if (gitNow() && repo.settings.get('coding_bypass', projectId) === '1') return true; } catch {}
             return (await askUser({ type: 'action-approve', kind, summary, gitAvailable: gitNow() })) > 0;
           };
@@ -1532,4 +1646,4 @@ function registerIpc() {
   });
 }
 
-module.exports = { registerIpc };
+module.exports = { registerIpc, documentPathAllowed };

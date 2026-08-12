@@ -74,10 +74,16 @@ function createWindow() {
     console.log('[renderer]', msg);
   });
 
-  // Open target=_blank / window.open links in the user's real browser, never in-app.
+  // Open target=_blank / window.open links in the user's real browser, never
+  // in-app — and only web URLs: file:/custom schemes via openExternal are an
+  // execution primitive (same rule as ipc's app:openExternal).
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+  // The app window must never navigate away from its own local file.
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('file://')) e.preventDefault();
   });
 
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });

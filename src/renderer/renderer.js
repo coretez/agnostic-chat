@@ -1876,8 +1876,8 @@ async function submit() {
     deny.onclick = () => answer(0);
     prompt.appendChild(allow); prompt.appendChild(deny);
     const makeBypassBtn = () => {
-      const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS (GIT ROLLBACK)';
-      bypass.title = 'Allow this and stop asking for this project — available because the working directory is a git repo, so changes can be rolled back';
+      const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS SHELL PROMPTS';
+      bypass.title = 'Stop asking for this project. File changes are rolled back by git; SHELL effects (network, installs, deletes outside the repo) are NOT — the app will ask you to confirm this grant.';
       bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); updateBypassChip(); };
       return bypass;
     };
