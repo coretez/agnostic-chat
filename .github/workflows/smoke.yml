@@ -1,0 +1,28 @@
+# The smoke suite (scripts/smoke.js) is the project's test suite — ~280 hard
+# assertions over the whole main-process pipeline (DB, secrets, providers, MCP,
+# chat loop, executor, coding jail, doc pipeline). It needs Electron because it
+# exercises safeStorage and BrowserWindow-adjacent code paths.
+#
+# macOS runner: safeStorage's Keychain backend and the darwin-specific paths
+# (e.g. /var → /private/var symlink resolution in the jails) are what
+# production runs on.
+
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run smoke
