@@ -58,6 +58,10 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   const usage = makeUsage();
   const toolTrace = [];
+  let truncated = false;
+  const noteTruncation = (r) => {
+    if (r && r.truncated) { truncated = true; emit({ type: 'process', kind: 'truncated', step: step.id, reason: r.finishReason || 'max_tokens' }); }
+  };
   // The model always gets set_variable on top of the step's real tools.
   const stepTools = [SET_VARIABLE_TOOL, ...tools];
   const h = [...history, { role: 'user', content: renderStepDirective(step, store) }];
@@ -77,11 +81,12 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
       throw e;
     }
     addUsage(usage, res.usage);
+    noteTruncation(res);
     const calls = res.toolCalls || [];
 
     if (calls.length === 0) {
       emit({ type: 'process', kind: 'step-done', step: step.id });
-      return { result: { step: step.id, task: step.task, conclusion: res.text || '', usage }, partial: res.text || '', history: h, stuck: false, usage, toolTrace };
+      return { result: { step: step.id, task: step.task, conclusion: res.text || '', usage }, partial: res.text || '', history: h, stuck: false, usage, toolTrace, truncated };
     }
 
     h.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
@@ -131,11 +136,15 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
   try {
     wrap = await chat({ model, messages: [...h, { role: 'user', content: STEP_WRAP_PROMPT }], tools: [], onDelta: (d) => emit({ type: 'token', text: d.text }) });
     addUsage(usage, wrap.usage);
-  } catch { wrap = { text: '' }; }
+    noteTruncation(wrap);
+  } catch (e) {
+    emit({ type: 'process', kind: 'wrapup-failed', step: step.id, error: (e && e.message) || 'model call failed' });
+    wrap = { text: '' };
+  }
   emit({ type: 'process', kind: 'step-stuck', step: step.id });
   return {
     result: { step: step.id, task: step.task, conclusion: wrap.text || '', incomplete: true, usage },
-    partial: wrap.text || '', history: h, stuck: true, reason: 'iteration-budget-exhausted', usage, toolTrace
+    partial: wrap.text || '', history: h, stuck: true, reason: 'iteration-budget-exhausted', usage, toolTrace, truncated
   };
 }
 
@@ -173,6 +182,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
   let h = [...history];
   let replans = 0;
   let idx = 0;
+  let truncated = false; // any step's model output hit the token limit
 
   emit({ type: 'process', kind: 'execute-start', goal: plan && plan.goal, steps: steps.length });
 
@@ -252,6 +262,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
 
     const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit, isAborted });
     h = r.history;
+    truncated = truncated || !!r.truncated;
     mergeUsage(r.usage);
     toolTrace.push(...(r.toolTrace || []));
     if (r.aborted) { stepResults.push(r.result); break; }   // partial step kept for the save
@@ -302,7 +313,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
   const aborted = stopped();
   const completed = !aborted && idx >= steps.length;
   emit({ type: 'process', kind: 'execute-done', steps: stepResults.length, replans, completed, aborted });
-  return { stepResults, history: h, replans, completed, usage, toolTrace, aborted };
+  return { stepResults, history: h, replans, completed, usage, toolTrace, aborted, truncated };
 }
 
 /**
@@ -332,8 +343,12 @@ async function synthesize({ chat, model, plan, stepResults = [], store, history 
   let res;
   try {
     res = await chat({ model, messages: [...history, { role: 'user', content: prompt }], tools: [], onDelta: (d) => emit({ type: 'token', text: d.text }) });
-  } catch { res = { text: '' }; }
-  return { reply: res.text || stepResults.map((r) => r.conclusion).filter(Boolean).join('\n\n') || '(no results produced)', usage: res.usage || null };
+    if (res.truncated) emit({ type: 'process', kind: 'truncated', reason: res.finishReason || 'max_tokens' });
+  } catch (e) {
+    emit({ type: 'process', kind: 'synthesis-failed', error: (e && e.message) || 'model call failed' });
+    res = { text: '' };
+  }
+  return { reply: res.text || stepResults.map((r) => r.conclusion).filter(Boolean).join('\n\n') || '(no results produced)', usage: res.usage || null, truncated: !!res.truncated };
 }
 
 module.exports = { executeStep, executePlan, synthesize, renderStepDirective, DEFAULT_STEP_BUDGET, REPLAN_BUDGET, STEP_WRAP_PROMPT };

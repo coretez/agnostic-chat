@@ -115,6 +115,102 @@ app.whenReady().then(async () => {
   assert(typeof oc.chat === 'function' && typeof oc.listModels === 'function', 'openai-compat connector built for qwen');
   assert(typeof an.chat === 'function' && typeof an.listModels === 'function', 'anthropic connector built');
 
+  // ── Stream honesty: fake SSE server — error frames, truncation, retry ──
+  {
+    const http = require('node:http');
+    const { openaiCompat } = require('../src/main/providers/openai-compat');
+    const { anthropic: anthropicConn } = require('../src/main/providers/anthropic');
+    let handler = null;
+    const sse = http.createServer((req, res) => handler(req, res));
+    await new Promise((r) => sse.listen(0, '127.0.0.1', r));
+    const port = sse.address().port;
+    const ocLive = openaiCompat({ baseUrl: `http://127.0.0.1:${port}`, key: 'k' });
+    const anLive = anthropicConn({ baseUrl: `http://127.0.0.1:${port}`, key: 'k' });
+    const sseHead = (res) => res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const chunk = (o) => `data: ${JSON.stringify(o)}\n\n`;
+
+    // 1. finish_reason 'length' → truncated surfaces (openai-compat, streaming)
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ choices: [{ delta: { content: 'partial tex' } }] }));
+      res.write(chunk({ choices: [{ delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    const trunc = await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} });
+    assert(trunc.truncated === true && trunc.finishReason === 'length' && trunc.text === 'partial tex', 'stream: finish_reason length surfaces as truncated (openai-compat)');
+
+    // 2. In-stream error frame → the call FAILS (no partial-as-success)
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ choices: [{ delta: { content: 'half an ans' } }] }));
+      res.write(chunk({ error: { message: 'upstream exploded mid-stream' } }));
+      res.end();
+    };
+    let streamErr = null;
+    try { await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} }); }
+    catch (e) { streamErr = e; }
+    assert(streamErr && /upstream exploded/.test(streamErr.message), 'stream: mid-stream error frame throws instead of returning partial text as success');
+
+    // 3. 429 then success → connect-phase retry recovers; retry is observable
+    let hits = 0; const retryEvents = [];
+    handler = (req, res) => {
+      hits++;
+      if (hits === 1) { res.writeHead(429, { 'Retry-After': '0' }); res.end('{"error":{"message":"rate limited"}}'); return; }
+      sseHead(res);
+      res.write(chunk({ choices: [{ delta: { content: 'ok after retry' } }] }));
+      res.write(chunk({ choices: [{ delta: {}, finish_reason: 'stop' }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    const retried = await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {}, onRetry: (r) => retryEvents.push(r) });
+    assert(retried.text === 'ok after retry' && !retried.truncated, 'stream: 429 at connect retries and succeeds');
+    assert(hits === 2 && retryEvents.length === 1 && retryEvents[0].status === 429, 'stream: the retry happened once and was reported via onRetry');
+
+    // 4. Non-retryable status (401) fails immediately — no blind retry loop
+    hits = 0;
+    handler = (req, res) => { hits++; res.writeHead(401); res.end('{"error":{"message":"bad key"}}'); };
+    let authErr = null;
+    try { await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} }); } catch (e) { authErr = e; }
+    assert(authErr && hits === 1, 'stream: 401 is not retried');
+
+    // 5. Anthropic: stop_reason max_tokens via message_delta → truncated
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ type: 'message_start', message: { usage: { input_tokens: 9, output_tokens: 0 } } }));
+      res.write(chunk({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }));
+      res.write(chunk({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'cut of' } }));
+      res.write(chunk({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 5 } }));
+      res.write(chunk({ type: 'message_stop' }));
+      res.end();
+    };
+    const anTrunc = await anLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} });
+    assert(anTrunc.truncated === true && anTrunc.finishReason === 'max_tokens' && anTrunc.text === 'cut of', 'stream: anthropic stop_reason max_tokens surfaces as truncated');
+
+    // 6. Anthropic in-stream error event → throws
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ type: 'message_start', message: { usage: { input_tokens: 3 } } }));
+      res.write(chunk({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }));
+      res.end();
+    };
+    let anErr = null;
+    try { await anLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} }); } catch (e) { anErr = e; }
+    assert(anErr && /Overloaded/.test(anErr.message), 'stream: anthropic error event throws instead of returning partial text');
+
+    // 7. chat-loop propagates truncation: flag on the result + a process event
+    const truncEvents = [];
+    const loopRes = await runChatLoop({
+      chat: async () => ({ text: 'short answer', toolCalls: [], truncated: true, finishReason: 'length' }),
+      callTool: async () => ({ text: 'x' }),
+      model: 'm', messages: [{ role: 'user', content: 'q' }],
+      onEvent: (e) => { if (e.kind === 'truncated') truncEvents.push(e); }
+    });
+    assert(loopRes.truncated === true && truncEvents.length === 1, 'chat-loop: truncation reaches the caller and the glass box');
+
+    sse.close();
+  }
+
   // MCP: repo (encrypted env, no-secret listing) + live stdio connect to fake server
   const srv = repo.mcp.add({ name: 'Fake', transport: 'stdio', command: 'node', args: [path.join(__dirname, 'fake-mcp-server.js')], secret: { env: { TOKEN: 'xyz' } } });
   const mlist = repo.mcp.list();

@@ -4,6 +4,8 @@
 // Gemini's OpenAI-compat endpoint). All speak /chat/completions and /models with
 // a Bearer key. Runs in the MAIN process only — the key never reaches the renderer.
 
+const { withRetry, httpError } = require('./retry');
+
 function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
 
 // Chain an external abort signal (the user's STOP) onto a request's internal
@@ -33,11 +35,13 @@ async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }
     try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
     if (!res.ok) {
       const detail = json?.error?.message || json?.message || (text ? text.slice(0, 400) : '');
-      throw new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`);
+      throw httpError(res.status, detail, res.headers.get('retry-after'));
     }
     return json;
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s`);
+    // Distinguish the user's STOP from a genuine timeout — same AbortError,
+    // very different meaning.
+    if (err.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : `Request timed out after ${timeoutMs / 1000}s`);
     throw err;
   } finally {
     clearTimeout(t);
@@ -111,7 +115,7 @@ function normalizeUsage(u) {
   };
 }
 
-async function streamChat(base, key, body, onDelta, signal) {
+async function streamChat(base, key, body, onDelta, signal, onRetry) {
   const ctrl = new AbortController();
   linkSignal(ctrl, signal);
   // Idle = time with NO stream data. Thinking models (Kimi K2.x, o-series
@@ -124,20 +128,34 @@ async function streamChat(base, key, body, onDelta, signal) {
   const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
   let res;
   try {
-    res = await fetch(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    });
-  } catch (e) { clearTimeout(idle); throw new Error(e.name === 'AbortError' ? 'stream stalled (no data)' : `stream connect failed: ${e.message}`); }
-  if (!res.ok) { clearTimeout(idle); const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 400)}`); }
+    // The connect phase is safely retryable — nothing has streamed yet. Once
+    // deltas flow, failures surface as errors instead (no duplicate output).
+    res = await withRetry(async () => {
+      let r;
+      try {
+        r = await fetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          body: JSON.stringify(body),
+          signal: ctrl.signal
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : 'stream stalled (no data)');
+        const err = new Error(`stream connect failed: ${e.message}`);
+        err.retryable = true; // transient network failure, nothing sent to the UI yet
+        throw err;
+      }
+      if (!r.ok) { const t = await r.text(); throw httpError(r.status, t.slice(0, 400), r.headers.get('retry-after')); }
+      return r;
+    }, { retries: 3, signal: ctrl.signal, onRetry });
+  } catch (e) { clearTimeout(idle); throw e; }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   let text = '';
   let usage = null;
+  let finishReason = null;
   const byIndex = new Map();
   try {
     for (;;) {
@@ -153,8 +171,14 @@ async function streamChat(base, key, body, onDelta, signal) {
         const data = line.slice(5).trim();
         if (data === '[DONE]') { buf = ''; break; }
         let j; try { j = JSON.parse(data); } catch { continue; }
+        // In-stream error frame (compat gateways emit these on mid-stream
+        // failure). Silently dropping it presented partial text as a complete
+        // answer — surface it as the failure it is.
+        if (j.error) throw new Error(`stream error: ${j.error.message || JSON.stringify(j.error).slice(0, 200)}`);
         if (j.usage) usage = j.usage; // final chunk (include_usage) carries token counts
-        const delta = j.choices?.[0]?.delta || {};
+        const choice = j.choices?.[0] || {};
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+        const delta = choice.delta || {};
         if (delta.content) { text += delta.content; onDelta({ text: delta.content }); }
         for (const tc of (delta.tool_calls || [])) {
           const idx = tc.index ?? 0;
@@ -173,7 +197,7 @@ async function streamChat(base, key, body, onDelta, signal) {
   const assistantRaw = { role: 'assistant', content: text || null };
   if (tcArr.length) assistantRaw.tool_calls = tcArr;
   const toolCalls = tcArr.map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-  return { text, toolCalls, assistantRaw, usage: normalizeUsage(usage) };
+  return { text, toolCalls, assistantRaw, usage: normalizeUsage(usage), finishReason, truncated: finishReason === 'length' };
 }
 
 /**
@@ -187,7 +211,7 @@ function openaiCompat({ baseUrl, key }) {
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).filter(isLikelyChatModel).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal, onRetry }) {
       const body = { model, messages: messages.map(toOpenAiMsg), stream: !!onDelta };
       if (onDelta) body.stream_options = { include_usage: true }; // ask for a final usage chunk
       if (maxTokens) body.max_tokens = maxTokens;
@@ -202,12 +226,13 @@ function openaiCompat({ baseUrl, key }) {
       }
       if (!onDelta) {
         // Non-streaming path (used for test pings + compression summaries).
-        const json = await req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000, signal });
-        const msg = json?.choices?.[0]?.message || {};
+        const json = await withRetry(() => req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000, signal }), { retries: 3, signal, onRetry });
+        const choice = json?.choices?.[0] || {};
+        const msg = choice.message || {};
         const toolCalls = (msg.tool_calls || []).map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage) };
+        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage), finishReason: choice.finish_reason || null, truncated: choice.finish_reason === 'length' };
       }
-      return streamChat(base, key, body, onDelta, signal);
+      return streamChat(base, key, body, onDelta, signal, onRetry);
     }
   };
 }

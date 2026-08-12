@@ -359,6 +359,88 @@ pdf has no external requests; the verify pass can read widget data
 without parsing markup.
 **Status: PLANNED** (design: the internal design record §5).
 
+## G. Rules → gates — the rulebook is enforced, not advisory
+
+`docs/AGENT_RULES.md` is the prompt-facing rulebook (distilled from Anthropic,
+OpenAI, and Moonshot first-party guidance). Its meta-rule is the contract for
+this ring: **a rule violated twice is promoted into a gate** — a framework-run
+check, a guard module, or a prompt-contract line. These objectives wire the
+rulebook's non-negotiables into deterministic gates so the rules stop being
+probabilistic compliance.
+
+**O26. The check command is a framework gate.** A per-project check command
+(tests / lint / build — from project settings, or discovered from the repo)
+is run by the FRAMEWORK, never by planner memory: (1) at turn start in coding
+mode, before the first mutation, to establish a baseline — pre-existing
+breakage is attributed, not inherited; (2) after every mutating step, with
+failures injected back into the step loop under the root-cause rule (fix it,
+never suppress it); (3) its final result feeds synthesis and anchors the O11
+review as its first deterministic lens. Success is silent; failure is verbose.
+*Source: OpenAI harness engineering ("promote the rule into code"); Anthropic
+best practices ("give Claude a check it can run"); Kimi K2 verifiable rewards
+over rubric judgment; AGENT_RULES §Verification.*
+Accept: a mutating turn with a configured check runs baseline + per-step
+checks; a failing check blocks step completion until fixed or escalated (O12
+bounds apply); check results land in process events and in the review pass.
+**Status: PLANNED** (was the `[PROPOSED]` per-project check command sliver).
+
+**O27. Findings are durable — the debt ledger.** Findings the ONE bounded
+O11 fix cycle leaves unfixed, and recurring evaluator findings, append to a
+tech-debt tracker doc in the O15 canonical set (DEBT) — finding, source turn,
+rule violated. A finding recorded twice becomes a promotion candidate: the
+app surfaces "promote to gate" — extend the O26 check command or register an
+O17 guard module. Nothing evaporates; scope discovered off-task is recorded,
+not chased.
+*Source: OpenAI tech-debt-tracker + "human taste captured once, enforced
+continuously"; AGENT_RULES meta-rule + §Scope.*
+Accept: an unfixed review finding appears in the tracker with its source
+turn; a repeat finding is flagged as a promotion candidate.
+**Status: PLANNED.**
+
+**O28. Test integrity — stated rule, then action guardrail.** CODING_RULES
+gains the line: a failing test is never removed or weakened to reach green —
+fix the root cause; editing the test is legitimate only when the test itself
+is wrong, and the step must say so. When O17 lands, an EG-1 action guardrail
+enforces it: a mutation to a test file while the current step is a
+verification/fix step gets verdict `flag` — routed to the approval prompt
+even under O4 bypass.
+*Source: Anthropic long-running harness ("it is unacceptable to remove or
+edit tests" — feature ledger is append-only); AGENT_RULES §Verification.*
+Accept: DERIVE_PROMPT and the CODING MODE note carry the rule now; with
+guards live, a test-file edit inside a fix step prompts despite bypass.
+**Status: PLANNED** (rule text is a sliver; the guardrail rides O17).
+
+**O29. The repo speaks first — map + rulebook injection.** Pass 2 receives
+a depth-2 repo map so plans name real files, not imagined ones; and a
+working-dir rulebook (`AGENT_RULES.md` | `AGENTS.md` | `CLAUDE.md`, first
+found) is auto-injected beside the cheat sheet under a rulebook banner.
+Injection is a ledger event — visible in the assembled-prompt viewer like
+everything else. No rulebook, silent pass: the chain's existence is the
+contract (same posture as O17 passthrough).
+*Source: OpenAI AGENTS.md-as-table-of-contents / progressive disclosure —
+"anything the agent can't access effectively doesn't exist";
+AGENT_RULES §Intent.*
+Accept: a plan against a real repo names only existing paths or
+explicitly-new ones; the rulebook shows in the assembled prompt;
+its token cost appears in the ledger.
+**Status: PLANNED** (was two `[PROPOSED]` slivers in PIPELINE_PSEUDOCODE).
+
+**O30. Drift pass — backward-looking garbage collection.** Per-turn review
+(O11) sees one turn; drift is a cross-turn phenomenon and currently
+invisible. A maintenance turn — user-invoked first, schedulable later —
+scans the working tree against SPEC/DESIGN and the rulebook's golden
+principles, plus doc-gardening over the O15 set (docs contradicting the code
+they describe). Findings land in the O27 ledger; small fixes run as ONE
+bounded fix plan with ordinary step-commits and O4 gates — debt is paid
+continuously in small increments, never in heroic bursts.
+*Source: OpenAI entropy/GC — recurring golden-principles scans +
+doc-gardening agents, after Friday cleanup failed to scale;
+AGENT_RULES §Scope.*
+Accept: a drift turn on a seeded repo yields tracker entries and a bounded
+fix commit; it never mutates outside the O4 permission gates; clean is a
+first-class outcome.
+**Status: PLANNED.**
+
 ---
 
 ## Traceability
@@ -384,6 +466,11 @@ without parsing markup.
 | O23 | placement taxonomy + management | planned — `documents.js` placementPath property tokens; `repo.documents` verbs |
 | O24 | format/type split + deterministic render | shipped: html→pdf (`render-pdf.js` + `documents:toPdf`) + format targets v1 (ipc.js documents block + `plan-derive.js` FORMAT TARGET rule); planned: format rows, md target, schema migration |
 | O25 | widget library | planned — new `widgets.js` deterministic renderer (SVG + md degradations) |
+| O26 | framework check gate | planned — check command in project settings; baseline + per-step runs in `execute.js`/`chat-loop.js`; anchor feed to `review.js` |
+| O27 | debt ledger + promotion | planned — DEBT doc in `project-docs.js`; unfixed findings from `review.js` + `evaluator.js`; promote-to-gate surfacing |
+| O28 | test-integrity rule + guardrail | planned — rule line in `plan-derive.js` CODING_RULES + ipc.js CODING MODE note; EG-1 module rides O17 `guards.js` |
+| O29 | repo map + rulebook injection | planned — depth-2 map + rulebook read in `ipc.js` stage F/I; ledger event |
+| O30 | drift pass | planned — maintenance turn over SPEC/DESIGN + rulebook; findings → O27; fixes via ordinary plan machinery |
 
 ---
 

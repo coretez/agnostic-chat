@@ -34,6 +34,10 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
 
   let limit = maxIters;
   let i = 0;
+  let truncated = false; // any model call this turn cut off by the output-token limit
+  const noteTruncation = (r) => {
+    if (r && r.truncated) { truncated = true; emit({ type: 'process', kind: 'truncated', reason: r.finishReason || 'max_tokens' }); }
+  };
   for (;;) {
     // Hit the current tool-call budget. If a handler is wired (the interactive
     // chat), ask whether to keep going with a fresh budget; otherwise fall
@@ -59,11 +63,12 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
       throw e;
     }
     addUsage(res.usage);
+    noteTruncation(res);
     const calls = res.toolCalls || [];
 
     if (calls.length === 0) {
       emit({ type: 'done' });
-      return { reply: res.text || '', toolTrace, iterations: i, usage };
+      return { reply: res.text || '', toolTrace, iterations: i, usage, truncated };
     }
 
     history.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
@@ -101,11 +106,17 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
       onDelta: (d) => emit({ type: 'token', text: d.text })
     });
     addUsage(wrap.usage);
-  } catch (e) { wrap = { text: '' }; }
+    noteTruncation(wrap);
+  } catch (e) {
+    // Deliberate degradation (a capped turn must still land), but never a
+    // silent one — the glass box shows why the wrap-up came back empty.
+    emit({ type: 'process', kind: 'wrapup-failed', error: (e && e.message) || 'model call failed' });
+    wrap = { text: '' };
+  }
   emit({ type: 'done' });
   return {
     reply: wrap.text || '(stopped after reaching the tool-call limit before a final answer could be produced)',
-    toolTrace, iterations: i, usage, cappedTurn: true
+    toolTrace, iterations: i, usage, cappedTurn: true, truncated
   };
 }
 

@@ -1910,6 +1910,7 @@ async function submit() {
     } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
     else if (ev.type === 'process' && ev.kind === 'planning') { if (!streamed) status.textContent = 'deriving plan…'; }
     else if (ev.type === 'process' && ev.kind === 'planning-done') { if (!streamed) status.textContent = ev.steps ? `plan: ${ev.steps} steps` : 'thinking…'; }
+    else if (ev.type === 'process' && ev.kind === 'retry') { status.textContent = `provider busy (${ev.status || 'error'}) — retry ${ev.attempt}…`; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
     else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
@@ -1944,6 +1945,8 @@ async function submit() {
     // streamed may hold per-step working text if stream-reset was missed.
     let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
     if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
+    // Honesty marker: a max_tokens cut must never present as a complete answer.
+    if (res.truncated) finalText += '\n\n⚠ *Response hit the output-token limit — it may be cut off. Ask to continue for the rest.*';
     renderAssistantBody(body, finalText);
     thinking._copyText = finalText;
     if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);

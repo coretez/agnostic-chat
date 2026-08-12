@@ -689,7 +689,13 @@ function registerIpc() {
       const abortListener = () => { aborted = true; try { turnAbort.abort(); } catch {} emitProgress({ type: 'process', kind: 'abort' }); };
       ipcMain.once('chat:abort', abortListener);
       const isAborted = () => aborted;
-      const chatAbortable = (a) => connector.chat({ ...a, signal: turnAbort.signal });
+      const chatAbortable = (a) => connector.chat({
+        ...a,
+        signal: turnAbort.signal,
+        // Connector-level retry (429/overload/transient 5xx) surfaces in the
+        // glass box instead of looking like a silent stall.
+        onRetry: (r) => emitProgress({ type: 'process', kind: 'retry', attempt: r.attempt, status: r.status, delayMs: r.delayMs })
+      });
 
       // One-shot user prompts (limit / stuck / action-approve): emit an event,
       // await the reply on chat:continue. Waiters are a FIFO queue — parallel
@@ -1387,7 +1393,7 @@ function registerIpc() {
             u.cachedTokens += syn.usage.cachedTokens || 0; u.cacheCreationTokens += syn.usage.cacheCreationTokens || 0;
           }
           emitProgress({ type: 'done' });
-          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted };
+          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted, truncated: !!(exec.truncated || syn.truncated) };
           planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
 
           // O15: documentation is maintained AUTOMATICALLY after execution —
@@ -1490,7 +1496,7 @@ function registerIpc() {
         _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
-      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted };
+      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted, truncated: !!result.truncated };
     }
 
     // The renderer should never let a send reach here without a provider (see

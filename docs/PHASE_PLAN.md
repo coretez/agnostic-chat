@@ -97,6 +97,49 @@ Two new pipeline stages ("Input guard", "Output guard") slot into the existing
 pipeline; enforcement is per-project policy. Design lives here; build is a later
 phase once telemetry + caching land.
 
+## Workstream: rules → gates (O26–O30)
+
+`docs/AGENT_RULES.md` states the rules; this workstream makes the harness
+enforce them. Theme: **verification stops being probabilistic.** Today every
+quality mechanism is LLM judgment (O10 plan shape, O11 critic lenses); the lab
+evidence (OpenAI harness engineering, Anthropic best practices, Kimi K2
+verifiable rewards) says the floor must be deterministic and the rulebook must
+be promoted into code when violated.
+
+Build order (dependency-driven, each item lands observable per the glass box):
+
+1. **O28 rule text** *(sliver — do first)* — the test-integrity line into
+   CODING_RULES and the CODING MODE note. Prompt-only, zero risk; the
+   guardrail half waits for O17.
+2. **O29 map + rulebook injection** *(small)* — depth-2 repo map to Pass 2;
+   working-dir rulebook injected under a banner, costed in the ledger. Makes
+   AGENT_RULES actually reach the model.
+3. **O26 framework check gate** *(the backbone)* — per-project check command:
+   baseline at turn start, run after every mutating step, failures fed back
+   under the root-cause rule, final result into synthesis and review. This is
+   the phase's deterministic anchor and feeds KPI 8 (correctness guardrail).
+4. **O27 debt ledger** — DEBT doc joins the O15 canonical set; unfixed O11
+   findings and repeat evaluator findings append; repeat findings surface
+   "promote to gate" (→ O26 check or O17 guard). Closes the loop the
+   AGENT_RULES meta-rule requires.
+5. **O30 drift pass** — user-invoked maintenance turn: golden-principles scan
+   + doc-gardening; findings → O27; fixes as one bounded plan. Schedulable
+   later; depends on 3 + 4.
+
+Interleaving with the measurement phase: item 3 emits check results as
+process events and task_metrics rows, so it lands *after* the telemetry layer
+(build item 1 above) and rides the same rails. Items 1–2 are independent and
+can ship any time. O17 remains the prerequisite for the enforcement half of
+O28 and the guard-promotion half of O27 — this workstream does not block on
+it, but those two halves do.
+
+Done when: a coding turn on a project with a check command cannot complete a
+mutating step against a failing check without escalation; the rulebook is
+visible in the assembled prompt viewer; an unfixed review finding is readable
+in the DEBT doc; and a repeat finding shows a promotion suggestion.
+
+---
+
 ## Definition of done for the phase
 
 - The app shows, per project, a trend of objectives 1–8 with real (not estimated)
