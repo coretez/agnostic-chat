@@ -62,8 +62,17 @@ async function maybeCompress({ messages, contextWindow, summarize, ratio = COMPR
   const rest = messages.filter((m) => m.role !== 'system');
   if (rest.length <= keepRecent) return { messages, compressed: false, tokensBefore };
 
-  const older = rest.slice(0, rest.length - keepRecent);
-  const recent = rest.slice(rest.length - keepRecent);
+  // The kept window must start on a USER message. A cut that lands on a tool
+  // message orphans it from its summarized-away assistant tool_use parent
+  // (invalid history — providers 400 on it, exactly when context is largest),
+  // and Anthropic requires the first turn to be user-role anyway. keepRecent
+  // is therefore a minimum, not an exact count.
+  let cut = rest.length - keepRecent;
+  while (cut > 0 && rest[cut].role !== 'user') cut--;
+  if (cut <= 0) return { messages, compressed: false, tokensBefore };
+
+  const older = rest.slice(0, cut);
+  const recent = rest.slice(cut);
   const summary = await summarize(older);
   const summaryMsg = { role: 'system', content: `Summary of earlier conversation (older turns were compressed to save context):\n${summary}` };
   const protectMsg = protect ? [{ role: 'system', content: protect }] : [];

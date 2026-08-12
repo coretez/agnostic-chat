@@ -16,10 +16,10 @@ const { filterToolResult } = require('./filter');
  * @param {number}  [o.maxIters=10]
  * @returns {Promise<{reply:string, toolTrace:Array, iterations:number}>}
  */
-async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit, isAborted }) {
+async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit, isAborted, compact }) {
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
-  const history = [...messages];
+  let history = [...messages];
   const toolTrace = [];
   // Aggregate real provider token usage across every model call this turn.
   const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
@@ -51,6 +51,10 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
     // User hit STOP: end the loop without another model call. Work done so
     // far (tool trace, streamed text) is preserved; the caller persists it.
     if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
+    // In-loop ledger: tool results accrete INSIDE the loop (up to 24k chars
+    // each), so the context defense has to run here too, not only between
+    // turns. The hook is threshold-gated (maybeCompress) — cheap when under.
+    if (typeof compact === 'function') { try { history = await compact(history); } catch {} }
     i++;
     emit({ type: 'model', model });
     let res;

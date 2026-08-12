@@ -53,7 +53,7 @@ function addUsage(usage, u) {
  * @returns {Promise<{result:object, partial:string, history:Array, stuck:boolean,
  *                     reason?:string, usage:object, toolTrace:Array}>}
  */
-async function executeStep({ chat, callTool, model, step, tools = [], history = [], store, budget = DEFAULT_STEP_BUDGET, onEvent, isAborted }) {
+async function executeStep({ chat, callTool, model, step, tools = [], history = [], store, budget = DEFAULT_STEP_BUDGET, onEvent, isAborted, compact }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   const usage = makeUsage();
@@ -64,7 +64,7 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
   };
   // The model always gets set_variable on top of the step's real tools.
   const stepTools = [SET_VARIABLE_TOOL, ...tools];
-  const h = [...history, { role: 'user', content: renderStepDirective(step, store) }];
+  let h = [...history, { role: 'user', content: renderStepDirective(step, store) }];
 
   emit({ type: 'process', kind: 'step-start', step: step.id, task: step.task });
 
@@ -72,6 +72,9 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
     // User STOP: no wrap-up model call (unlike a stuck step) — return what
     // this step has so far and let the orchestrator save the work.
     if (stopped()) return { result: { step: step.id, task: step.task, conclusion: '', incomplete: true, usage }, partial: '', history: h, stuck: false, aborted: true, usage, toolTrace };
+    // In-loop ledger: a step's own tool results can overflow the window before
+    // the between-steps compact ever runs (threshold-gated, cheap when under).
+    if (typeof compact === 'function') { try { h = await compact(h); } catch {} }
     emit({ type: 'model', model });
     let res;
     try {
@@ -260,7 +263,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
       idx += 1; continue;
     }
 
-    const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit, isAborted });
+    const r = await executeStep({ chat, callTool, model, step, tools, history: h, store, budget: stepBudget, onEvent: emit, isAborted, compact });
     h = r.history;
     truncated = truncated || !!r.truncated;
     mergeUsage(r.usage);

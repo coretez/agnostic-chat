@@ -19,7 +19,11 @@ const DEFAULT_AGENT = {
     'You are a focused sub-agent working on ONE delegated task inside your own '
     + 'isolated context. Use the available tools as needed, then return ONLY a '
     + 'concise, self-contained conclusion — the findings or result the caller '
-    + 'needs — not your working notes or raw tool output. Be specific and brief.'
+    + 'needs — not your working notes or raw tool output. Be specific and brief. '
+    + 'If your findings include concrete identifiers, paths, or parameter values '
+    + 'the caller will need for follow-up work, end your conclusion with a fenced '
+    + '```json block of flat key/value pairs (e.g. {"case_id": "…"}). Omit the '
+    + 'block when there are none.'
 };
 
 /**
@@ -47,27 +51,30 @@ async function runSubagent({ connector, model, fastModel, agent, task, tools = [
     { role: 'user', content: task }
   ];
 
-  // The sub-agent manages its own context, independent of the parent.
-  let convo = messages;
-  try {
+  // The sub-agent manages its own context, independent of the parent: the
+  // in-loop compact hook runs the ledger each iteration as tool results
+  // accrete (compressing the two-message seed up front was a no-op — the bulk
+  // arrives DURING the loop).
+  const compact = async (h) => {
     const out = await maybeCompress({
-      messages,
+      messages: h,
       contextWindow: contextWindowFor(model),
       summarize: async (older) => {
         const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 500 });
         return r.text || '';
       }
     });
-    convo = out.messages;
-  } catch (e) { /* non-fatal: run uncompressed */ }
+    return out.messages;
+  };
 
   const result = await runChatLoop({
     chat: (x) => connector.chat(x),
     callTool,
     model,
-    messages: convo,
+    messages,
     tools,
     maxIters: 6,
+    compact,
     // Forward only the sub-agent's tool activity; its loop-level model/token/done
     // events would otherwise collide with the authoritative subagent-done below.
     onEvent: (ev) => {
@@ -103,8 +110,9 @@ async function mergeResults({ connector, model, instruction, results, onEvent })
   const prompt =
     `You are merging the results of several sub-agents that each worked in isolation. `
     + `Combine them into a single coherent result.\n\nHow to merge: ${instruction || 'synthesize into one clear answer, resolving overlaps.'}\n\n`
+    + `After the merged result, append a fenced \`\`\`json block of flat key/value pairs with every concrete identifier, path, or parameter value later steps will need (verbatim from the results). Omit the block if there are none.\n\n`
     + `SUB-AGENT RESULTS:\n\n${body}`;
-  const r = await connector.chat({ model, messages: [{ role: 'user', content: prompt }], maxTokens: 2000 });
+  const r = await connector.chat({ model, messages: [{ role: 'user', content: prompt }], maxTokens: 4000 });
   const merged = (r.text || '').trim();
   emit({ type: 'process', kind: 'merge-done', tokens: Math.ceil(merged.length / 4) });
   return merged;

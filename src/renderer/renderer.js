@@ -956,16 +956,16 @@ const CONTRIB = {
 function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 function fmtDur(ms) { if (ms == null) return ''; return ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : Math.round(ms) + 'ms'; }
 
-function captureInternals(ev) {
-  if (!state.currentChatId) return;
-  state.internals[state.currentChatId] = { ledger: ev, toolTurns: [], process: [] };
+function captureInternals(ev, chatId = state.currentChatId) {
+  if (!chatId) return;
+  state.internals[chatId] = { ledger: ev, toolTurns: [], process: [] };
   updateCtxMeter();
   if (state.page === 'internals') renderInternals();
 }
 // Sub-agent lifecycle events (delegate → runSubagent) build the thread tree.
-function captureProcess(ev) {
+function captureProcess(ev, chatId = state.currentChatId) {
   if (ev.kind === 'skill-select') return; // carried on the ledger; nothing to accumulate
-  const rec = state.internals[state.currentChatId];
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.process = rec.process || [];
   // Plan-and-execute lifecycle (execute.js/plan-derive.js) — tracked on rec.plan
@@ -1009,15 +1009,15 @@ function captureProcess(ev) {
   }
   if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
 }
-function captureInternalsTools(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureInternalsTools(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.toolTurns = ev.trace || [];        // authoritative reconcile at end of turn
   if (state.page === 'internals') renderInternals();
 }
 // Live: a tool just returned mid-loop — append it (filtered) and tick occupancy.
-function captureInternalsToolEnd(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureInternalsToolEnd(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.toolTurns = rec.toolTurns || [];
   const raw = Math.ceil((ev.resultChars || 0) / 4);
@@ -1032,8 +1032,8 @@ function captureInternalsToolEnd(ev) {
   if (state.page === 'internals') renderInternals();
 }
 
-function captureMetrics(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureMetrics(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.metrics = ev;
   if (state.page === 'internals' && state.internalsLens === 'context') renderInternals();
@@ -1778,6 +1778,15 @@ async function submit() {
   if ((!text && !state.attachments.length) || !state.currentChatId) return;
   const missing = missingPrereqs();
   if (missing.length) { showSetupNotice(missing); return; }
+  // Turn identity, captured NOW: everything this turn saves or attributes uses
+  // these — switching chats mid-turn must never land the reply, internals, or
+  // metrics in the wrong chat. turnId scopes progress events and the
+  // abort/continue control channels to exactly this turn.
+  const turnChatId = state.currentChatId;
+  const turnProjectId = state.currentProjectId;
+  const turnId = `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  state.turnByChat = state.turnByChat || {};
+  state.turnByChat[turnChatId] = turnId;
   const attached = state.attachments.slice();
   state.attachments = []; renderAttachChips();
   const userTurn = turn(text || '📎 (attached files)', 'user');
@@ -1789,14 +1798,14 @@ async function submit() {
   el.send.dataset.mode = 'stop';
   el.send.textContent = '⏹ STOP & SAVE';
   document.documentElement.classList.add('busy');
-  await window.api.messages.add({ chatId: state.currentChatId, role: 'user', content: text });
+  await window.api.messages.add({ chatId: turnChatId, role: 'user', content: text });
   // Keep attachments as project documents so they persist + appear in the rail.
-  if (attached.length && state.currentProjectId) {
+  if (attached.length && turnProjectId) {
     // Written to disk (not just indexed) so the coding tools can actually open
     // them, and so the paths can be handed to the planner with this turn.
     for (const a of attached) {
       try {
-        const r = await window.api.documents.saveUpload({ projectId: state.currentProjectId, name: a.name, content: a.content });
+        const r = await window.api.documents.saveUpload({ projectId: turnProjectId, name: a.name, content: a.content });
         if (r && r.path) a.path = r.path;
       } catch {}
     }
@@ -1822,7 +1831,7 @@ async function submit() {
     prompt.innerHTML = `<span class="limitprompt__msg">Reached ${iterations} tool steps without finishing — keep going?</span>`;
     const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'CONTINUE +10';
     const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
-    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
+    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
     cont.onclick = () => answer(10);
     stop.onclick = () => answer(0);
     prompt.appendChild(cont); prompt.appendChild(stop);
@@ -1841,7 +1850,7 @@ async function submit() {
       + (step ? ` — blocked at: ${escapeHtml(step)}` : '') + `. Keep trying?</span>`;
     const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'KEEP TRYING';
     const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
-    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
+    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
     cont.onclick = () => answer(1);
     stop.onclick = () => answer(0);
     prompt.appendChild(cont); prompt.appendChild(stop);
@@ -1862,7 +1871,7 @@ async function submit() {
       + `<code class="shellcmd">${escapeHtml(String(ev.summary || '').slice(0, 600))}</code>`;
     const allow = document.createElement('button'); allow.className = 'btn btn--brand btn--sm'; allow.textContent = 'ALLOW';
     const deny = document.createElement('button'); deny.className = 'btn btn--ghost btn--sm'; deny.textContent = 'DENY';
-    const answer = (more) => { window.api.continueChat(more); prompt.remove(); status.textContent = more ? 'continuing…' : 'action skipped…'; };
+    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'action skipped…'; };
     allow.onclick = () => answer(1);
     deny.onclick = () => answer(0);
     prompt.appendChild(allow); prompt.appendChild(deny);
@@ -1902,6 +1911,7 @@ async function submit() {
   }
 
   const unsub = window.api.onChatProgress((ev) => {
+    if (ev.turnId && ev.turnId !== turnId) return; // another turn's events
     if (ev.type === 'token') {
       streamed += ev.text;
       const stick = nearBottom();
@@ -1917,23 +1927,23 @@ async function submit() {
     else if (ev.type === 'action-approve') { showActionPrompt(ev); }
     else if (ev.type === 'align-form') { alignEv = ev; }
     else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
-    else if (ev.type === 'internals') { captureInternals(ev); }
-    else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
-    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
-    else if (ev.type === 'process') { captureProcess(ev); }
-    else if (ev.type === 'metrics') { captureMetrics(ev); }
+    else if (ev.type === 'internals') { captureInternals(ev, turnChatId); }
+    else if (ev.type === 'internals-tools') { captureInternalsTools(ev, turnChatId); }
+    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev, turnChatId); }
+    else if (ev.type === 'process') { captureProcess(ev, turnChatId); }
+    else if (ev.type === 'metrics') { captureMetrics(ev, turnChatId); }
     else if (ev.type === 'document-saved') { onDocumentSaved(ev); }
     planEvent(ev);
   });
 
   try {
-    const history = (await window.api.messages.list(state.currentChatId)).map((m) => ({ role: m.role, content: m.content }));
+    const history = (await window.api.messages.list(turnChatId)).map((m) => ({ role: m.role, content: m.content }));
     if (attached.length && history.length) {
       const block = attached.map((a) => `\n\n[Attached file: ${a.name}${a.path ? ` — saved at ${a.path}` : ''}]\n\`\`\`\n${a.content}\n\`\`\``).join('');
       const last = history[history.length - 1];
       history[history.length - 1] = { ...last, content: (last.content || '') + block };
     }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId, chatId: state.currentChatId, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
+    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: turnProjectId, chatId: turnChatId, turnId, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
     if (res.compressed) {
       const note = document.createElement('div');
       note.className = 'turn turn--meta';
@@ -1953,7 +1963,7 @@ async function submit() {
     if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
     if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
     el.messages.scrollTop = el.messages.scrollHeight;
-    await window.api.messages.add({ chatId: state.currentChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
+    await window.api.messages.add({ chatId: turnChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
   } catch (err) {
     thinking.className = 'turn turn--meta';
     thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(err?.message ?? 'request failed')}</div>`;
@@ -2856,7 +2866,7 @@ el.railAddDoc.onclick = () => { const t = el.input.value.trim() || 'Untitled'; c
 
 el.send.onclick = () => {
   if (el.send.dataset.mode === 'stop') {
-    window.api.abortChat();
+    window.api.abortChat(state.turnByChat && state.turnByChat[state.currentChatId]);
     el.send.disabled = true;            // one stop is enough; finally() re-arms it
     el.send.textContent = 'STOPPING…';
     return;

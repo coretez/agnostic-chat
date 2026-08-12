@@ -675,7 +675,13 @@ function registerIpc() {
       const connector = getConnector(provider, key);
       const chosenModel = model || provider.default_model;
       const fastModel = provider.fast_model || chosenModel;
-      const emitProgress = (ev) => { try { _e.sender.send('chat:progress', ev); } catch {} };
+      // Turn identity: every progress event carries this id, and the control
+      // channels (chat:abort / chat:continue) only act when the id matches —
+      // with two turns in flight, an approval or STOP meant for one can never
+      // resolve against the other. The renderer mints the id so it can filter
+      // events into the right submit closure from the very first event.
+      const turnId = (payload && payload.turnId) ? String(payload.turnId) : `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+      const emitProgress = (ev) => { try { _e.sender.send('chat:progress', { turnId, ...ev }); } catch {} };
       const turnStart = Date.now();
       const chatId = payload?.chatId || null;
       const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
@@ -686,8 +692,11 @@ function registerIpc() {
       // step results, tool trace, and metrics are all still persisted.
       let aborted = false;
       const turnAbort = new AbortController();
-      const abortListener = () => { aborted = true; try { turnAbort.abort(); } catch {} emitProgress({ type: 'process', kind: 'abort' }); };
-      ipcMain.once('chat:abort', abortListener);
+      const abortListener = (_ev, p) => {
+        if (p && p.turnId && p.turnId !== turnId) return; // someone else's turn
+        aborted = true; try { turnAbort.abort(); } catch {} emitProgress({ type: 'process', kind: 'abort' });
+      };
+      ipcMain.on('chat:abort', abortListener);
       const isAborted = () => aborted;
       const chatAbortable = (a) => connector.chat({
         ...a,
@@ -703,7 +712,10 @@ function registerIpc() {
       // would resolve the wrong waiter (the loser hanging to its timeout).
       // No reply in 180s, or a STOP, resolves 0.
       const promptWaiters = [];
-      const promptListener = (_ev, payload) => { const w = promptWaiters.shift(); if (w) w(Number(payload && payload.more) || 0); };
+      const promptListener = (_ev, payload) => {
+        if (payload && payload.turnId && payload.turnId !== turnId) return; // another turn's reply
+        const w = promptWaiters.shift(); if (w) w(Number(payload && payload.more) || 0);
+      };
       ipcMain.on('chat:continue', promptListener);
       const askUser = (event) => new Promise((resolve) => {
         let done = false;
@@ -1107,7 +1119,7 @@ function registerIpc() {
       // what is occupying the window this turn (occupancy, compaction, prompt).
       try {
         const tokensBefore = estimateTokens(base);
-        _e.sender.send('chat:progress', buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }));
+        _e.sender.send('chat:progress', { turnId, ...buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }) });
       } catch (e) { console.error('[internals ledger]', e && e.message); }
 
       // Interactive continuation: when the loop hits its tool-call budget, ask
@@ -1415,7 +1427,22 @@ function registerIpc() {
             tools: orchestratorTools,
             onEvent: emitProgress,
             onLimit,
-            isAborted
+            isAborted,
+            // In-loop ledger for the flat path — tool results accrete inside
+            // the loop; the pre-turn compress alone can't defend the window.
+            compact: async (h) => {
+              const out = await maybeCompress({
+                messages: h,
+                contextWindow: contextWindowFor(chosenModel),
+                protect: store.render() || undefined,
+                summarize: async (older) => {
+                  const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
+                  return r.text || '';
+                }
+              });
+              if (out.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: out.tokensBefore });
+              return out.messages;
+            }
           });
           if (result.aborted && !result.reply) result.reply = '⏹ Stopped at your request — the work above was kept.';
 
@@ -1450,7 +1477,7 @@ function registerIpc() {
           const filtered = Math.ceil((t.filteredChars != null ? t.filteredChars : t.resultChars || 0) / 4);
           return { name: t.name, rawTokens: raw, resultTokens: filtered, saved: Math.max(0, raw - filtered), rules: t.rules || [], truncated: !!t.truncated, isError: t.ok === false };
         });
-        if (trace.length) _e.sender.send('chat:progress', { type: 'internals-tools', trace });
+        if (trace.length) _e.sender.send('chat:progress', { turnId, type: 'internals-tools', trace });
       } catch (e) { console.error('[internals tools]', e && e.message); }
 
       // Telemetry (objective 0): record real usage + reductions for this turn.
@@ -1493,7 +1520,7 @@ function registerIpc() {
         try { repo.metrics.recordTasks(taskLog.map((t) => ({ ...t, projectId: projectId || null, chatId: payload?.chatId || null }))); } catch (e) { console.error('[task metrics]', e && e.message); }
         const cachePct = metricRow.inputTokens ? Math.round((metricRow.cachedTokens / metricRow.inputTokens) * 100) : 0;
         console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length, planningFailed: metricRow.planningFailed, toolFellBack: metricRow.toolFellBack }));
-        _e.sender.send('chat:progress', { type: 'metrics', ...metricRow, tasks: taskLog });
+        _e.sender.send('chat:progress', { turnId, type: 'metrics', ...metricRow, tasks: taskLog });
       } catch (e) { console.error('[metrics]', e && e.message); }
 
       return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted, truncated: !!result.truncated };

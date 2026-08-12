@@ -9,6 +9,13 @@ documented lab finding. If a rule stops earning its place, delete it. If a rule 
 violated twice despite being written here, promote it into a lint, hook, or test —
 documentation that has to be obeyed is code, not prose.
 
+In this harness the promotion path is concrete (HARNESS_OBJECTIVES §G): repeat
+violations land in the debt ledger (O27) and are promoted into the framework
+check command (O26) or a guard module (O17). Enforced today: verification
+gates (O10/O26), the review pass (O11), scope jail and approvals (O1/O4),
+align-before-build (O7), docs-as-truth (O15). This file governs whatever the
+gates don't yet.
+
 ---
 
 ## Verification — the loop closes on a check, not on your judgment
@@ -59,6 +66,16 @@ documentation that has to be obeyed is code, not prose.
   way to do each thing.
 - NEVER hand-roll a helper that a shared utility already provides. Extend the
   shared utility if it falls short; invariants live in one place.
+- ALWAYS keep functions small: **15 lines is the ceiling.** A function that
+  needs more is hiding duplication or doing two jobs — decompose it. Small
+  functions are the unit of DRY, of debugging, and of review. Count
+  statements, not physical lines: one long value — a template literal, a
+  multi-line string, a data table — is ONE line no matter how it wraps.
+- NEVER justify a long function by call overhead or stack depth. Compilers
+  and JITs inline; that is their job, not yours. Optimize for the reader and
+  the debugger, and let the compiler optimize for the machine.
+  (Deterministically checkable — enforce via the O26 check command / lint,
+  not by prose, as soon as the gate exists.)
 - Prefer boring, composable, well-understood technology. If a library is opaque
   to reason about from inside the repo, reimplementing the needed subset may be
   the better choice — decide in the plan, not mid-edit.

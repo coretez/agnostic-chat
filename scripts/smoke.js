@@ -473,6 +473,43 @@ app.whenReady().then(async () => {
   const small = await maybeCompress({ messages: [{ role: 'user', content: 'hi' }], contextWindow: 100000, summarize: async () => 'S' });
   assert(small.compressed === false, 'compression is skipped when under budget');
 
+  // Tool-pair-aware cut: a keepRecent boundary landing mid tool-exchange must
+  // walk back to a user message — an orphaned role:'tool' at the window start
+  // (its assistant tool_use parent summarized away) 400s on every provider.
+  {
+    const paired = [];
+    for (let i = 0; i < 6; i++) {
+      paired.push({ role: 'user', content: 'q'.repeat(3000) + i });
+      paired.push({ role: 'assistant', content: '', toolCalls: [{ id: 'tc' + i, name: 'lookup', args: {} }] });
+      paired.push({ role: 'tool', toolCallId: 'tc' + i, content: 'r'.repeat(3000) });
+      paired.push({ role: 'assistant', content: 'a'.repeat(3000) });
+    }
+    // keepRecent=3 would start the window on the tool/assistant tail of an exchange
+    const cutTest = await maybeCompress({ messages: paired, contextWindow: 1000, summarize: async () => 'SUM', keepRecent: 3 });
+    assert(cutTest.compressed === true, 'pair-aware compression still fires');
+    const firstKept = cutTest.messages.find((m) => m.role !== 'system');
+    assert(firstKept && firstKept.role === 'user', 'compression window starts on a user message (no orphaned tool result)');
+  }
+
+  // In-loop compact hook: runChatLoop applies it each iteration, so tool bulk
+  // accreting INSIDE a turn is defended, not just between turns.
+  {
+    let compactCalls = 0;
+    let step = 0;
+    const loopOut = await runChatLoop({
+      chat: async ({ messages }) => {
+        step++;
+        if (step === 1) return { text: '', toolCalls: [{ id: 't1', name: 'big', args: {} }] };
+        assert(messages.some((m) => m.content === 'COMPACTED'), 'in-loop compact output replaces the live history');
+        return { text: 'done', toolCalls: [] };
+      },
+      callTool: async () => ({ text: 'bulk' }),
+      model: 'm', messages: [{ role: 'user', content: 'go' }],
+      compact: async (h) => { compactCalls++; return step >= 1 ? [{ role: 'user', content: 'COMPACTED' }] : h; }
+    });
+    assert(loopOut.reply === 'done' && compactCalls >= 2, 'runChatLoop invokes the compact hook every iteration');
+  }
+
   // Chat management (rename + soft-delete)
   const cmProj = repo.projects.create({ name: 'ChatMgmt' });
   const cmChat = repo.chats.create({ projectId: cmProj.id, title: 'A' });
@@ -505,6 +542,13 @@ app.whenReady().then(async () => {
     // auto-capture id-like fields from a JSON tool RESULT; skip noise
     vs.captureFromResult('list_cases', JSON.stringify({ cases: [{ case_id: 'C-10432', account_id: 'A-88', label: 'noise' }] }), { step: 2 });
     assert(vs.get('account_id') === 'A-88' && !vs.has('label'), 'captureFromResult harvests id-like fields, skips noise');
+
+    // O16 harvest contract: PROSE results (merge digests, sub-agent
+    // conclusions) carry values in a trailing fenced json block.
+    vs.captureFromResult('group-fanout',
+      'The two periods show a 40% increase in cases.\n\nDetails follow.\n\n```json\n{"fingerprint_hash": "fp-9e77", "report_path": "/tmp/r.html"}\n```',
+      { step: 3 });
+    assert(vs.get('fingerprint_hash') === 'fp-9e77', 'captureFromResult harvests the fenced json block from prose conclusions (O16)');
 
     // render → the KNOWN VALUES block injected into the prompt
     const block = vs.render();

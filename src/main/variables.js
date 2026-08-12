@@ -24,7 +24,7 @@ const CONFIDENCE_RANK = { observed: 1, derived: 2, user: 3 };
 // set of common domain parameters. Everything else the model must record
 // deliberately via set_variable — this keeps auto-capture from hoarding noise
 // like `limit` or `query`.
-const ID_KEY = /(^id$|_id$|Id$|guid$|Guid$|_key$|Key$|_?token$|shortname$|slug$|^path$|_path$|_dir$|^url$|_url$|arn$)/;
+const ID_KEY = /(^id$|_id$|Id$|guid$|Guid$|_key$|Key$|_?token$|shortname$|slug$|^path$|_path$|_dir$|^url$|_url$|arn$|_hash$|Hash$)/;
 const COMMON_PARAM = /^(tenant|tenant_id|account|account_id|case|case_id|company|org|organization|region|host|hostname|domain|email|user|username|project|project_id|bucket|repo|branch|framework|period)$/i;
 
 function isCapturableKey(key) {
@@ -145,7 +145,18 @@ class VariableStore {
    */
   captureFromResult(toolName, text, meta = {}) {
     let data;
-    try { data = JSON.parse(String(text)); } catch { return []; }
+    const s = String(text);
+    try { data = JSON.parse(s); } catch {
+      // Prose results (merge digests, sub-agent conclusions) carry their
+      // harvestable values in a trailing fenced JSON block — the O16 contract.
+      // Without this fallback the group/sub-agent harvest never fired: merges
+      // are prose, so whole-text parse always failed. Last fence wins.
+      const fences = [...s.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)];
+      for (let i = fences.length - 1; i >= 0; i--) {
+        try { data = JSON.parse(fences[i][1]); break; } catch { /* try earlier fence */ }
+      }
+      if (data === undefined) return [];
+    }
     const found = [];
     const scan = (obj, depth) => {
       if (!obj || typeof obj !== 'object' || depth > 2 || found.length >= MAX_RESULT_CAPTURES) return;
