@@ -389,10 +389,37 @@ Structured widget data is what makes the verify pass mechanical: numbers
 in a chart are checkable against collected values.
 *Source: the MSSP report skills hand-author these today — proof of need;
 one shared renderer replaces N hand-rolled ones.*
+*Scope correction (2026-08-14): this is the RENDER SURFACE, not a document
+feature.* Rich content arrives from three directions and today only one of
+them renders at all. The model emits fenced blocks — a ```mermaid diagram
+displays as SOURCE because renderer.js captures the fence language and then
+renders every block as `<pre>`. MCP tool results carry `image`, `audio` and
+embedded `resource` blocks — `mcp/client.js` filters to `type === 'text'` and
+DISCARDS the rest silently, so a server returning a chart produces a result
+that looks thin to the model, with no error and nothing in the glass box.
+Documents want the same widgets. One renderer serves all three, or each grows
+its own and they drift.
+
+The split that decides sequencing is TRUST, not source:
+- **Model-authored data** (a mermaid fence, a `{widget, data}` block) is data
+  we render ourselves with a deterministic renderer — no markup from
+  elsewhere, no script. This is safe to ship NOW and does not wait on O17.
+  Mermaid in chat + html + pdf is the first slice and the smallest one.
+- **Server-supplied content** (MCP `image`/`resource`, `ui://` app resources)
+  is untrusted input from an external process. Preserving it is safe and
+  urgent — a dropped block must at minimum leave a visible marker naming what
+  was dropped, because silent loss is the same lie the guard chain exists to
+  prevent. RENDERING it is a trust-boundary change and waits for O17 EG-3;
+  rendering server HTML inside a CSP-locked, sandboxed renderer would hand an
+  external server the scripting surface Phase 4 closed.
+
 Accept: identical widget data renders in all three types; a chart in a
 pdf has no external requests; the verify pass can read widget data
-without parsing markup.
-**Status: PLANNED** (design: the internal design record §5).
+without parsing markup; a ```mermaid fence renders as a diagram rather than
+source; an MCP content block that cannot be rendered yet still leaves a
+marker instead of vanishing.
+**Status: PLANNED** (design: the internal design record §5). Sequencing:
+mermaid render → MCP drop-markers → widget library → `ui://` behind EG-3.
 
 ## G. Rules → gates — the rulebook is enforced, not advisory
 
