@@ -140,6 +140,78 @@ in the DEBT doc; and a repeat finding shows a promotion suggestion.
 
 ---
 
+## Workstream: O17 guard chain — goals to completion
+
+The last unbuilt ring, and the prerequisite for three things already
+half-shipped: O28's enforcement half (the EG-1 test-integrity guardrail),
+MCP `ui://` resources (which hand an external server a scripting surface and
+must not be touched first), and O18/O19, which are the same chain moved onto
+a wire.
+
+**The three rules that decide every design question below.** Guards add
+restriction, never permission — a guard can only narrow what was already
+allowed. Deterministic before classifier — a pattern match that is always
+right beats a model call that is usually right, and a classifier guard is
+bounded and fails to `flag`, never to `block`. And every guard reports its
+DENOMINATOR: `inspected` as well as `blocked`, so a point that ran and
+allowed everything is distinguishable from a point that never ran. That last
+one is not bureaucracy — it is the exact failure that made the O8 filter
+unverifiable, and on a security boundary a guard that silently stopped
+running looks identical to a clean input stream.
+
+### A · The registry, with zero new behavior
+Build `guards.js`: the point vocabulary (IN-1 user prompt, IN-2 tool results,
+IN-3 sub-agent conclusions, EG-1 tool calls, EG-2 provider hop, EG-3 replies
+and saved documents), the module contract
+`{name, point, inspect() → allow|block|rewrite|flag + reason}`, and the
+registry that runs a point's modules in order. Then MOVE three things that
+already exist into it unchanged: `filter.js` (IN-2), the O4 approval gate
+(EG-1, and it stays LAST — the human is the final action guardrail), and the
+env scrub (EG-1). Nothing new is inspected in this phase.
+**Done when:** the smoke suite passes unmodified — identical verdicts, identical
+approvals, identical filtering — and every point reports inspected/allowed/
+blocked counts, including zero. A point with no modules is a silent, zero-cost
+PASSTHROUGH, and that state is still countable.
+
+### B · The first two real modules
+IN-2 injection scanner over tool results and IN-3 sub-agent conclusions —
+deterministic patterns first (instruction-shaped text arriving from a fetched
+page, a document, an MCP payload), flagging rather than blocking, because a
+false block on a legitimate tool result is worse than a flag. EG-2 secret
+scrub at the provider hop: content entering the LLM is data leaving the
+machine.
+**Done when:** a seeded injection in a fetched page is flagged with its source
+named and the turn continues; a seeded credential never reaches the provider
+call; both verdicts appear in the PROCESS rail with their point and module.
+
+### C · EG-1 action guardrails — closes O28
+The test-integrity rule is prose today. As a guard: a mutation to a test file
+while the current step is a verification or fix step gets `flag`, which routes
+to the approval prompt EVEN UNDER BYPASS. Plus path policy and command lint.
+**Done when:** the O28 case prompts despite `coding_bypass=1`, and O28's status
+moves from PARTIAL to SHIPPED.
+
+### D · EG-3 output guardrails
+Replies and saved documents: malicious URLs, unsafe content, secrets that
+survived EG-2. This is also the gate that makes MCP `ui://` resources
+approachable — never before it.
+**Done when:** a document containing a seeded credential is caught before it
+reaches disk, and the MCP rich-content hole (`mcp/client.js` silently dropping
+image/audio/resource blocks) is closed behind it.
+
+**Sequencing.** A is a refactor and must land alone, because its whole claim is
+that nothing changed. B and C are independent of each other and either may go
+first — C is smaller and closes an objective. D last, since it gates the MCP
+work. O18 (proxy) and O19 (policy bundles) do not start until A–D are shipped:
+they move this chain onto a wire, and moving a chain that is not finished is
+how you ship two problems.
+
+**The bar for the whole ring:** every guard verdict is a process event, the
+registry can be exercised by smoke without a live model, and a
+`npm run eval` arm covers the classifier guards — because a classifier's
+behavior is a model question, and this session established that model questions
+need replicates, not a single confident sample.
+
 ## Definition of done for the phase
 
 - The app shows, per project, a trend of objectives 1–8 with real (not estimated)
