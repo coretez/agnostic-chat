@@ -586,6 +586,92 @@ save/turn wiring in ipc.js + library views in the renderer; smoke-covered.
 Extensions: user tag editing in the reader, entity rollups, auto-archive
 suggestions for stale sessions.
 
+**O32. The Registrar — the canonical docs are a managed list, not prose.**
+The canonical set is already made of LISTS (objectives with ids, findings with
+keys, decision records, the traceability table) but each one is hand-tended,
+and hand-tending fails: twice in one session a DEBT entry stayed open after
+its fix had shipped, and O8's own text carries an *"Open, in DEBT"* note that
+nothing verifies. An internal, deterministic list service owns five verbs over
+those lists — the model never has to remember to call it, like step-commits
+and the doc-writer.
+
+- **CREATE** — append an item with a stable key, structured fields, and a
+  state. Fields are DATA in fixed positions (`state · sev · lens · file ·
+  issue · fix · key`), the todo.txt lesson: sortable and filterable by
+  ordinary tools rather than greppable by luck. `appendDebt` is the v0 of this
+  verb and migrates onto it.
+- **MAINTAIN** — edit fields and move state. State is a WORKFLOW, not the
+  `- [ ]`/`- [x]` binary: at minimum open → fixed-unverified → closed, plus
+  the promote-to-gate state the ledger already expresses in prose because it
+  has nowhere else to put it.
+- **VALIDATE — the integrity pass, prose ↔ items, both directions.**
+  Deterministic and cheap; every check is a grep, not a model call:
+  *items → prose*: an item names a file that no longer exists; an item's
+  claimed fix (a named symbol) is absent from the tree; a closed item whose
+  symbol vanished — a regression.
+  *prose → items*: an objective marked PARTIAL or PLANNED with no open item
+  or plan reference; an *"Open, in DEBT"* note with no matching open item; an
+  objective missing from the traceability table, or a table row pointing at a
+  path that does not exist; an item marked open whose fix IS present in the
+  tree — the exact drift that bit twice.
+- **CLOSE** — ticking requires evidence, not intent: the named symbol present,
+  or the smoke assertion that pins it named on the item. An item cannot close
+  itself by being forgotten.
+- **LIST VIEW — the agenda, and the point of the whole objective.** Org mode
+  holds thousands of tasks because nobody reads the files; they read a query.
+  `project-docs.load()` today injects the WHOLE canonical set into every
+  planning call, so a document costs tokens on every turn regardless of
+  relevance and gets worse as it grows — precisely backwards. The planner gets
+  a VIEW ("open high-severity items touching the files this plan names"), the
+  user gets one in the DOCUMENTS tab, and a document that never satisfies a
+  query is thereby visibly dead — the use-signal the O15 entry asks for.
+*Checked against what list tools actually ship, so the gaps are chosen rather
+than forgotten.* Carried in from the five verbs above: stable ids, states,
+priority, structured fields, queries, archiving. **Also required, and absent
+from the first cut:**
+- **Item ↔ objective link.** This whole repo is built on O-ids that commits and
+  design elements cite — yet a finding names a `file` and no objective. An item
+  carries the id it belongs to (`O26`), so an objective can list its own open
+  items and the *"Open, in DEBT"* notes stop being unverifiable prose. This is
+  the prose↔item edge made structural, and it is what makes VALIDATE cheap.
+- **Auto-close from a commit.** Trackers close an item when a commit cites it.
+  Shamrock already writes step-commits (O9) — a commit naming an item key closes
+  it with the commit as the evidence CLOSE demands. This alone would have
+  prevented both observed drifts, because closing would not have depended on
+  anyone remembering.
+- **Dependencies / blocked-by.** Real and currently prose-only: O28's guardrail
+  half waits on O17, EG-3 gates the MCP rich-content work, O18/O19 wait on
+  O17 A–D. A view that cannot say "ready" versus "blocked" ranks unreachable
+  work alongside reachable work.
+- **Annotations, append-only.** Org logs state changes; Taskwarrior appends
+  notes. Editing an item in place loses WHY it moved — the two ledger
+  corrections this session rewrote lines and kept the reasoning only because a
+  human wrote it back in.
+- **Age and archive.** Every item already carries a date, so staleness is
+  computable. Untouched-for-N moves to archived rather than lingering; an
+  age-weighted rank (Taskwarrior's urgency idea) surfaces the graveyard on its
+  own instead of waiting for someone to notice.
+- **A WIP bound on the open list.** O11 caps a fix cycle at one and O26 caps
+  fix insertion at one; nothing caps the ledger, which reached 14 entries in a
+  day. Past the bound, adding requires closing or archiving — "stop saying
+  maybe later" enforced rather than intended.
+*Deliberately NOT taken (single-operator tool, and each would be ceremony):*
+assignees, estimation/sizing, milestones, recurrence, comment threads, item
+templates. Provenance is covered by `lens` (which pass found it); recurrence
+is the O30 cadence's job, not an item's.
+
+*Source: todo.txt (fixed-position fields, key:value, one line per item); GNU
+Org mode (workflow states, agenda, state-change logging, archiving); Taskwarrior
+(dependencies, annotations, age-weighted urgency); issue trackers (close-from-
+commit, cross-references); agile backlog refinement (lists rot without a
+cadence; archive the untouched; bound the WIP).*
+Accept: the integrity pass finds the two real drifts already observed (an open
+item whose fix shipped; an objective note with no matching item) with zero
+model calls; a plan receives a filtered view rather than four whole documents,
+and the tokens saved are visible in the ledger; closing an item without
+evidence is refused; the pass runs on the O30 cadence and its findings land in
+DEBT like any other. **Status: PLANNED.**
+
 ---
 
 ## Traceability
@@ -610,6 +696,7 @@ suggestions for stale sessions.
 | O22 | document lifecycle + review lenses | shipped: DOCUMENTS_RULES + documents-mode align (`plan-derive.js`); planned: lenses in `review.js` |
 | O23 | placement taxonomy + management | planned — `documents.js` placementPath property tokens; `repo.documents` verbs |
 | O24 | format/type split + deterministic render | shipped: html→pdf (`render-pdf.js` + `documents:toPdf`) + format targets v1 (ipc.js documents block + `plan-derive.js` FORMAT TARGET rule); planned: format rows, md target, schema migration |
+| O32 | the Registrar — list service over the canonical docs | planned — new `registrar.js`; migrates `project-docs.appendDebt`; VALIDATE runs on the O30 cadence; LIST VIEW replaces whole-set injection in `project-docs.load()` |
 | O25 | widget library | planned — new `widgets.js` deterministic renderer (SVG + md degradations) |
 | O26 | framework check gate | shipped: `runCheckCommand` (coding-tools.js) + `gateStep` (execute.js) + baseline/final wiring + Overview CHECK COMMAND card (ipc.js, renderer); smoke §O26 |
 | O27 | debt ledger + promotion | shipped: DEBT canonical doc + `appendDebt` repeat flagging (project-docs.js); review/check/drift findings wired in ipc.js; smoke §O27. Deferred: evaluator feed |
