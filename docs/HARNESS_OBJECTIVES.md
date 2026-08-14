@@ -172,8 +172,32 @@ from the actual changed file contents — the planner is explicitly told NOT
 to plan documentation steps (planned doc steps produced untouched skeletons
 and narrative sludge). Docs are real versioned files in the project output
 dir (in-repo when a working dir exists), indexed in the library.
+*The list insight (2026-08-14).* These documents are LISTS — SPEC is objectives
+with stable ids, DEBT is a checklist with keys, a plan is ordered steps. Plain-
+text list practice (todo.txt; Org mode; agile backlog refinement) has three
+lessons the canonical set has not taken:
+- **Entries are DATA, not prose.** todo.txt puts state, priority, dates,
+  `+project`, `@context` and `key:value` in a fixed order on one line so
+  standard tools can sort and filter it. DEBT buries lens/severity/file in a
+  sentence; it is greppable by luck, not by design.
+- **Scale comes from VIEWS, not from filing.** Org mode holds thousands of
+  tasks across hundreds of files and stays usable because nobody reads the
+  files — they read an agenda that queries across them. Shamrock does the
+  opposite: `load()` injects the WHOLE canonical set into every planning call,
+  so each document costs tokens on every turn whether or not it is relevant,
+  and gets less useful as it grows. The planner wants "open high-severity
+  findings touching the files this plan names", not four documents.
+- **Lists rot without a cadence.** A backlog left alone becomes a graveyard of
+  vague, outdated items; refinement is a recurring practice, and untouched
+  entries get archived. O30 grooms the CODE. Nothing grooms the ledger — twice
+  in one session an entry stayed open after its fix had shipped.
+Also missing: a workflow beyond the `- [ ]`/`- [x]` binary (the ledger already
+has a de-facto third state, PROMOTE TO GATE, encoded in prose), and any WIP
+bound — O11 caps a fix cycle at one, but nothing caps the ledger.
+
 *Source: docs-as-code; Architecture Decision Records (Nygard); Diátaxis;
-requirements traceability.*
+requirements traceability; todo.txt; GNU Org mode agenda; agile backlog
+refinement.*
 Accept: an align `record` bumps the SPEC doc with the decision appended;
 `planContext` carries the docs under a source-of-truth banner;
 DERIVE_PROMPT carries the documentation rule; both execution paths run the
