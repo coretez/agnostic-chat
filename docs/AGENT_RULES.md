@@ -33,6 +33,13 @@ gates don't yet.
   may change.
 - ALWAYS fix the root cause. Suppressing an error, loosening a type, or catching
   and ignoring an exception to silence a check is a violation, not a fix.
+- NEVER collapse two distinct causes into one signal, label, or code path.
+  Every lie this codebase has told came from exactly that: a refused write
+  reported as a write, a stalled provider handled as a failed plan, a file's
+  existence taken as proof it was written, a model's inference labelled as
+  the user's own words, a guard's silence read as the guard working. If two
+  different things can produce the same observation, that observation is not
+  evidence — split it before you rely on it.
 - When reviewing, flag ONLY gaps that affect correctness or the stated
   requirements. Do not manufacture findings; do not demand speculative
   abstraction, defensive code, or tests for impossible states.

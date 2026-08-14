@@ -72,7 +72,9 @@ contextBridge.exposeInMainWorld('api', {
     setCheatSheet: (id, text) => ipcRenderer.invoke('projects:setCheatSheet', { id, text }),
     pickOutputDir: (id) => ipcRenderer.invoke('projects:pickOutputDir', { id }),
     setOutputDir: (id, dir) => ipcRenderer.invoke('projects:setOutputDir', { id, dir }),
-    effectiveOutputDir: (id) => ipcRenderer.invoke('projects:effectiveOutputDir', { id })
+    effectiveOutputDir: (id) => ipcRenderer.invoke('projects:effectiveOutputDir', { id }),
+    // O30: user-invoked drift scan — findings land in the DEBT ledger.
+    drift: (input) => ipcRenderer.invoke('project:drift', input)
   },
 
   // Authored per-project sub-agent definitions.

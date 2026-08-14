@@ -422,6 +422,7 @@ function renderOverview() {
   }
   renderOverviewScope();
   loadBuildEnv(p.id);
+  loadCheckCommand(p.id);
   loadDocTargets(p.id);
   updateModelSwitch();
 }
@@ -507,6 +508,49 @@ async function saveBuildEnv() {
   else { msg.textContent = 'saved'; msg.className = 'test-result'; }
   try { await window.api.settings.set('build_env', ta.value, pid); } catch {}
   setTimeout(() => { msg.textContent = ''; }, 2500);
+}
+
+// O26 — the per-project check command (Overview): the framework runs it at
+// turn start and after every mutating step in coding mode.
+async function loadCheckCommand(projectId) {
+  const ta = document.getElementById('ov-check');
+  if (!ta || ta.dataset.projectId === String(projectId)) return;
+  try { ta.value = (await window.api.settings.get('check_command', projectId)) || ''; } catch { ta.value = ''; }
+  ta.dataset.projectId = String(projectId);
+  document.getElementById('ov-check-msg').textContent = '';
+}
+async function saveCheckCommand() {
+  const pid = state.currentProjectId; if (!pid) return;
+  const ta = document.getElementById('ov-check');
+  const msg = document.getElementById('ov-check-msg');
+  try {
+    // Main confirms a non-empty command in its own dialog (second wall) —
+    // a cancel there must leave the stored value alone AND the field honest.
+    const r = await window.api.settings.set('check_command', ta.value.trim(), pid);
+    if (r && r.cancelled) {
+      ta.value = (await window.api.settings.get('check_command', pid)) || '';
+      msg.textContent = 'cancelled'; msg.className = 'test-result test-result--error';
+    } else { msg.textContent = 'saved'; msg.className = 'test-result'; }
+  } catch { msg.textContent = 'failed'; msg.className = 'test-result test-result--error'; }
+  setTimeout(() => { msg.textContent = ''; }, 2500);
+}
+
+// O30 — the drift scan (Overview → MAINTENANCE): read-only; findings land in
+// the DEBT ledger. Uses the currently selected model connection.
+async function runDriftScan() {
+  const pid = state.currentProjectId; if (!pid) return;
+  const msg = document.getElementById('ov-drift-msg');
+  const model = state.selected?.model;
+  const prov = model ? resolveProvider(model) : {};
+  if (!prov.providerId) { msg.textContent = 'select a model first'; msg.className = 'test-result test-result--error'; return; }
+  msg.textContent = 'scanning…'; msg.className = 'test-result';
+  try {
+    const res = await window.api.projects.drift({ projectId: pid, providerId: prov.providerId, model });
+    msg.textContent = res.error ? res.error
+      : res.findings.length ? `${res.findings.length} finding${res.findings.length === 1 ? '' : 's'} → DEBT ledger (${res.scanned} files scanned${res.repeats ? `, ${res.repeats} repeat${res.repeats === 1 ? '' : 's'} — promote to gate` : ''})`
+        : `clean — ${res.scanned} files scanned`;
+    msg.className = res.error ? 'test-result test-result--error' : 'test-result';
+  } catch (e) { msg.textContent = e?.message || 'failed'; msg.className = 'test-result test-result--error'; }
 }
 
 async function saveCheatSheet() {
@@ -1885,6 +1929,10 @@ function renderAlignForm(body, ev) {
     el.input.value = parts.join('; ');
     autosize();
     form.remove();          // the markdown reply above stays as the durable record
+    // O8: this next turn IS the ratification — the user picked these answers
+    // in the align form. Only that earns `user` confidence in the store;
+    // everything else the planner infers is `derived` and stays correctable.
+    pendingAlignAnswer = true;
     submit();
   };
   const bar = document.createElement('div'); bar.className = 'alignform__bar'; bar.appendChild(go);
@@ -1892,6 +1940,10 @@ function renderAlignForm(body, ev) {
   body.appendChild(form);
   el.messages.scrollTop = el.messages.scrollHeight;
 }
+
+// Set by the align form's submit; consumed by the very next submit() and
+// cleared immediately, so it can never leak into an unrelated later turn.
+let pendingAlignAnswer = false;
 
 async function submit() {
   if (el.send.dataset.mode === 'stop') return; // a turn is running — the button is the stop control
@@ -1906,6 +1958,8 @@ async function submit() {
   const turnChatId = state.currentChatId;
   const turnProjectId = state.currentProjectId;
   const turnId = `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+  // Consume the align-ratification flag exactly once (O8).
+  const fromAlign = pendingAlignAnswer; pendingAlignAnswer = false;
   state.turnByChat = state.turnByChat || {};
   state.turnByChat[turnChatId] = turnId;
   const attached = state.attachments.slice();
@@ -2064,7 +2118,7 @@ async function submit() {
       const last = history[history.length - 1];
       history[history.length - 1] = { ...last, content: (last.content || '') + block };
     }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: turnProjectId, chatId: turnChatId, turnId, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
+    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: turnProjectId, chatId: turnChatId, turnId, fromAlign, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
     if (res.compressed) {
       const note = document.createElement('div');
       note.className = 'turn turn--meta';
@@ -2078,6 +2132,9 @@ async function submit() {
     if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
     // Honesty marker: a max_tokens cut must never present as a complete answer.
     if (res.truncated) finalText += '\n\n⚠ *Response hit the output-token limit — it may be cut off. Ask to continue for the rest.*';
+    // O26: a failing check must never be invisible behind a confident reply —
+    // same honesty-marker treatment as a truncated response.
+    if (res.checkFailing) finalText += `\n\n⚠ *The project check${res.checkCommand ? ` (\`${res.checkCommand}\`)` : ''} is still failing — the finding was recorded in the DEBT ledger.*`;
     renderAssistantBody(body, finalText);
     thinking._copyText = finalText;
     if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);
@@ -2961,6 +3018,8 @@ el.agentCancel.onclick = closeAgentEditor;
 el.railTabs.querySelectorAll('.rail__tab').forEach((b) => { b.onclick = () => showRail(b.dataset.rail); });
 el.ovCheatSave.onclick = saveCheatSheet;
 document.getElementById('ov-env-save').onclick = saveBuildEnv;
+document.getElementById('ov-check-save').onclick = saveCheckCommand;
+document.getElementById('ov-drift-run').onclick = runDriftScan;
 
 el.newProjectBtn.onclick = () => { el.newProjectForm.hidden = !el.newProjectForm.hidden; if (!el.newProjectForm.hidden) el.newProjectInput.focus(); };
 el.heroNewProject.onclick = openNewProjectForm;

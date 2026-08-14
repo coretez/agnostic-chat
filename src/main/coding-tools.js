@@ -164,6 +164,18 @@ const TOOLS = [
   }
 ];
 
+// What "this turn changed something" MEANS, defined once. Four call sites
+// (step-commits, the O26 check gate, the O11 review, the doc-writer) were
+// each carrying their own copy of this list; an invariant belongs in one
+// place, next to the tools it names.
+const MUTATING_TOOLS = ['write_file', 'edit_file', 'run_command'];  // can change the tree
+const WRITING_TOOLS = ['write_file', 'edit_file'];                  // change FILE CONTENT (readable after)
+
+/** Did this tool trace change the working tree? (failed calls changed nothing) */
+function didMutate(trace) {
+  return (trace || []).some((t) => t.ok !== false && MUTATING_TOOLS.includes(t.name));
+}
+
 /** Is this directory a git repository? (.git may be a dir, or a file in worktrees.)
  *  This is the level-3 gate: bypass is only honored when rollback is possible. */
 function hasGit(dir) {
@@ -387,6 +399,19 @@ function runCommandTool(root, command, timeoutMs, extraEnv) {
   });
 }
 
+// O26: the framework check gate. Runs the user-configured check command
+// (tests/lint/build) with the same cwd + env allowlist as run_command, but
+// WITHOUT the approval gate: the user authored this exact command in project
+// settings — that is standing consent for the framework to run it, the same
+// footing as step-commits. Returns a compact verdict; the output tail is what
+// feeds back into the loop (success is silent, failure is verbose).
+async function runCheckCommand(root, command, extraEnv = {}, timeoutMs = 120000) {
+  const r = await runCommandTool(root, String(command).trim(), timeoutMs, extraEnv);
+  const text = String(r.text || '');
+  const tail = text.length > 4000 ? '…' + text.slice(-4000) : text;
+  return { ok: !r.isError, output: tail };
+}
+
 /**
  * Build the coding tool pack for one turn.
  * @param {object}   o
@@ -524,4 +549,4 @@ function buildLibraryTools({ root }) {
   return { tools: LIBRARY_TOOLS, names, call };
 }
 
-module.exports = { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep, CODING_TOOLS: TOOLS, LIBRARY_TOOLS };
+module.exports = { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep, runCheckCommand, didMutate, MUTATING_TOOLS, WRITING_TOOLS, CODING_TOOLS: TOOLS, LIBRARY_TOOLS };

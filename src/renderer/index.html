@@ -263,6 +263,19 @@
               </div>
 
               <div class="ovcard">
+                <div class="ovcard__title">CHECK COMMAND</div>
+                <div class="ovcard__note">The project's tests/lint/build in one command (e.g. <code>npm test</code>). When set, the framework runs it at the start of every coding turn (baseline) and after every step that changes files — a failure triggers one bounded fix step and is recorded in the DEBT ledger if unresolved. Leave empty to skip the gate.</div>
+                <textarea class="ovcheat" id="ov-check" rows="1" placeholder="npm test"></textarea>
+                <div class="ovcheat__actions"><div class="spacer"></div><span class="test-result" id="ov-check-msg"></span><button class="btn btn--brand btn--sm" id="ov-check-save" type="button">SAVE</button></div>
+              </div>
+
+              <div class="ovcard">
+                <div class="ovcard__title">MAINTENANCE — DRIFT SCAN</div>
+                <div class="ovcard__note">A backward-looking pass over recently changed source files: rulebook violations, pattern drift, and stale docs. Read-only — findings are appended to the DEBT ledger; fix them in an ordinary chat turn.</div>
+                <div class="ovcheat__actions"><div class="spacer"></div><span class="test-result" id="ov-drift-msg"></span><button class="btn btn--brand btn--sm" id="ov-drift-run" type="button">RUN DRIFT SCAN</button></div>
+              </div>
+
+              <div class="ovcard">
                 <div class="ovcard__title">PROJECT CHEAT SHEET</div>
                 <div class="ovcard__note">A short brief on this project's objectives, rules, and mode of operation. Kept separate from skills (candidate capabilities) and chat history (past turns) — this is orientation, read by the planner before it decides what's relevant to a task.</div>
                 <textarea class="ovcheat" id="ov-cheat" rows="6" placeholder="e.g. Objective: read-only compliance reporting for one tenant. Rules: never write to Fluency; always cite the report id. Mode of operation: most requests are single-report lookups; multi-tenant comparisons are rare."></textarea>

@@ -11,6 +11,8 @@
 // the prompt; light validation here; the caller (ipc.js) writes via
 // project-docs.writeCanonical so everything versions at the fixed paths.
 
+const { WRITING_TOOLS } = require('./coding-tools');
+
 const SUBMIT_DOCS_TOOL = {
   name: 'submit_docs',
   description: 'Return the updated project documentation. Include ONLY documents this change genuinely affects, as full replacement markdown. Set none=true when nothing warrants an update.',
@@ -80,7 +82,7 @@ function validDoc(s) {
 async function updateDocs({ connector, model, goal, stepResults = [], toolTrace = [], known = '', current = {}, files = [] }) {
   try {
     const touchedPaths = [...new Set(toolTrace
-      .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
+      .filter((t) => t.ok !== false && WRITING_TOOLS.includes(t.name))
       .map((t) => (t.args && t.args.path) || '').filter(Boolean))];
     const cmds = [...new Set(toolTrace
       .filter((t) => t.ok !== false && t.name === 'run_command')

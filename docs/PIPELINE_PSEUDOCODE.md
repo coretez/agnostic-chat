@@ -7,6 +7,21 @@ Sections marked `[PROPOSED]` are designed but not implemented.
 
 ## Flow diagram
 
+> **Drawing from this diagram:** a model-generated redraw is a STOCHASTIC
+> process — do not trust it to carry a specific fact. Measured 2026-08-14 over
+> 14 controlled single-call redraws: whether the O26 baseline or the
+> cannot-spiral property survived was **uncorrelated** with how it was encoded
+> (sub-label, terse node, edge label, named node, or pure topology), with the
+> node budget (18-24 vs 30), and with naming them as explicit MUST-KEEP
+> requirements — the must-keep arm scored 0/3 against a 1/3 control. Roughly
+> 1 redraw in 5 kept a given property, which is why an earlier 8-of-8 miss
+> streak looked systematic and was not.
+>
+> The consequence: if a graphic MUST show something, verify it after
+> generation and fix it by hand — the same "check it, don't trust it" rule
+> O26 applies to code. The nodes below are written as stages because that is
+> what they are, not because it makes them survive.
+
 ```mermaid
 flowchart TD
   SEND(["user SEND"]) --> PRE{"model +<br/>working_dir?"}
@@ -19,7 +34,7 @@ flowchart TD
   D -- "no" --> E
   D2 --> E["E · tool ceiling (skill scope / full-catalog fallback)"]
   E --> F{"coding mode?"}
-  F -- "yes" --> F2["F · coding harness: jail + 6 tools + git check"]
+  F -- "yes" --> F2["F · coding harness: jail + tools + git check<br/>+ rulebook O29 + check command O26"]
   F -- "no" --> G
   F2 --> G["G · orchestrator toolset + routing"]
   G --> H["H · load working memory"]
@@ -27,17 +42,30 @@ flowchart TD
   I --> J{"simple or ≤1 step?"}
   J -- "yes" --> FLAT["flat loop ≤10 iters · forced wrap-up"]
   J -- "no" --> STEP["execute step ≤8 iters<br/>KNOWN VALUES + produces"]
-  STEP --> SQ{"stuck?"}
+  STEP --> FIRST{"first mutation<br/>of this turn?"}
+  FIRST -- "yes" --> BASE["O26 BASELINE — check runs BEFORE<br/>anything changes; pre-existing failures<br/>are attributed, never inherited"]
+  FIRST -- "no" --> MUT
+  BASE --> MUT{"step mutated?"}
+  MUT -- "no" --> SQ{"stuck?"}
+  MUT -- "yes" --> CHK["O26 check gate"]
+  CHK --> CP{"check passes?"}
+  CP -- "yes" --> SQ
+  CP -- "no" --> FIX["ONE bounded fix step"]
+  FIX --> RECHK["fix step RE-CHECKS only —<br/>it can never insert another;<br/>the gate cannot spiral"]
+  RECHK --> SQ
   SQ -- "no" --> NEXT{"more steps?"}
   NEXT -- "yes" --> STEP
   SQ -- "yes" --> RQ{"refines < 3?"}
   RQ -- "yes" --> REF["refine remaining tail"] --> STEP
   RQ -- "no" --> ESC{"user continues?"}
   ESC -- "yes" --> STEP
-  ESC -- "no" --> SYN
-  NEXT -- "no" --> SYN["synthesis — stream-reset · merge contract"]
-  FLAT --> K["K · persist + measure"]
-  SYN --> K
+  ESC -- "no" --> REV
+  NEXT -- "no" --> REV["O11 review — changed files<br/>+ final O26 check as 1st finding"]
+  REV --> DEBT["O27 — unfixed findings → DEBT.md<br/>(a repeat is flagged PROMOTE TO GATE)"]
+  DEBT --> SYN["synthesis — stream-reset · merge contract"]
+  FLAT --> FCHK["O26 check on a mutated flat turn<br/>+ ONE bounded fix"]
+  FCHK --> K["K · persist + measure"]
+  SYN --> DW["O15 doc-writer (turn mutated)"] --> K
   K --> L["L · evaluator (digest only)"]
   STOP(["STOP — any time"]) -.-> X["abort HTTP · no synthesis · save all work"] -.-> K
 ```
@@ -235,6 +263,29 @@ SHIPPED since first draft (see docs/HARNESS_OBJECTIVES.md for the spec)
   · O10 plan-shape contract in DERIVE_PROMPT (coding mode): verify step
         required for code-writing plans; capability boundary stated
         (planned code can never call MCP)
+  · O26 framework check gate: per-project check_command (granted via the
+        same main-side confirmation as the O4 bypass) runs LAZILY just
+        before the turn's first mutation (baseline — pre-existing failures
+        attributed, not inherited), after every mutating sequential step
+        (one bounded fix step on failure; fix steps re-check, never
+        re-insert; a step that ran the check itself is not re-run), once
+        after any fan-out/delegated step (sub-agent traces are isolated, so
+        the per-step gate is blind to them), and once on a mutated flat
+        turn; the final verdict reaches synthesis, anchors the O11 review as
+        a deterministic finding, sets the reply's honesty marker, and lands
+        in DEBT
+  · O27 debt ledger: DEBT.md joins the canonical doc set; unfixed review
+        findings, unresolved check failures, and drift findings append —
+        a repeated finding is flagged PROMOTE TO GATE
+  · O28 test integrity stated in CODING_RULES, the CODING MODE note, and
+        every check-gate fix prompt (the EG-1 guardrail rides O17)
+  · O29 working-dir rulebook (AGENT_RULES.md ▸ docs/AGENT_RULES.md ▸
+        AGENTS.md ▸ CLAUDE.md) injected into the CODING MODE note and Pass 2
+        under the PROJECT RULEBOOK banner; depth-2 repo map already fed
+        Pass 2 — plans name real files
+  · O30 drift pass (drift.js, Overview → MAINTENANCE): read-only scan of
+        recently modified sources vs rulebook + canonical docs; findings →
+        DEBT; fixes are ordinary turns with ordinary gates
 
 ────────────────────────────────────────────────────────────────────────
 [PROPOSED] — designed, not yet implemented
@@ -243,9 +294,13 @@ SHIPPED since first draft (see docs/HARNESS_OBJECTIVES.md for the spec)
         efficiency, redundancy) + deterministic anchors, ≤2 cycles
   · O13 auto checkpoint before a bypassed turn's first mutation
     → shadow ref on turn_metrics → one-click "revert this turn"
-  · AGENTS.md/CLAUDE.md in working_dir auto-injected beside cheat_sheet
-  · per-project check command auto-runs after mutations, result fed to synthesis
   · read_skill_file — serve bundled skill files from skills.definition
-  · depth-2 repo map fed to Pass 2 so plans name real files
   · evaluator code lens: diff summary in the digest when a turn mutated files
+  · evaluator findings feed the DEBT ledger (O27 deferred half)
+  · scheduled drift pass (O30 is user-invoked today)
+  · sub-agent mutation traces surfaced to the O11 review + doc-writer —
+    today a turn whose file changes happen ONLY inside delegated steps is
+    reviewed and documented blind (the O26 check gate covers it; the
+    file-level lenses do not). Rides the O13 checkpoint work, which gives
+    the turn-start ref needed to diff what sub-agents actually changed
 ```

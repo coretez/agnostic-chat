@@ -42,7 +42,8 @@ const CANONICAL = {
   spec: 'SPEC',
   design: 'DESIGN',
   pseudocode: 'PSEUDOCODE',
-  knowledge: 'KNOWLEDGE'
+  knowledge: 'KNOWLEDGE',
+  debt: 'DEBT'
 };
 
 // Structured skeletons — each states its job and who writes it, so a doc is
@@ -83,6 +84,15 @@ const SKELETONS = {
 
 > Algorithm/pipeline outlines per component — the shape of the code without
 > the code. Updated when flows change.
+`,
+  debt: `# DEBT — Tech-Debt Ledger
+
+> Findings the bounded fix cycles left behind, appended automatically by the
+> pipeline (O27) — nothing a review or check surfaces is allowed to evaporate.
+> A finding recorded twice is flagged PROMOTE TO GATE: encode it as a check
+> command, lint, or guard instead of prose. Tick entries off as they're fixed.
+
+## Open findings
 `,
   knowledge: `# KNOWLEDGE — How It Actually Works
 
@@ -250,6 +260,73 @@ function backfillFiles({ projectId, outputDir }) {
   return wrote;
 }
 
+// ── O29: the working-dir rulebook ───────────────────────────────────────────
+// First-found wins; the project's own rulebook outranks generic agent files.
+const RULEBOOK_NAMES = ['AGENT_RULES.md', path.join(DOCS_DIRNAME, 'AGENT_RULES.md'), 'AGENTS.md', 'CLAUDE.md'];
+
+/**
+ * Read the repository's rulebook, if it has one. No rulebook is a valid,
+ * zero-cost state (same passthrough posture as an empty guard point).
+ * @returns {{path:string, relPath:string, text:string}|null}
+ */
+function readRulebook(workingDir) {
+  if (!workingDir) return null;
+  for (const rel of RULEBOOK_NAMES) {
+    const abs = path.join(workingDir, rel);
+    try {
+      if (fs.existsSync(abs)) return { path: abs, relPath: rel, text: fs.readFileSync(abs, 'utf8') };
+    } catch {}
+  }
+  return null;
+}
+
+// ── O27: the debt ledger ────────────────────────────────────────────────────
+// Findings the bounded fix cycles leave behind land here — durable, in-repo,
+// and repeat-aware: the second occurrence of a finding is a promotion
+// candidate (encode it as a check/lint/guard, per the rulebook's meta-rule).
+
+/** Stable dedupe key for a finding — file + the front of the issue text.
+ *  The key rides an HTML comment, so `<`/`>` are stripped: an issue text
+ *  containing `-->` would otherwise end the marker early and break both the
+ *  rendering and the repeat-detection scan. */
+function debtKey(f) {
+  const issue = String(f.issue || '').trim().slice(0, 60).toLowerCase().replace(/\s+/g, ' ');
+  return `${f.file || ''}|${issue}`.replace(/[<>]/g, '');
+}
+
+function renderDebtEntry(f, repeatCount) {
+  const date = new Date().toISOString().slice(0, 10);
+  const promote = repeatCount >= 1 ? ` **REPEAT ×${repeatCount + 1} — PROMOTE TO GATE (check command / lint / guard)**` : '';
+  const fix = f.fix ? ` — fix: ${f.fix}` : '';
+  const status = f.status ? ` _(${f.status})_` : '';
+  return `- [ ] ${date} · ${f.lens || 'review'}/${f.severity || 'med'} · ${f.file || '(project)'} — ${f.issue}${fix}${status}${promote} <!-- key:${debtKey(f)} -->`;
+}
+
+/**
+ * Append findings to the project's DEBT ledger. Repeats (same key already in
+ * the ledger) are flagged as promote-to-gate candidates rather than deduped —
+ * the recurrence IS the signal.
+ * @returns {{added:number, repeats:number, version?:number}}
+ */
+function appendDebt({ projectId, docsBase, findings = [] }) {
+  const real = findings.filter((f) => f && f.issue);
+  if (!real.length) return { added: 0, repeats: 0 };
+  ensureCanonicalDocs({ projectId, docsBase });
+  const absPath = canonicalPath(docsBase, 'debt');
+  let text = '';
+  try { if (fs.existsSync(absPath)) text = fs.readFileSync(absPath, 'utf8'); } catch {}
+  if (!text.trim()) text = SKELETONS.debt;
+  let repeats = 0;
+  const lines = real.map((f) => {
+    const seen = (text.match(new RegExp(`key:${debtKey(f).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g')) || []).length;
+    if (seen >= 1) repeats += 1;
+    return renderDebtEntry(f, seen);
+  });
+  if (!/\n$/.test(text)) text += '\n';
+  const w = writeCanonical({ projectId, docsBase, docType: 'debt', content: text + lines.join('\n') + '\n' });
+  return { added: lines.length, repeats, version: w.version };
+}
+
 /** A one-line-per-document manifest of the project library, for the model. */
 function listLibrary(projectId) {
   let rows = [];
@@ -258,4 +335,4 @@ function listLibrary(projectId) {
   return lines.length ? lines.join('\n') : '';
 }
 
-module.exports = { load, appendDecisions, backfillFiles, listLibrary, ensureCanonicalDocs, readCanonical, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME };
+module.exports = { load, appendDecisions, appendDebt, readRulebook, backfillFiles, listLibrary, ensureCanonicalDocs, readCanonical, writeCanonical, canonicalPath, CANONICAL, SKELETONS, DOCS_DIRNAME, RULEBOOK_NAMES };

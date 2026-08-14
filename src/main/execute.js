@@ -12,13 +12,76 @@
 
 const { filterToolResult } = require('./filter');
 const { SET_VARIABLE_TOOL } = require('./variables');
+const { didMutate, MUTATING_TOOLS } = require('./coding-tools');
 
 const DEFAULT_STEP_BUDGET = 8;   // inner model↔tools iterations before a step is "stuck"
 const REPLAN_BUDGET = 3;         // auto re-plans of a stuck step's tail before escalating (decision #1)
+const TRANSPORT_RETRIES = 2;     // same-step retries after a provider stall, before it counts as stuck
 
 const STEP_WRAP_PROMPT =
   "You have reached this step's tool-call limit — do NOT call any more tools. " +
   'Summarize what you accomplished and what still remains for this step, using everything gathered above.';
+
+// O26: the framework check gate. After a sequential step that mutated the
+// tree, the injected check runs; a failure inserts ONE bounded fix step.
+// Fix steps are exempt from insertion (they only RE-CHECK), so the gate can
+// never spiral — a check still failing after its fix step is recorded and
+// surfaced, not chased.
+
+/**
+ * A connector-side abort (idle timeout), as opposed to the user pressing STOP.
+ * Detection is deliberately NARROW. A first cut matched any message containing
+ * the word "aborted", which also swallows unrelated failures — those would be
+ * silently retried twice and then reported as a stuck step instead of surfacing
+ * as the errors they are. An AbortController rejection is identifiable by name
+ * or code; the message form is accepted only in its exact DOMException wording.
+ */
+function isProviderAbort(e) {
+  if (!e) return false;
+  if (e.name === 'AbortError' || e.code === 'ABORT_ERR' || e.code === 20) return true;
+  return /^this operation was aborted\.?$/i.test(String(e.message || '').trim());
+}
+
+// The step already proved it: its LAST mutating action was the check command
+// itself, succeeding — nothing changed after that, so re-running is pure cost.
+function alreadyVerified(trace, checkCommand) {
+  if (!checkCommand) return false;
+  const acts = (trace || []).filter((t) => MUTATING_TOOLS.includes(t.name));
+  const last = acts[acts.length - 1];
+  return !!last && last.ok !== false && last.name === 'run_command'
+    && String((last.args && last.args.command) || '').trim() === String(checkCommand).trim();
+}
+
+function checkFixStep(step, output) {
+  return {
+    id: step.id + 0.1, _checkFix: true, agent: 'auto', parallel: false, group: '',
+    produces: 'the project check command passing',
+    task: 'The project check command FAILED after your last change:\n' + (output || '(no output)')
+      + '\nFix the ROOT CAUSE so the check passes. NEVER delete, skip, or weaken a failing test to reach '
+      + 'green; if a test itself is wrong, say so explicitly in your result.'
+  };
+}
+
+async function gateStep({ step, trace, checkStep, checkCommand, steps, idx, emit }) {
+  if (typeof checkStep !== 'function') return;
+  // A fix step ALWAYS re-checks — the verdict is its whole point, even when
+  // it claims done without touching a file. Ordinary steps only pay for a
+  // check when they actually mutated.
+  if (!step._checkFix && !didMutate(trace)) return;
+  if (!step._checkFix && alreadyVerified(trace, checkCommand)) {
+    emit({ type: 'process', kind: 'check-skipped', step: step.id, reason: 'step ran the check itself' });
+    return;
+  }
+  const c = await checkStep(step);
+  if (!c) return;
+  // The runner already emitted the pass/fail verdict; this emits the GATE'S
+  // DECISION only. Restating the verdict here double-logged every failure in
+  // the process rail (seen driving a real turn).
+  if (c.ok) { if (step._checkFix) emit({ type: 'process', kind: 'check-fixed', step: step.id }); return; }
+  if (step._checkFix) { emit({ type: 'process', kind: 'check-still-failing', step: step.id }); return; }
+  emit({ type: 'process', kind: 'check-fix-inserted', step: step.id });
+  steps.splice(idx + 1, 0, checkFixStep(step, c.output));
+}
 
 // The step directive that opens each step: the always-present KNOWN VALUES
 // block (instruction layer 5) followed by the concrete task. Re-injecting the
@@ -81,6 +144,21 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
       res = await chat({ model, messages: h, tools: stepTools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
     } catch (e) {
       if (stopped()) return { result: { step: step.id, task: step.task, conclusion: '', incomplete: true, usage }, partial: '', history: h, stuck: false, aborted: true, usage, toolTrace };
+      // A PROVIDER-side abort (the connector's idle timer firing on a model
+      // that went quiet) is a stalled provider, not a broken plan. It used to
+      // re-throw and kill the whole turn — every completed step, the
+      // synthesis, and the persistence went with it, against O12's promise
+      // that every failure lands somewhere safer. Degrade to STUCK so the
+      // bounded refine/escalate path handles it and finished work survives.
+      // No wrap-up call here: the provider that just timed out cannot
+      // summarize anything.
+      if (isProviderAbort(e)) {
+        emit({ type: 'process', kind: 'provider-timeout', step: step.id });
+        return {
+          result: { step: step.id, task: step.task, conclusion: '', incomplete: true, usage },
+          partial: '', history: h, stuck: true, reason: 'provider-timeout', usage, toolTrace
+        };
+      }
       throw e;
     }
     addUsage(usage, res.usage);
@@ -100,7 +178,13 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
           { key: call.args && call.args.key, value: call.args && call.args.value, type: call.args && call.args.type },
           { confidence: 'derived', source: 'set_variable', step: step.id }
         ) : null;
-        emit({ type: 'process', kind: 'var-set', step: step.id, key: e && e.key });
+        // The store REFUSES empty keys/values and non-scalars. Reporting those
+        // as `var-set` (with key: null) told the glass box five captures had
+        // happened when none had — the same lie the record filter used to
+        // tell. Say which actually happened.
+        emit(e
+          ? { type: 'process', kind: 'var-set', step: step.id, key: e.key, confidence: e.confidence }
+          : { type: 'process', kind: 'var-rejected', step: step.id, key: (call.args && call.args.key) || '(empty)' });
         h.push({ role: 'tool', toolCallId: call.id, name: 'set_variable', content: e ? `Remembered ${e.key} = ${JSON.stringify(e.value)}` : 'Ignored (empty key or value).' });
         toolTrace.push({ name: 'set_variable', args: call.args, ok: !!e });
         continue;
@@ -166,7 +250,7 @@ async function executeStep({ chat, callTool, model, step, tools = [], history = 
  *   digest structurally survives mid-turn compaction — P3)
  * @returns {Promise<{stepResults:Array, history:Array, replans:number, completed:boolean}>}
  */
-async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, mergeGroup, onStepComplete, onEvent, isAborted }) {
+async function executePlan({ chat, callTool, model, plan, tools = [], store, history = [], stepBudget = DEFAULT_STEP_BUDGET, replanBudget = REPLAN_BUDGET, refinePlan, onStuck, compact, runParallel, mergeGroup, onStepComplete, checkStep, checkCommand = '', onEvent, isAborted }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
   const stopped = typeof isAborted === 'function' ? isAborted : () => false;
   // Post-step hook (O9 step-commits and the like): fired after a step's result
@@ -178,6 +262,7 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
     try { await onStepComplete(step, result, trace || []); } catch {}
   };
   let steps = [...((plan && plan.steps) || [])];
+  const plannedIds = steps.map((s) => s.id);   // the plan as promised, before any re-plan
   const stepResults = [];
   const toolTrace = [];
   const usage = makeUsage();
@@ -185,6 +270,9 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
   let h = [...history];
   let replans = 0;
   let idx = 0;
+  // Per-step transport retries (a stalled provider is retried, never replanned).
+  let transportRetries = 0;
+  let transportIdx = -1;
   let truncated = false; // any step's model output hit the token limit
 
   emit({ type: 'process', kind: 'execute-start', goal: plan && plan.goal, steps: steps.length });
@@ -273,6 +361,20 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
     if (typeof compact === 'function') { try { h = await compact(h); } catch {} }
 
     if (r.stuck) {
+      // A TRANSPORT failure says nothing about the plan. Re-deriving the tail
+      // in response to a stalled provider is a category error: the replan
+      // REPLACES every remaining step, and on 2026-08-14 that silently
+      // deleted the steps that wrote the deliverable — the turn then reported
+      // success having produced nothing. Retry the SAME step instead and keep
+      // the plan intact; only genuine task-level stuckness earns a re-plan.
+      if (r.reason === 'provider-timeout') {
+        if (transportIdx !== idx) { transportIdx = idx; transportRetries = 0; }
+        if (transportRetries < TRANSPORT_RETRIES) {
+          transportRetries += 1;
+          emit({ type: 'process', kind: 'transport-retry', step: step.id, attempt: transportRetries });
+          continue;                                    // same idx, same steps — plan preserved
+        }
+      }
       // Auto re-plan the remaining tail while we still have budget.
       if (replans < replanBudget && typeof refinePlan === 'function') {
         replans += 1;
@@ -310,13 +412,27 @@ async function executePlan({ chat, callTool, model, plan, tools = [], store, his
 
     stepResults.push(r.result);
     await stepDone(step, r.result, r.toolTrace);
+    // O26: the check gate runs AFTER bookkeeping (the step's own commit stands;
+    // a fix step earns its own commit) and only on the sequential path —
+    // sub-agent traces are isolated, so gating them here would be blind.
+    if (!stopped()) { try { await gateStep({ step, trace: r.toolTrace, checkStep, checkCommand, steps, idx, emit }); } catch {} }
     idx += 1;
   }
 
   const aborted = stopped();
   const completed = !aborted && idx >= steps.length;
+  // Plan attrition (deterministic, no heuristics): which steps the plan opened
+  // with never ran. A re-plan legitimately rewrites the tail, but on
+  // 2026-08-14 one silently removed the steps that wrote the deliverable and
+  // the turn still reported success. Counting is not judging — the fact is
+  // surfaced and synthesis can say so.
+  const ranIds = new Set(stepResults.map((r) => r.step));
+  const skipped = plannedIds.filter((id) => !ranIds.has(id));
+  if (completed && skipped.length) {
+    emit({ type: 'process', kind: 'plan-shrank', planned: plannedIds.length, ran: ranIds.size, skipped });
+  }
   emit({ type: 'process', kind: 'execute-done', steps: stepResults.length, replans, completed, aborted });
-  return { stepResults, history: h, replans, completed, usage, toolTrace, aborted, truncated };
+  return { stepResults, history: h, replans, completed, usage, toolTrace, aborted, truncated, skipped };
 }
 
 /**
@@ -354,4 +470,4 @@ async function synthesize({ chat, model, plan, stepResults = [], store, history 
   return { reply: res.text || stepResults.map((r) => r.conclusion).filter(Boolean).join('\n\n') || '(no results produced)', usage: res.usage || null, truncated: !!res.truncated };
 }
 
-module.exports = { executeStep, executePlan, synthesize, renderStepDirective, DEFAULT_STEP_BUDGET, REPLAN_BUDGET, STEP_WRAP_PROMPT };
+module.exports = { executeStep, executePlan, synthesize, renderStepDirective, alreadyVerified, isProviderAbort, DEFAULT_STEP_BUDGET, REPLAN_BUDGET, TRANSPORT_RETRIES, STEP_WRAP_PROMPT };

@@ -15,12 +15,27 @@ const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
-const { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep } = require('./coding-tools');
+const { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep, runCheckCommand, didMutate, MUTATING_TOOLS, WRITING_TOOLS } = require('./coding-tools');
+const { driftScan } = require('./drift');
 const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
 const webTools = require('./web-tools');
 const projectFacts = require('./project-facts');
 const librarian = require('./librarian');
+
+// Cost-outlier detection (O14): a turn is flagged when it costs this many
+// times the project's recent median input tokens. Needs MIN_HISTORY prior
+// measured turns before it says anything, so a new project stays quiet.
+const COST_OUTLIER_FACTOR = 3;
+const MIN_COST_HISTORY = 5;
+
+/** Median of a numeric list, or 0 when there is not enough history to judge. */
+function medianOf(values) {
+  const v = values.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (v.length < MIN_COST_HISTORY) return 0;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : Math.round((v[mid - 1] + v[mid]) / 2);
+}
 
 // O7: render the alignment outcome — the reply IS the open decisions. Plain
 // markdown the renderer already knows how to display.
@@ -448,6 +463,20 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       });
       if (r.response !== 0) return { ok: false, cancelled: true };
     }
+    // O26 rides the SAME second wall as the bypass: the check command is a
+    // renderer-supplied string that main later executes as shell WITHOUT an
+    // approval gate (standing consent). That consent must be granted
+    // main-side, showing the verbatim command (O5) — a compromised renderer
+    // must never be able to install its own unprompted execution.
+    if (key === 'check_command' && String(value || '').trim()) {
+      const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+      const r = await dialog.showMessageBox(win, {
+        type: 'warning', buttons: ['Set check command', 'Cancel'], defaultId: 1, cancelId: 1,
+        message: 'Run this command automatically for this project?',
+        detail: `${String(value).trim()}\n\nThe app will run this WITHOUT asking — at the start of every coding turn and after every change it makes. Only set a command you would run yourself (tests, lint, build).`
+      });
+      if (r.response !== 0) return { ok: false, cancelled: true };
+    }
     return repo.settings.set(key, value, projectId);
   });
 
@@ -463,6 +492,38 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       return await runEvaluator({ connector, model: model || provider.default_model, digest });
     } catch (e) {
       return { error: e && e.message ? e.message : 'evaluation failed', findings: [] };
+    }
+  });
+
+  // O30: the drift pass — backward-looking garbage collection, user-invoked
+  // from the Overview MAINTENANCE card. Read-only scan of recent source files
+  // against the rulebook (O29) + canonical docs (O15); findings land in the
+  // DEBT ledger (O27). Fixes are NOT applied here — the user runs them as
+  // ordinary turns with ordinary gates.
+  ipcMain.handle('project:drift', async (_e, { projectId, providerId, model }) => {
+    const provider = repo.providers.get(providerId);
+    if (!provider || !provider.enabled) return { error: 'No enabled model connection for the drift scan.', findings: [] };
+    const key = repo.providers.reveal(providerId);
+    if (!key) return { error: `No API key stored for ${provider.label || provider.type}.`, findings: [] };
+    const project = repo.projects.get(projectId);
+    if (!project || !project.working_dir) return { error: 'The project needs a working directory to scan.', findings: [] };
+    try {
+      const outputDir = resolveProjectOutputDir(projectId);
+      const docsBase = project.working_dir;
+      // Read-only pack: the scan uses list_dir/read_file only, so the gate
+      // callback can refuse everything without ever being consulted.
+      const coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction: async () => false, projectId });
+      const rb = projectDocs.readRulebook(project.working_dir);
+      const connector = getConnector(provider, key);
+      const scan = await driftScan({
+        connector, model: model || provider.default_model, coding, root: project.working_dir,
+        rulebook: rb ? rb.text : '', docsBlock: projectDocs.load(projectId, 4000)
+      });
+      let debt = { added: 0, repeats: 0 };
+      if (scan.findings.length) debt = projectDocs.appendDebt({ projectId, docsBase, findings: scan.findings.map((f) => ({ ...f, status: 'drift scan' })) });
+      return { findings: scan.findings, scanned: scan.scanned, added: debt.added, repeats: debt.repeats, error: scan.error };
+    } catch (e) {
+      return { error: e && e.message ? e.message : 'drift scan failed', findings: [] };
     }
   });
 
@@ -1143,6 +1204,18 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction, buildEnv, projectId });
           coding.root = project.working_dir;         // for step-commits (O9)
           coding.gitAvailable = gitAvailable;
+          coding.buildEnv = buildEnv;
+          // O29: the repo speaks first — the working-dir rulebook rides into
+          // the CODING MODE note (execution) and Pass 2 (planning). Missing
+          // rulebook = silent passthrough; found = a visible ledger event.
+          const rb = projectDocs.readRulebook(project.working_dir);
+          coding.rulebook = rb ? rb.text : '';
+          if (rb) emitProgress({ type: 'process', kind: 'rulebook', path: rb.relPath, chars: rb.text.length });
+          // O26: the framework check gate. The BASELINE runs lazily — just
+          // before this turn's first mutation (see ensureBaseline) — so a
+          // question-only turn never pays for a slow test suite, while
+          // pre-existing breakage is still attributed rather than inherited.
+          coding.checkCommand = String(repo.settings.get('check_command', projectId) || '').trim();
           // Web tools join the planning menu in coding mode — docs lookup and
           // error-message searches are part of real development.
           scopedTools = [...scopedTools, ...coding.tools, ...webTools.WEB_TOOLS];
@@ -1157,26 +1230,76 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
               + 'If an action is declined, continue without it. Read a file before editing it; edit_file replaces an exact '
               + 'existing string. run_command executes in the working directory and is KILLED when it '
               + 'returns — start long-running processes (dev servers, watchers) with start_server, which '
-              + 'keeps them alive across turns; read their output with server_logs.'
+              + 'keeps them alive across turns; read their output with server_logs. '
+              // O28: test integrity is a standing rule at execution time, not
+              // just plan-shape guidance — the flat loop writes code too.
+              + 'NEVER delete, skip, or weaken a failing test to make it pass — fix the root cause; '
+              + 'if a test itself is wrong, say so explicitly when changing it.'
               + (Object.keys(buildEnv).length ? ' Build environment variables set for this project: ' + Object.keys(buildEnv).join(', ') + '.' : '')
+              + (coding.checkCommand
+                ? `\n\nPROJECT CHECK: the framework runs \`${coding.checkCommand}\` after your changes and it must pass. A failure comes back to you with its output; fix the root cause.`
+                : '')
+              + (coding.rulebook
+                ? '\n\nPROJECT RULEBOOK (' + rb.relPath + ' — non-negotiable rules for all work in this repository):\n' + String(coding.rulebook).slice(0, 6000)
+                : '')
               + (() => { const l = projectId ? projectDocs.listLibrary(projectId) : ''; return l ? '\n\nPROJECT LIBRARY — documents and uploaded files already saved for this project. Read them at these exact paths; do not ask the user to locate them:\n' + l : ''; })()
           }, ...convo];
-          emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable });
+          emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable, rulebook: !!rb, check: !!coding.checkCommand });
         } else {
           console.warn('[coding-mode] chat has coding mode on but the project has no working_dir — tools not offered');
         }
       }
 
+      // ── O26: the check gate's turn-scoped state ─────────────────────────
+      // One closure owns every check run this turn — each is a process event,
+      // and the LAST verdict is what synthesis, review, and the debt ledger
+      // see. Defined here (not inside the execution branch) so the tool
+      // wrapper below can trigger the lazy baseline.
+      const checkState = { ran: false, failing: false, output: '', baselineFailing: false };
+      const runTurnCheck = async (phase, step) => {
+        if (!coding || !coding.checkCommand) return null;
+        emitProgress({ type: 'process', kind: 'check', phase, step: step && step.id, command: coding.checkCommand });
+        const c = await runCheckCommand(coding.root, coding.checkCommand, coding.buildEnv);
+        checkState.ran = true; checkState.failing = !c.ok; checkState.output = c.output;
+        emitProgress({ type: 'process', kind: c.ok ? 'check-pass' : 'check-failed', phase });
+        // Attribution: a check that was ALREADY failing before this turn
+        // touched anything is not this turn's doing — say so where the model
+        // reads it, so it fixes the root cause without owning old breakage.
+        if (!c.ok && checkState.baselineFailing) {
+          c.output = 'NOTE: this check was ALREADY FAILING before this turn made any change — the pre-existing failures are not yours.\n' + c.output;
+        }
+        return c;
+      };
+      // The baseline runs ONCE, lazily, immediately before the turn's first
+      // mutation: a question-only turn never pays for a slow suite, and the
+      // attribution property is preserved because nothing has changed yet.
+      let baselineDone = false;
+      const ensureBaseline = async () => {
+        if (baselineDone || !coding || !coding.checkCommand) return;
+        baselineDone = true;
+        emitProgress({ type: 'process', kind: 'check', phase: 'baseline', command: coding.checkCommand });
+        const c = await runCheckCommand(coding.root, coding.checkCommand, coding.buildEnv);
+        checkState.baselineFailing = !c.ok;
+        emitProgress({ type: 'process', kind: c.ok ? 'check-pass' : 'check-failed', phase: 'baseline' });
+      };
+
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
       // tools only (no `delegate`) so the tree stays one level deep. Coding
       // tools (no `__` namespace) route to the pack; everything else to MCP.
-      const rawCallTool = (name, args) => (coding && coding.names.has(name))
-        ? coding.call(name, args)
-        : (library && library.names.has(name))
-          ? library.call(name, args)
-          : webTools.names.has(name)
-            ? webTools.call(name, args)
-            : mcpManager.callTool(name, args, toolset.routes);
+      // Sub-agents share this router, so their mutations trigger the baseline
+      // too — the third path is not exempt from attribution.
+      const rawCallTool = async (name, args) => {
+        if (coding && coding.checkCommand && MUTATING_TOOLS.includes(name)) {
+          try { await ensureBaseline(); } catch (e) { console.error('[check baseline]', e && e.message); }
+        }
+        return (coding && coding.names.has(name))
+          ? coding.call(name, args)
+          : (library && library.names.has(name))
+            ? library.call(name, args)
+            : webTools.names.has(name)
+              ? webTools.call(name, args)
+              : mcpManager.callTool(name, args, toolset.routes);
+      };
 
       // Authored per-project agents the orchestrator can delegate to by name.
       let authoredAgents = [];
@@ -1386,14 +1509,14 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             }
           } catch (e) { console.error('[doc-writer]', e && e.message); }
         };
-        const turnMutated = (trace) => (trace || []).some((t) => t.ok !== false && ['write_file', 'edit_file', 'run_command'].includes(t.name));
+        const turnMutated = didMutate;   // shared definition (coding-tools.js)
         // The files a trace actually changed, with content — evidence for the
         // review pass AND the doc-writer (documenting from step summaries
         // alone produced vague docs; real contents produce real module maps).
         const readChanged = async (trace) => {
           if (!coding) return [];
           const paths = [...new Set((trace || [])
-            .filter((t) => t.ok !== false && ['write_file', 'edit_file'].includes(t.name))
+            .filter((t) => t.ok !== false && WRITING_TOOLS.includes(t.name))
             .map((t) => (t.args && t.args.path) || '').filter(Boolean))].slice(0, 6);
           const files = [];
           for (const p of paths) {
@@ -1410,7 +1533,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
           const planT0 = Date.now();
           plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, documentsMode: !!library, projectDocs: docsBlock, repoMap, formatTarget, branding, rawData }),
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, documentsMode: !!library, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
           if (plan.error) console.warn('[plan-derive]', plan.error);
@@ -1422,10 +1545,33 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         // outrank model guesses and survive turns/restarts with the store.
         // O15: the same decisions land in the project SPEC as dated decision
         // records — deterministic bookkeeping, the doc twin of step-commits.
+        // O8 + O14: report the DENOMINATOR, not just the rejections. A
+        // dropped-only event made silence ambiguous — "nothing was proposed"
+        // and "everything proposed was valid" looked identical, so a guard
+        // that never ran was indistinguishable from one working perfectly.
+        // This fires whenever the planner offered anything, so no event now
+        // means exactly one thing: it offered nothing.
+        const kept = (plan && Array.isArray(plan.record)) ? plan.record.length : 0;
+        const dropped = (plan && Array.isArray(plan.droppedRecords)) ? plan.droppedRecords : [];
+        if (kept + dropped.length > 0) {
+          emitProgress({
+            type: 'process', kind: 'records', proposed: kept + dropped.length,
+            kept, dropped, reason: dropped.length ? 'not durable direction decisions' : ''
+          });
+        }
+        // True only when this turn is the user answering the align form.
+        const ratified = !!(payload && payload.fromAlign);
         if (plan && Array.isArray(plan.record) && plan.record.length) {
           for (const rec of plan.record) {
-            const e = store.set({ key: rec.key, value: rec.value }, { confidence: 'user', source: 'align' });
-            if (e) emitProgress({ type: 'process', kind: 'var-set', key: e.key });
+            // O8 tiering: `user` is the top, overwrite-protected tier and it
+            // means THE HUMAN SAID THIS. Only a turn that answers the align
+            // form qualifies (the renderer sets fromAlign on exactly that
+            // turn). Everything else here is the planner's INFERENCE that a
+            // direction was stated, so it lands at `derived` and stays
+            // correctable — a wrong inference at `user` was permanent.
+            const e = store.set({ key: rec.key, value: rec.value },
+              ratified ? { confidence: 'user', source: 'align' } : { confidence: 'derived', source: 'plan-record' });
+            if (e) emitProgress({ type: 'process', kind: 'var-set', key: e.key, confidence: e.confidence });
             // Chat ↔ Overview parity: DOCUMENT TARGETS stated in chat land in
             // the SAME per-project settings the Overview form shows. Format
             // values resolve against the library's formats/ files by name.
@@ -1475,7 +1621,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         } else if (plan && !plan.simple && plan.steps.length > 1) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', orchestrator: plan.orchestrator || null, steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel, group: s.group || '' })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, formatTarget, branding, rawData };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData };
 
           // Stuck escalation (decision #1): after the re-plan budget is spent,
           // explain what's stuck via the shared one-shot prompt queue.
@@ -1500,12 +1646,16 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             // empty trace so sub-agent work is never mis-attributed.
             onStepComplete: async (step, stepResult, trace) => {
               if (!coding || !coding.gitAvailable) return;
-              const mutated = (trace || []).some((t) => t.ok !== false && (t.name === 'write_file' || t.name === 'edit_file' || t.name === 'run_command'));
-              if (!mutated) return;
+              if (!didMutate(trace)) return;
               const msg = `step ${step.id}: ${String(step.produces || step.task || '').slice(0, 150)}`;
               const out = await commitStep(coding.root, msg);
               if (out.committed) emitProgress({ type: 'process', kind: 'step-commit', step: step.id, message: msg });
             },
+            // O26: the framework check gate — runs after every mutating
+            // sequential step (execute.js inserts one bounded fix step on
+            // failure; fix steps only re-check, so it cannot spiral).
+            checkStep: (coding && coding.checkCommand) ? (step) => runTurnCheck('step', step) : undefined,
+            checkCommand: coding ? coding.checkCommand : '',
             // Between-steps compaction that structurally protects the KNOWN
             // VALUES digest (P3) — discovered parameters survive verbatim.
             compact: async (h) => {
@@ -1557,17 +1707,33 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             onEvent: emitProgress
           });
 
+          // O26 third path: delegated/fan-out steps CAN mutate (sub-agents get
+          // the coding tools) but their traces stay isolated, so the per-step
+          // gate is blind to them. One final check covers whatever they did
+          // to the tree — the deterministic verdict needs no trace.
+          if (coding && coding.checkCommand && !exec.aborted && exec.stepResults.some((r) => r.parallel)) {
+            try { await runTurnCheck('post-parallel'); } catch (e) { console.error('[check parallel]', e && e.message); }
+          }
+
           // ── O11 verify layer 2+3: quality + security review of the changed
           // files (review.js), deterministic like step-commits. Layer 1 —
           // "it works" — is the plan's own verify step. Confirmed high/med
           // findings get ONE bounded fix step (worst first), then the fix is
           // committed; review can never spiral or break a turn.
+          // O27: whatever this cycle cannot verify as fixed lands in the DEBT
+          // ledger afterwards — nothing evaporates.
+          let turnFindings = [];
           if (coding && !exec.aborted && exec.completed && turnMutated(exec.toolTrace)) {
             try {
               const files = await readChanged(exec.toolTrace);
               if (files.length) {
                 emitProgress({ type: 'process', kind: 'review', files: files.length });
                 const rev = await reviewChanges({ connector: { chat: chatAbortable }, model: fastModel, files, goal: plan.goal });
+                // O26: a failing check at review time is the review's FIRST
+                // finding — deterministic, ahead of every model lens.
+                if (checkState.ran && checkState.failing) {
+                  rev.findings.unshift({ lens: 'check', severity: 'high', file: '(project)', issue: `the project check command (${coding.checkCommand}) is failing`, fix: 'make it pass by fixing the root cause — never by weakening tests' });
+                }
                 if (rev.findings.length && !isAborted()) {
                   emitProgress({ type: 'process', kind: 'review-findings', count: rev.findings.length });
                   const fixStep = {
@@ -1588,12 +1754,47 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
                     const c = await commitStep(project.working_dir, 'review: fix quality/security findings');
                     if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'review' });
                   } catch {}
+                  // O26: the fix step's claim is verified by the check, not
+                  // taken on faith — this is the turn's final verdict.
+                  await runTurnCheck('post-fix');
                   emitProgress({ type: 'process', kind: 'review-fixed', count: rev.findings.length });
+                  turnFindings = rev.findings.map((f) => ({ ...f, status: 'fix attempted — unverified' }));
                 } else if (!rev.findings.length) {
                   emitProgress({ type: 'process', kind: 'review-clean' });
                 }
               }
             } catch (e) { console.error('[review]', e && e.message); }
+          }
+
+          // Plan attrition reaches the reply. A re-plan may legitimately drop
+          // steps, but the user should never be told a 4-step plan succeeded
+          // when 2 of its steps never ran — that is how a turn that produced
+          // nothing reported success.
+          if (exec.skipped && exec.skipped.length && !exec.aborted) {
+            exec.stepResults.push({
+              step: 'plan', task: 'planned steps that never ran',
+              conclusion: `Steps ${exec.skipped.join(', ')} were in the original plan and did not run (the plan was revised mid-turn). Say plainly what was not done.`,
+              incomplete: true
+            });
+          }
+
+          // O26: a check still failing after everything is an honest,
+          // visible outcome — it reaches synthesis as an incomplete step
+          // result, so the reply says what remains instead of claiming done.
+          if (checkState.ran && checkState.failing && !exec.aborted) {
+            exec.stepResults.push({ step: 'check', task: `project check (${coding.checkCommand})`, conclusion: 'FAILING at turn end:\n' + checkState.output, incomplete: true });
+            if (!turnFindings.some((f) => f.lens === 'check')) {
+              turnFindings.push({ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' });
+            }
+          }
+          // O27: the debt ledger — review findings and unresolved check
+          // failures are recorded durably; a repeat is flagged as a
+          // promote-to-gate candidate. Best-effort, never breaks the turn.
+          if (turnFindings.length && projectId) {
+            try {
+              const d = projectDocs.appendDebt({ projectId, docsBase, findings: turnFindings });
+              if (d.added) emitProgress({ type: 'process', kind: 'debt', added: d.added, repeats: d.repeats, version: d.version });
+            } catch (e) { console.error('[debt]', e && e.message); }
           }
 
           // The bubble has been streaming per-step text; the synthesis is the
@@ -1617,7 +1818,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             u.cachedTokens += syn.usage.cachedTokens || 0; u.cacheCreationTokens += syn.usage.cacheCreationTokens || 0;
           }
           emitProgress({ type: 'done' });
-          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted, truncated: !!(exec.truncated || syn.truncated) };
+          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted, truncated: !!(exec.truncated || syn.truncated), checkFailing: !!(checkState.ran && checkState.failing && !exec.aborted), checkCommand: coding ? coding.checkCommand : '' };
           planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
 
           // O15: documentation is maintained AUTOMATICALLY after execution —
@@ -1663,6 +1864,34 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           // A wandering turn must never be an unrecorded, undocumented turn —
           // and plan_steps=0 in turn_metrics makes the wandering measurable.
           if (coding && !result.aborted && projectId && turnMutated(result.toolTrace)) {
+            // O26 on the flat path: a wandering turn faces the same gate —
+            // check, ONE bounded fix step on failure, and an honest record.
+            try {
+              const c0 = await runTurnCheck('turn');
+              if (c0 && !c0.ok && !isAborted()) {
+                const fixStep = {
+                  id: 1, task: 'The project check command FAILED after your changes:\n' + c0.output
+                    + '\nFix the ROOT CAUSE so the check passes. NEVER delete, skip, or weaken a failing test to reach green; if a test itself is wrong, say so explicitly.',
+                  produces: 'the project check command passing'
+                };
+                const fr = await executeStep({ chat: chatAbortable, callTool, model: chosenModel, step: fixStep, tools: orchestratorTools.filter((t) => t.name !== 'set_variable'), history: convo, store, onEvent: emitProgress, isAborted });
+                result.toolTrace.push(...(fr.toolTrace || []));
+                await runTurnCheck('post-fix');
+                if (checkState.failing) {
+                  try {
+                    const d = projectDocs.appendDebt({ projectId, docsBase, findings: [{ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' }] });
+                    if (d.added) emitProgress({ type: 'process', kind: 'debt', added: d.added, repeats: d.repeats, version: d.version });
+                  } catch (e) { console.error('[debt]', e && e.message); }
+                }
+              }
+              // The flat path's reply is the STREAMED text, not result.reply —
+              // an appended string would never reach the bubble or the saved
+              // message. The marker rides a flag the renderer applies, exactly
+              // like `truncated`.
+              if (checkState.ran && checkState.failing) {
+                result.checkFailing = true; result.checkCommand = coding.checkCommand;
+              }
+            } catch (e) { console.error('[flat check]', e && e.message); }
             try {
               const c = await commitStep(project.working_dir, `turn: ${String(text).slice(0, 150)}`);
               if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'turn' });
@@ -1724,6 +1953,22 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           planRefines: planInfo ? planInfo.replans : 0,
           varsCaptured: Math.max(0, store.size - varsAtStart)
         };
+        // Cost outlier (O14): plan_refines and input tokens were both recorded
+        // and neither was ever WATCHED — a 3-step plan that grew to 8 steps and
+        // burned 1.07M input tokens passed without comment. Compared against
+        // this project's own recent median, so there is no magic constant
+        // beyond the multiple; needs a real history before it can speak.
+        try {
+          const prior = repo.metrics.listByProject(projectId, 20).filter((m) => m.measured && m.input_tokens > 0);
+          const median = medianOf(prior.map((m) => m.input_tokens));
+          if (median && metricRow.inputTokens > median * COST_OUTLIER_FACTOR) {
+            emitProgress({
+              type: 'process', kind: 'cost-outlier',
+              inputTokens: metricRow.inputTokens, median, factor: +(metricRow.inputTokens / median).toFixed(1),
+              replans: metricRow.planRefines, steps: metricRow.planSteps
+            });
+          }
+        } catch (e) { console.error('[cost outlier]', e && e.message); }
         repo.metrics.record(metricRow);
         // Per-task rows: sub-agents (collected during the loop) + each tool call.
         for (const t of (result.toolTrace || [])) {
@@ -1772,4 +2017,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   });
 }
 
-module.exports = { registerIpc, documentPathAllowed };
+// medianOf gates the cost-outlier signal and had no coverage — it silently
+// returns 0 below MIN_COST_HISTORY, which is exactly why the signal never
+// fired during testing (every drive created a fresh project with no history).
+module.exports = { registerIpc, documentPathAllowed, medianOf, COST_OUTLIER_FACTOR, MIN_COST_HISTORY };

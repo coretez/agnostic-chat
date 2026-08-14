@@ -64,7 +64,7 @@ const SUBMIT_PLAN_TOOL = {
       },
       record: {
         type: 'array',
-        description: 'ONLY durable development-direction decisions the user has STATED (platform, stack, distribution, structure, naming) — e.g. {key:"platform", value:"react-native"}. Short snake_case key, short value. NEVER project titles, task descriptions, or restatements of the request; never your own picks.',
+        description: 'ONLY durable development-direction decisions the user has STATED, and ONLY with one of these exact keys: platform, stack, framework, language, runtime, database, distribution, structure, package_manager, test_framework, ui_framework, hosting, license, document_branding, document_format, document_rawdata. e.g. {key:"platform", value:"react-native"}. These outlive the request and apply to EVERY future turn. NEVER record task parameters (an output path, a file name, this request\'s format), project titles, task descriptions, restatements of the request, or your own picks — anything else is discarded.',
         items: {
           type: 'object',
           properties: {
@@ -81,9 +81,52 @@ const SUBMIT_PLAN_TOOL = {
 
 const clip = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
 
-function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
+// O8: a durable decision is a DIRECTION, not a task parameter. Shape alone is
+// not enough — driving a real turn promoted `output_path =
+// docs/HARNESS_FLOWCHART.md` and `output_format = markdown_with_single_mermaid
+// _block` to permanent user-confidence values (and into the SPEC) because both
+// are well-formed snake_case. Validate against a KNOWN VOCABULARY instead, the
+// way the librarian validates facets: guards add restriction, never permission.
+const DURABLE_KEYS = new Set([
+  'platform', 'stack', 'framework', 'language', 'runtime', 'database',
+  'distribution', 'structure', 'package_manager', 'test_framework',
+  'ui_framework', 'hosting', 'license',
+  'document_branding', 'document_format', 'document_rawdata'
+]);
+const RECORD_KEY = /^[a-z][a-z0-9_]{1,30}$/;
+
+const recordIsDurable = (r) =>
+  RECORD_KEY.test(r.key) && DURABLE_KEYS.has(r.key) && r.value.length > 0 && r.value.length <= 100;
+
+/**
+ * Split proposed records into kept and dropped. The dropped keys are reported
+ * so the caller can emit them (O14): a guard that discards silently cannot be
+ * told apart from a planner that proposed nothing — which is exactly how the
+ * first verification of this filter produced a claim with no evidence.
+ * @returns {{records:Array<{key,value}>, dropped:string[]}}
+ */
+function partitionRecords(raw) {
+  const proposed = (Array.isArray(raw) ? raw : [])
+    .filter((r) => r && typeof r.key === 'string' && r.value != null)
+    .map((r) => ({ key: r.key.trim().toLowerCase().replace(/\s+/g, '_'), value: String(r.value).trim() }));
+  return {
+    records: proposed.filter(recordIsDurable),
+    dropped: proposed.filter((r) => !recordIsDurable(r)).map((r) => r.key)
+  };
+}
+
+/** Ratified direction decisions, deterministically validated (O8). */
+function normalizeRecords(raw) { return partitionRecords(raw).records; }
+
+function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '', rulebook = '', formatTarget = '', branding = '', rawData = false }) {
   const parts = [];
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
+  if (rulebook) {
+    // O29: the working-dir rulebook (AGENT_RULES.md | AGENTS.md | CLAUDE.md)
+    // travels beside the brief — plans and steps must comply with it, and
+    // anything the repo's own rulebook forbids is out of bounds for a plan.
+    parts.push('PROJECT RULEBOOK (non-negotiable rules for all work in this repository — every plan and step must comply):\n' + clip(rulebook, 6000));
+  }
   if (formatTarget) {
     // O24: the documents harness's visual standard — plans that produce a
     // document must read it early and compose against it.
@@ -133,6 +176,7 @@ const CODING_RULES = `
 - ALIGN FIRST (never race): if the request requires choosing a development direction — platform, framework/stack, project structure, distribution target — and that choice is NOT already fixed by KNOWN VALUES, the project brief, or the request itself, do NOT plan steps. Call submit_plan with "decisions": one entry per open decision (question, viable options with tradeoffs, your recommendation). Never silently pick a direction for the user.
 - RECORD DECISIONS: when the user's request itself states a direction ("build it in Swift", "internal only"), put it in "record" as {key, value} so it persists as a durable known value. Record only the user's decisions, never your own picks.
 - VERIFY (three layers): a plan whose steps create or modify code MUST end with a verification step that (1) runs the project's tests or build via run_command and fixes what fails, and while implementing you must also satisfy (2) quality — DRY, modular, no brute-force where a simpler idiom exists — and (3) security — no injection, secrets in code, or unvalidated input. Changed files are independently reviewed on those lenses after execution; code that fails review costs a fix cycle.
+- TEST INTEGRITY (O28): a failing test is NEVER deleted, skipped, or weakened to reach green — fix the root cause in the code. Editing a test is legitimate ONLY when the test itself is wrong, and the step's result must say so explicitly.
 - CAPABILITY BOUNDARY: steps may only prescribe actions the listed tools can perform. MCP tools exist only inside this assistant's session — code you plan can NEVER call MCP; apps need the service's own API or a bridge. If a skill prescribes an action with no matching tool, adapt it or state what is skipped and why — never emit a step that pretends.
 - DOCUMENTATION: the canonical project docs (SPEC/DESIGN/PSEUDOCODE/KNOWLEDGE) are maintained AUTOMATICALLY by the pipeline after execution — do NOT plan documentation steps and do NOT call save_document with those types. save_document is for deliverables (reports, exports) only.`;
 
@@ -223,21 +267,15 @@ function normalizeSteps(steps, startId = 1) {
  *   On any failure returns {simple:true} — the caller falls back to the flat
  *   loop, so planning can never make a turn WORSE than today's behavior.
  */
-async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, documentsMode = false, projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
+async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, store, agents, codingMode = false, documentsMode = false, projectDocs = '', repoMap = '', rulebook = '', formatTarget = '', branding = '', rawData = false }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, formatTarget, branding, rawData });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, rulebook, formatTarget, branding, rawData });
     const parsed = await callForPlan(connector, model, DERIVE_PROMPT(ctx, userText || '', codingMode, documentsMode));
     if (!parsed) return { simple: true, goal: '', steps: [], error: 'planner returned no tool call' };
     // User decisions stated in the request — persisted by the caller at
-    // `user` confidence so they survive turns and outrank model guesses (O8).
-    // Deterministic junk filter: a decision is a short snake_case key with a
-    // short value. Task descriptions and titles recorded as "decisions" once
-    // polluted a SPEC — never again.
-    const RECORD_KEY = /^[a-z][a-z0-9_]{1,30}$/;
-    const record = (Array.isArray(parsed.record) ? parsed.record : [])
-      .filter((r) => r && typeof r.key === 'string' && r.value != null)
-      .map((r) => ({ key: r.key.trim().toLowerCase().replace(/\s+/g, '_'), value: String(r.value).trim() }))
-      .filter((r) => RECORD_KEY.test(r.key) && r.value.length > 0 && r.value.length <= 100);
+    // `user` confidence so they survive turns and outrank model guesses (O8),
+    // validated against the durable vocabulary above.
+    const { records: record, dropped: droppedRecords } = partitionRecords(parsed.record);
     // Alignment outcome (O7): open direction decisions end the turn awaiting
     // the user — no steps run. Only honored in the modes whose rules elicit
     // it (coding: platform/stack; documents: audience/format/type).
@@ -248,7 +286,7 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
         options: (Array.isArray(d.options) ? d.options : []).filter((o) => typeof o === 'string' && o.trim()).map((o) => o.trim()),
         recommendation: typeof d.recommendation === 'string' ? d.recommendation.trim() : ''
       }));
-    if (decisions.length) return { simple: true, align: true, decisions, goal: parsed.goal || '', steps: [], record };
+    if (decisions.length) return { simple: true, align: true, decisions, goal: parsed.goal || '', steps: [], record , droppedRecords };
     const steps = normalizeSteps(parsed.steps);
     const merge = typeof parsed.merge === 'string' ? parsed.merge.trim() : '';
     // O16: the recombination contract for fan-out groups — the planner that
@@ -257,8 +295,8 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
       ? { merge: String(parsed.orchestrator.merge || '').trim(), on_conflict: String(parsed.orchestrator.on_conflict || '').trim() }
       : null;
     // A 0/1-step plan is the trivial-turn gate: nothing to orchestrate.
-    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge, record };
-    return { simple: false, goal: parsed.goal || '', steps, merge, record, orchestrator };
+    if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge, record , droppedRecords };
+    return { simple: false, goal: parsed.goal || '', steps, merge, record, orchestrator , droppedRecords };
   } catch (e) {
     return { simple: true, goal: '', steps: [], error: `derivePlan failed: ${e.message}` };
   }
@@ -269,9 +307,9 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
  * Matches the `refinePlan` signature executePlan expects.
  * @returns {Promise<{steps:Array}>} empty steps = "nothing more needed".
  */
-async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '', repoMap = '', formatTarget = '', branding = '', rawData = false }) {
+async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills, tools, agents, plan, done = [], stuckStep, reason, partial, store, projectDocs = '', repoMap = '', rulebook = '', formatTarget = '', branding = '', rawData = false }) {
   try {
-    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, formatTarget, branding, rawData });
+    const ctx = planContext({ cheatSheet, loadedSkills, tools, store, agents, projectDocs, repoMap, rulebook, formatTarget, branding, rawData });
     const doneDigest = done.map((d) => `- [step ${d.step}] ${clip(d.task, 160)}: ${clip(d.conclusion, 400)}`).join('\n');
     const stuck = { task: stuckStep ? stuckStep.task : '', partial: partial || '' };
     const parsed = await callForPlan(connector, model, REFINE_PROMPT(ctx, (plan && plan.goal) || '', doneDigest, stuck, reason || 'stuck', userText || ''));
@@ -287,4 +325,4 @@ async function refinePlan({ connector, model, userText, cheatSheet, loadedSkills
   }
 }
 
-module.exports = { derivePlan, refinePlan, planContext, SUBMIT_PLAN_TOOL, DERIVE_PROMPT, REFINE_PROMPT };
+module.exports = { derivePlan, refinePlan, planContext, normalizeRecords, partitionRecords, DURABLE_KEYS, SUBMIT_PLAN_TOOL, DERIVE_PROMPT, REFINE_PROMPT };

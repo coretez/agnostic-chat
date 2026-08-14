@@ -86,9 +86,30 @@ form with write-in; live-verified).
 **O8. Decisions are durable.** Ratified user decisions persist as
 `user`-confidence variables — overwrite-protected against model guesses,
 re-injected into every future step and plan.
+
+*The failure mode, measured 2026-08-14.* `record` sits in the same tool call
+as `goal`, `steps`, `produces` and `merge` — every one of which is scoped to
+THIS request — and then asks the opposite question: what outlives it. The
+planner answers in the frame it is already in, and proposes the request's
+own parameters. Observed live under permissive wording: `output_path`,
+`output_format` (run 1, which reached the SPEC), then `output_target`,
+`format`, `scope` (isolated A/B). **The junk keys differ every run**, so the
+guard has to be an allowlist of durable keys — a denylist cannot enumerate
+what it has not seen. Two layers, each independently verified: naming the
+legal keys in the schema stops most proposals at the source, and the
+vocabulary filter rejects the rest. Asymmetry that sets the bias: a false
+positive lands at `user` confidence and is therefore STICKY — no later
+observation can overwrite it — while a false negative costs nothing, since
+the user can simply restate. Reject when unsure.
+
 Accept: a decision stated by the user reaches the store via the plan's
-`record` field. **Status: SHIPPED** (record → store at `user` confidence +
-SPEC decision records).
+`record` field; a task parameter never does, and the rejection is visible
+(`records` event: proposed/kept/dropped). **Status: SHIPPED** (record →
+store at `user` confidence + SPEC decision records; durable-key vocabulary
++ dropped-key reporting). *Open, in DEBT:* an inferred record is stored at
+`user` confidence with `source: 'align'` though nothing verifies a
+ratification, and `record` is offered on every turn while its sibling
+`decisions` is mode-gated.
 
 **O9. The plan is the git history.** Each completed step that mutated the
 working tree commits with its `produces` as the message — the typed plan
@@ -203,10 +224,20 @@ is a PASSTHROUGH — undefined firewall/guardrails is a valid, zero-cost
 state; the chain's existence is the contract, not any particular module.
 *Source: OpenAI Agents SDK guardrails/tripwires; NeMo Guardrails rail
 taxonomy; LLM gateway egress scrubbing; Harness.io gates.*
+**Every guard reports its DENOMINATOR, not only its rejections.** A module
+that emits solely on block/rewrite makes silence ambiguous: "nothing was
+inspected", "nothing matched", and "the module never ran" all look identical
+from outside, so a broken guard is indistinguishable from a working one.
+Each inspection therefore reports what it saw as well as what it did
+(`inspected`, `allowed`, `blocked/rewritten/flagged`). Learned the hard way
+on the O8 record filter: a dropped-only event led to a confident claim that
+the guard had rejected junk when in fact nothing had ever been proposed to
+it — the guard had not run at all.
 Accept: filter.js, the approval gate, and the env scrub are re-expressed as
 registry guards with zero behavior change; an IN-2 injection scanner and an
 EG-2 secret scrub ship as the first new modules; every verdict lands in
-process events.
+process events; a point that inspected zero items is distinguishable from a
+point that inspected many and allowed them all.
 **Status: PLANNED** (design: the internal design record §4).
 
 **O18. The guard chain is a deployable boundary — group proxy with access
@@ -386,7 +417,20 @@ over rubric judgment; AGENT_RULES §Verification.*
 Accept: a mutating turn with a configured check runs baseline + per-step
 checks; a failing check blocks step completion until fixed or escalated (O12
 bounds apply); check results land in process events and in the review pass.
-**Status: PLANNED** (was the `[PROPOSED]` per-project check command sliver).
+**Status: SHIPPED (v1)** — `check_command` per-project setting (Overview
+card), granted through the SAME main-side confirmation as the O4 bypass
+(it is standing consent to run shell unprompted — a renderer message alone
+cannot install it). The baseline runs LAZILY, immediately before the
+turn's first mutation, so a question-only turn never pays for a slow suite
+while attribution is preserved (a pre-existing failure is labelled as not
+the model's). Gated on **all three paths**: per-step in execute.js (one
+bounded fix step on failure; fix steps re-check but never re-insert — no
+spiral; a step that ran the check itself last and successfully is not
+re-run), one post-parallel check covering sub-agent mutations the isolated
+traces hide, and one check on a mutating flat turn. A check still failing
+at turn end reaches synthesis as an incomplete step-result, anchors the
+O11 review as its first deterministic finding, sets the reply's honesty
+marker, and lands in the DEBT ledger. Smoke-covered.
 
 **O27. Findings are durable — the debt ledger.** Findings the ONE bounded
 O11 fix cycle leaves unfixed, and recurring evaluator findings, append to a
@@ -399,7 +443,12 @@ not chased.
 continuously"; AGENT_RULES meta-rule + §Scope.*
 Accept: an unfixed review finding appears in the tracker with its source
 turn; a repeat finding is flagged as a promotion candidate.
-**Status: PLANNED.**
+**Status: SHIPPED (v1)** — DEBT joins the O15 canonical set
+(project-docs.js appendDebt); review findings that consumed the fix cycle
+land as "fix attempted — unverified", unresolved check failures as
+"unresolved", drift findings as "drift scan"; a repeated key is flagged
+**REPEAT ×N — PROMOTE TO GATE**. Smoke-covered. Deferred: evaluator
+(stage L) findings feeding the ledger.
 
 **O28. Test integrity — stated rule, then action guardrail.** CODING_RULES
 gains the line: a failing test is never removed or weakened to reach green —
@@ -412,7 +461,9 @@ even under O4 bypass.
 edit tests" — feature ledger is append-only); AGENT_RULES §Verification.*
 Accept: DERIVE_PROMPT and the CODING MODE note carry the rule now; with
 guards live, a test-file edit inside a fix step prompts despite bypass.
-**Status: PLANNED** (rule text is a sliver; the guardrail rides O17).
+**Status: PARTIAL** — the rule text shipped in both places (TEST INTEGRITY
+in CODING_RULES; the runtime CODING MODE note; every check-gate fix prompt
+restates it). The EG-1 action guardrail rides O17. Smoke-covered.
 
 **O29. The repo speaks first — map + rulebook injection.** Pass 2 receives
 a depth-2 repo map so plans name real files, not imagined ones; and a
@@ -427,7 +478,12 @@ AGENT_RULES §Intent.*
 Accept: a plan against a real repo names only existing paths or
 explicitly-new ones; the rulebook shows in the assembled prompt;
 its token cost appears in the ledger.
-**Status: PLANNED** (was two `[PROPOSED]` slivers in PIPELINE_PSEUDOCODE).
+**Status: SHIPPED** — the depth-2 repo map already fed Pass 2; the
+rulebook half now ships: readRulebook (project-docs.js — AGENT_RULES.md ▸
+docs/AGENT_RULES.md ▸ AGENTS.md ▸ CLAUDE.md, first found) injected into
+the CODING MODE note (execution) and planContext under the PROJECT
+RULEBOOK banner (planning + refinement), with a `rulebook` process event.
+No rulebook = silent passthrough. Smoke-covered.
 
 **O30. Drift pass — backward-looking garbage collection.** Per-turn review
 (O11) sees one turn; drift is a cross-turn phenomenon and currently
@@ -443,7 +499,13 @@ AGENT_RULES §Scope.*
 Accept: a drift turn on a seeded repo yields tracker entries and a bounded
 fix commit; it never mutates outside the O4 permission gates; clean is a
 first-class outcome.
-**Status: PLANNED.**
+**Status: SHIPPED (v1)** — drift.js scans the ~8 most recently modified
+source files against the rulebook + canonical docs with a drift lens
+(doc-staleness findings filed against the doc names); findings → DEBT
+ledger; strictly READ-ONLY (fixes run as ordinary turns with ordinary
+gates — a stronger guarantee than the accept's "fix commit", which is
+deliberately left to the user). User-invoked: Overview → MAINTENANCE.
+Smoke-covered. Deferred: scheduling.
 
 **O31. The Librarian — the library organizes itself.** Documents pile up and
 sessions pile up; a flat list stops working around twenty items, and a growing
@@ -498,11 +560,11 @@ suggestions for stale sessions.
 | O23 | placement taxonomy + management | planned — `documents.js` placementPath property tokens; `repo.documents` verbs |
 | O24 | format/type split + deterministic render | shipped: html→pdf (`render-pdf.js` + `documents:toPdf`) + format targets v1 (ipc.js documents block + `plan-derive.js` FORMAT TARGET rule); planned: format rows, md target, schema migration |
 | O25 | widget library | planned — new `widgets.js` deterministic renderer (SVG + md degradations) |
-| O26 | framework check gate | planned — check command in project settings; baseline + per-step runs in `execute.js`/`chat-loop.js`; anchor feed to `review.js` |
-| O27 | debt ledger + promotion | planned — DEBT doc in `project-docs.js`; unfixed findings from `review.js` + `evaluator.js`; promote-to-gate surfacing |
-| O28 | test-integrity rule + guardrail | planned — rule line in `plan-derive.js` CODING_RULES + ipc.js CODING MODE note; EG-1 module rides O17 `guards.js` |
-| O29 | repo map + rulebook injection | planned — depth-2 map + rulebook read in `ipc.js` stage F/I; ledger event |
-| O30 | drift pass | planned — maintenance turn over SPEC/DESIGN + rulebook; findings → O27; fixes via ordinary plan machinery |
+| O26 | framework check gate | shipped: `runCheckCommand` (coding-tools.js) + `gateStep` (execute.js) + baseline/final wiring + Overview CHECK COMMAND card (ipc.js, renderer); smoke §O26 |
+| O27 | debt ledger + promotion | shipped: DEBT canonical doc + `appendDebt` repeat flagging (project-docs.js); review/check/drift findings wired in ipc.js; smoke §O27. Deferred: evaluator feed |
+| O28 | test-integrity rule + guardrail | partial: rule in `plan-derive.js` CODING_RULES + ipc.js CODING MODE note + fix prompts; EG-1 module rides O17 `guards.js` |
+| O29 | repo map + rulebook injection | shipped: `readRulebook` (project-docs.js) → CODING MODE note + `planContext` banner + process event; smoke §O29 |
+| O30 | drift pass | shipped: `drift.js` + `project:drift` IPC + Overview MAINTENANCE card; findings → O27; smoke §O30. Deferred: scheduling |
 | O31 | the Librarian — self-organizing library + sessions | shipped v1: `src/main/librarian.js` + tags/chat_tags/document_tags (db v20) + save-time/turn-end filing (`ipc.js`) + faceted views + tidy (renderer) |
 
 ---
