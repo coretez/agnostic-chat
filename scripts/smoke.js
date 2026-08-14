@@ -1671,6 +1671,32 @@ app.whenReady().then(async () => {
     assert(stopping.aborted === true, 'transport: a user STOP mid-stall aborts the turn rather than retrying');
   }
 
+  // PRECONDITION GATE: a skill whose declared tools are ALL unreachable cannot
+  // do its job. Measured 2026-08-14 — a dead Fluency connector (401, zero of
+  // nine tools resolving) still produced a formatted, filed, versioned monthly
+  // security report that was invented end to end, down to named individuals.
+  {
+    const { skillPreconditions } = require('../src/main/skill-content');
+    const skill = (fns) => ({ name: 's', definition: `---\nname: s\nmcp_functions:\n${fns.map((f) => `  - ${f}`).join('\n')}\n---\nbody` });
+    const connected = ['Fluency_Expo__list_cases', 'Fluency_Expo__summarize_case_metrics', 'other__ping'];
+
+    const dead = skillPreconditions(skill(['list_cases', 'summarize_case_metrics']), []);
+    assert(dead.unmet === true && dead.missing.length === 2, 'precondition: a skill with NO tools reachable is unmet');
+
+    const live = skillPreconditions(skill(['list_cases', 'summarize_case_metrics']), connected);
+    assert(live.unmet === false && live.resolved.length === 2, 'precondition: namespaced tools resolve by suffix match');
+
+    const partial = skillPreconditions(skill(['list_cases', 'gone_tool']), connected);
+    assert(partial.unmet === false && partial.missing[0] === 'gone_tool',
+      'precondition: PARTIAL resolution is a degraded run, not a refusal — only zero is the cliff');
+
+    const noDecl = skillPreconditions(skill([]), []);
+    assert(noDecl.unmet === false, 'precondition: a skill declaring no tools is never unmet (local-only skills still run)');
+    assert(skillPreconditions(null, connected).unmet === false, 'precondition: a missing skill row never throws');
+    assert(skillPreconditions({ name: 'x', definition: 'no frontmatter here' }, []).unmet === false,
+      'precondition: a skill without frontmatter declares nothing and is not blocked');
+  }
+
   // O27: the debt ledger — findings persist; a repeat is a promotion signal.
   {
     const p = repo.projects.create({ name: 'Debt Ledger' });

@@ -11,7 +11,7 @@ const { executePlan, executeStep, synthesize } = require('./execute');
 const { reviewChanges } = require('./review');
 const { derivePlan, refinePlan } = require('./plan-derive');
 const { VariableStore, SET_VARIABLE_TOOL } = require('./variables');
-const { enrichSkillRow, parseFrontmatter } = require('./skill-content');
+const { enrichSkillRow, parseFrontmatter, skillPreconditions } = require('./skill-content');
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
@@ -419,11 +419,55 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         // Jail check at READ time — an index row (whatever wrote it) must not
         // become a read primitive for arbitrary files the app can see.
         if (!documentPathAllowed(d.path)) return { error: 'Document path is outside the documents library / project directories.' };
+        // A PDF read as utf8 is mojibake — the viewer was showing `%PDF-1.4`
+        // and a screenful of replacement characters. Hand the renderer the
+        // BYTES so it can let Chromium render the document as a document.
+        const isPdf = /pdf/i.test(d.mime_type || '') || /\.pdf$/i.test(d.path);
+        if (isPdf) {
+          // Hand back the PATH, not the bytes. Chromium refuses a top-level
+          // navigation to a data:application/pdf URL (ERR_FAILED — measured),
+          // which is what drew the black rectangle. A file: URL renders the
+          // document properly. The path is jail-checked directly above, so the
+          // renderer only ever receives one inside the allowed roots.
+          return { pdfPath: d.path, mime: 'application/pdf', title: d.title, bytes: fs.statSync(d.path).size };
+        }
+        // Other binaries (spreadsheets, images, archives) have no in-app
+        // viewer yet. Say what they are rather than rendering their bytes.
+        if (/\.(xlsx?|docx?|pptx?|png|jpe?g|gif|zip|bin)$/i.test(d.path)) {
+          return { binary: true, mime: d.mime_type || 'application/octet-stream', title: d.title, path: d.path, bytes: fs.statSync(d.path).size };
+        }
         return { content: fs.readFileSync(d.path, 'utf8'), mime: d.mime_type || 'text/plain', title: d.title };
       }
       return { content: d.content || '', mime: d.mime_type || 'text/plain', title: d.title };
     } catch (e) { return { error: e.message }; }
   });
+  // Open a PDF in its own hardened window. Measured 2026-08-14: the artifact
+  // <webview> cannot render PDFs (a captured frame held 9 distinct colours —
+  // blank), a data:application/pdf URL is refused outright by Chromium
+  // (ERR_FAILED), and setting webPreferences.plugins BREAKS the load rather
+  // than enabling it. A top-level BrowserWindow on a file: URL renders the
+  // document properly (1693 distinct colours in the same measurement), which
+  // is what this does. Path is re-jailed here — the renderer passes an id,
+  // never a path, so this can never be aimed at an arbitrary file.
+  ipcMain.handle('documents:openPdf', (_e, { id }) => {
+    const d = repo.documents.get(id);
+    if (!d || !d.path) return { error: 'Document not found.' };
+    if (!documentPathAllowed(d.path)) return { error: 'Document path is outside the allowed directories.' };
+    try {
+      const fsx = require('node:fs');
+      if (!fsx.existsSync(d.path)) return { error: 'File is missing on disk.' };
+      const w = new BrowserWindow({
+        width: 900, height: 1100, title: d.title || 'Document',
+        webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false }
+      });
+      // A document window shows a document: no app navigation, no popups.
+      w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      w.webContents.on('will-navigate', (ev) => ev.preventDefault());
+      w.loadURL('file://' + encodeURI(d.path));
+      return { ok: true };
+    } catch (e) { return { error: e.message }; }
+  });
+
   // Bootstrap the canonical dev-doc set (docs/SPEC.md, DESIGN.md, PSEUDOCODE.md,
   // KNOWLEDGE.md) — idempotent; the renderer calls this when a project opens so
   // the DOCUMENTS tab always shows the project's documentation structure.
@@ -1525,7 +1569,35 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           }
           return files;
         };
-        if (scopedTools.length || loadedSkills.length) {
+        // ── PRECONDITION GATE: a selected skill with none of its declared
+        // tools reachable cannot do its job. Proceeding is not a degraded run,
+        // it is a fabricated one — measured 2026-08-14, a dead Fluency
+        // connector (401, zero of nine tools resolving) still produced a
+        // formatted, filed, versioned monthly security report that was
+        // invented end to end. Deterministic: no model call, no judgement,
+        // just "you named tools that do not exist here". Partial resolution is
+        // allowed; zero is the cliff.
+        const unmetSkills = loadedSkills
+          .map((s) => ({ name: s.name, ...skillPreconditions(s, toolset.tools.map((t) => t.name)) }))
+          .filter((p) => p.unmet);
+        if (unmetSkills.length) {
+          emitProgress({ type: 'process', kind: 'precondition-unmet', skills: unmetSkills.map((s) => ({ skill: s.name, declared: s.declared.length, missing: s.missing })) });
+          // Expressed as an O7 ALIGN outcome rather than a bespoke error: an
+          // unreachable data source IS a decision the user has to make, and
+          // align already ends the turn cleanly, renders a form, and records
+          // nothing. Synthetic — built here without a model call.
+          plan = {
+            simple: true, align: true, goal: '', steps: [], record: [], droppedRecords: [],
+            decisions: unmetSkills.map((s) => ({
+              question: `"${s.name}" needs ${s.declared.length} tool${s.declared.length === 1 ? '' : 's'} that this project cannot reach right now (${s.missing.slice(0, 4).join(', ')}${s.missing.length > 4 ? `, +${s.missing.length - 4} more` : ''}). How should I proceed?`,
+              options: [
+                'Reconnect the connector, then ask me again — the connector is probably disconnected or its authorization expired',
+                'Proceed anyway without live data — any figures would be unsourced'
+              ],
+              recommendation: 'Reconnect first. A report assembled without its sources looks finished and is fiction, which is worse than no report.'
+            }))
+          };
+        } else if (scopedTools.length || loadedSkills.length) {
           // Visible + bounded: planning on a thinking fast-model can take
           // minutes — narrate it (the rail/status shows "deriving plan…"
           // instead of silent bouncing balls), and cap it so a stalled

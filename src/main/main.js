@@ -61,6 +61,11 @@ function createWindow() {
     webPreferences.nodeIntegration = false;
     webPreferences.contextIsolation = true;
     webPreferences.sandbox = true;
+    // NOTE: do NOT set webPreferences.plugins here. It looks like the fix for
+    // a PDF showing black, and measurement says the opposite: with a file:
+    // URL, plugins:false renders the document (1693 distinct colours in a
+    // captured frame) and plugins:true fails the load outright with
+    // ERR_FAILED. The black screen was the data: URL, not the plugin flag.
   });
 
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));

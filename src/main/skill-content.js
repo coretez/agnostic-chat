@@ -96,4 +96,28 @@ function enrichSkillRow(row, allToolNames = []) {
   return out;
 }
 
-module.exports = { extractSkill, enrichSkillRow, parseFrontmatter };
+/**
+ * Does a skill have the tools it declares? A skill that names `mcp_functions`
+ * and resolves NONE of them cannot do its job, and proceeding anyway is not a
+ * degraded run — it is a fabricated one. Measured 2026-08-14: with the Fluency
+ * connector returning 401 and zero of nine declared tools resolving, a monthly
+ * security report was produced anyway — 54KB, correctly formatted, filed and
+ * versioned, and entirely invented, down to named individuals and MTTR to the
+ * minute. `enrichSkillRow` already computes this match and silently drops the
+ * result when nothing matches; this reports it instead.
+ * @returns {{declared:string[], resolved:string[], missing:string[], unmet:boolean}}
+ */
+function skillPreconditions(row, allToolNames = []) {
+  const { meta } = extractSkill(row && row.definition);
+  const declared = (Array.isArray(meta.mcp_functions) ? meta.mcp_functions : []).filter((f) => typeof f === 'string' && f.trim());
+  const has = (fn) => allToolNames.some((n) => n === fn || n.endsWith(`__${fn}`));
+  const resolved = declared.filter(has);
+  return {
+    declared, resolved,
+    missing: declared.filter((fn) => !has(fn)),
+    // Partial resolution is a degraded run and allowed. ZERO is the cliff.
+    unmet: declared.length > 0 && resolved.length === 0
+  };
+}
+
+module.exports = { extractSkill, enrichSkillRow, parseFrontmatter, skillPreconditions };

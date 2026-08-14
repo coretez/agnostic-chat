@@ -127,6 +127,7 @@ contextBridge.exposeInMainWorld('api', {
     remove: (id) => ipcRenderer.invoke('documents:remove', { id }),
     ensureCanonical: (projectId) => ipcRenderer.invoke('documents:ensureCanonical', { projectId }),
     read: (id) => ipcRenderer.invoke('documents:read', { id }),
+    openPdf: (id) => ipcRenderer.invoke('documents:openPdf', { id }),
     saveUpload: (input) => ipcRenderer.invoke('documents:saveUpload', input),
     toPdf: (id) => ipcRenderer.invoke('documents:toPdf', { id }),
     listFormats: (projectId) => ipcRenderer.invoke('documents:listFormats', { projectId }),

@@ -864,6 +864,30 @@ async function renderDocumentsPage() {
     view.onclick = async () => {
       const r = await window.api.documents.read(d.id);
       if (r && r.error) { g('doc-reader-title').textContent = d.title; g('doc-reader-body').textContent = r.error; g('doc-reader').hidden = false; return; }
+      // Render by TYPE, not by hoping everything is text. A PDF opens in the
+      // panel's PDF viewer; a spreadsheet or image says what it is and offers
+      // Finder. Only actual text falls through to the markdown reader.
+      // A PDF opens in its own window. The artifact <webview> cannot render
+      // PDFs (measured: a captured frame held 9 distinct colours — blank),
+      // which is what the black screen was.
+      if (r.pdfPath && /pdf/i.test(r.mime || '')) {
+        const o = await window.api.documents.openPdf(d.id);
+        if (o && o.error) {
+          g('doc-reader-title').textContent = d.title;
+          g('doc-reader-body').textContent = o.error;
+          g('doc-reader').hidden = false;
+        }
+        return;
+      }
+      if (r.binary) {
+        const kb = Math.max(1, Math.round((r.bytes || 0) / 1024));
+        g('doc-reader-title').textContent = `${d.title} · v${d.version || 1}`;
+        g('doc-reader-body').innerHTML = `<p><b>${escapeHtml(String(r.mime || 'binary file'))}</b> · ${kb} KB</p>`
+          + '<p>There is no in-app viewer for this type yet. Use FINDER to open it in the app that owns it.</p>';
+        g('doc-reader').hidden = false;
+        g('doc-reader').scrollIntoView({ block: 'nearest' });
+        return;
+      }
       if (/html/.test(r.mime || '')) { openArtifact(r.content, d.title); return; }
       g('doc-reader-title').textContent = `${d.title} · v${d.version || 1}`;
       g('doc-reader-body').innerHTML = mdToHtml(r.content || '(empty)', []);
@@ -1026,6 +1050,18 @@ async function setAllMcp(enabled) {
 }
 document.getElementById('ov-skills-all').onclick = () => setAllSkills(true);
 document.getElementById('ov-skills-none').onclick = () => setAllSkills(false);
+// The SKILLS page needs these too. They existed only on Overview, so anyone
+// managing skills where skills live had to toggle 30 of them one at a time.
+// Same handler; the list is re-rendered afterwards so the switches update.
+const setAllSkillsHere = async (enabled) => {
+  const msg = document.getElementById('skills-msg');
+  if (msg) { msg.textContent = enabled ? 'enabling all…' : 'disabling all…'; msg.className = 'test-result'; }
+  await setAllSkills(enabled);
+  await loadSkills();
+  if (msg) { msg.textContent = enabled ? 'all skills enabled for this project' : 'all skills disabled for this project'; setTimeout(() => { msg.textContent = ''; }, 2500); }
+};
+document.getElementById('skills-all').onclick = () => setAllSkillsHere(true);
+document.getElementById('skills-none').onclick = () => setAllSkillsHere(false);
 document.getElementById('ov-mcp-all').onclick = () => setAllMcp(true);
 document.getElementById('ov-mcp-none').onclick = () => setAllMcp(false);
 function chatModeOf(chat) {
@@ -2703,6 +2739,9 @@ const LEVELS = ['log', 'warn', 'error', 'debug'];
 function loadArtifact() {
   av.view.src = 'data:text/html;charset=utf-8,' + encodeURIComponent(artifactHtml);
 }
+// A PDF is a document, not a string. The panel's hardened <webview> hands the
+// bytes to Chromium's own PDF viewer — pagination, zoom and search for free,
+// no new dependency and no CSP change (frame-src already allows this panel).
 function openArtifact(html, title) {
   artifactHtml = html;
   av.title.textContent = title || 'REPORT';
