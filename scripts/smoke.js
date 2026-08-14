@@ -1606,10 +1606,21 @@ app.whenReady().then(async () => {
 
     // --- detection: what counts as a provider abort, and what must NOT ---
     assert(isProviderAbort(abortErr()), 'transport: an AbortError is a provider abort');
-    assert(isProviderAbort({ message: 'This operation was aborted' }), 'transport: the message form is detected when name is absent');
+    // CONTRACT CHANGED: prose is no longer consulted at all. A bare message
+    // with no name and no code is NOT a stall — the connector sets a code at
+    // the point the cause is known, so anything reaching here without one is
+    // an unknown failure and must surface, not be silently retried.
+    assert(!isProviderAbort({ message: 'This operation was aborted' }), 'transport: a bare message with no code is NOT classified — prose is not evidence');
     assert(!isProviderAbort(new Error('ENOENT: no such file')), 'transport: an ordinary error is NOT a provider abort');
     assert(!isProviderAbort(null) && !isProviderAbort(undefined), 'transport: null/undefined never crash the classifier');
-    assert(!isProviderAbort(new Error('the user aborted-ish thing')), 'transport: a hyphenated near-match does not count (word boundary)');
+    assert(!isProviderAbort(new Error('the user aborted-ish thing')), 'transport: prose is never consulted — a message containing "aborted" is not a stall');
+
+    // Structured codes, set where the cause is known, read by exact match.
+    const { CODES, providerError } = require('../src/main/providers/errors');
+    assert(isProviderAbort(providerError(CODES.PROVIDER_TIMEOUT, 'Request timed out after 300s')), 'transport: PROVIDER_TIMEOUT is a stall');
+    assert(isProviderAbort(providerError(CODES.STREAM_STALLED, 'stream stalled (no data)')), 'transport: STREAM_STALLED is a stall');
+    assert(!isProviderAbort(providerError(CODES.USER_ABORT, 'stopped by user')), 'transport: USER_ABORT is the user stopping, NOT a stall to retry');
+    assert(!isProviderAbort(providerError('SOMETHING_ELSE', 'This operation was aborted')), 'transport: a non-timeout code wins over any wording in the message');
 
     // --- a non-abort error must still propagate, not be swallowed as a stall ---
     let threw = null;

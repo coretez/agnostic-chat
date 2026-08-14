@@ -1,5 +1,7 @@
 'use strict';
 
+const { CODES, providerError } = require('./errors');
+
 // Connector for the Anthropic (Claude) Messages API. Differs from OpenAI:
 // auth via x-api-key + anthropic-version, system prompt is top-level (not a
 // message), and max_tokens is required. Main-process only.
@@ -42,7 +44,12 @@ async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }
     }
     return json;
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : `Request timed out after ${timeoutMs / 1000}s`);
+    if (err.name === 'AbortError') {
+      // The cause is known HERE — carry it as a code, not a sentence.
+      throw signal && signal.aborted
+        ? providerError(CODES.USER_ABORT, 'stopped by user')
+        : providerError(CODES.PROVIDER_TIMEOUT, `Request timed out after ${timeoutMs / 1000}s`);
+    }
     throw err;
   } finally {
     clearTimeout(t);
@@ -94,7 +101,11 @@ async function streamAnthropic(base, key, body, onDelta, signal, onRetry) {
           signal: ctrl.signal
         });
       } catch (e) {
-        if (e.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : 'stream stalled (no data)');
+        if (e.name === 'AbortError') {
+          throw signal && signal.aborted
+            ? providerError(CODES.USER_ABORT, 'stopped by user')
+            : providerError(CODES.STREAM_STALLED, 'stream stalled (no data)');
+        }
         const err = new Error(`stream connect failed: ${e.message}`);
         err.retryable = true;
         throw err;

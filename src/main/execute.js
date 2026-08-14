@@ -13,6 +13,7 @@
 const { filterToolResult } = require('./filter');
 const { SET_VARIABLE_TOOL } = require('./variables');
 const { didMutate, MUTATING_TOOLS } = require('./coding-tools');
+const { CODES, isTimeoutCode } = require('./providers/errors');
 
 const DEFAULT_STEP_BUDGET = 8;   // inner model↔tools iterations before a step is "stuck"
 const REPLAN_BUDGET = 3;         // auto re-plans of a stuck step's tail before escalating (decision #1)
@@ -29,17 +30,24 @@ const STEP_WRAP_PROMPT =
 // surfaced, not chased.
 
 /**
- * A connector-side abort (idle timeout), as opposed to the user pressing STOP.
- * Detection is deliberately NARROW. A first cut matched any message containing
- * the word "aborted", which also swallows unrelated failures — those would be
- * silently retried twice and then reported as a stuck step instead of surfacing
- * as the errors they are. An AbortController rejection is identifiable by name
- * or code; the message form is accepted only in its exact DOMException wording.
+ * A connector-side stall (idle timeout), as opposed to the user pressing STOP.
+ *
+ * Classified from a CODE, never from wording. The connectors set the code
+ * where the cause is actually known; a first cut instead flattened that state
+ * into a sentence and matched it back with /\baborted\b/i, which also caught
+ * unrelated failures and silently retried them. An error arriving here with no
+ * code and no AbortController signature is an UNKNOWN failure — it surfaces.
  */
 function isProviderAbort(e) {
   if (!e) return false;
-  if (e.name === 'AbortError' || e.code === 'ABORT_ERR' || e.code === 20) return true;
-  return /^this operation was aborted\.?$/i.test(String(e.message || '').trim());
+  // Read the CODE the connector set. The cause is known where it happens;
+  // matching English here was a lossy round-trip that also swallowed
+  // unrelated failures whose text merely contained "aborted".
+  if (isTimeoutCode(e.code)) return true;
+  if (e.code === CODES.USER_ABORT) return false;      // the user stopped — not a stall
+  // Raw AbortController rejections that never passed through a connector
+  // (e.g. a tool's own fetch). Still structural — name/code, never message.
+  return e.name === 'AbortError' || e.code === 'ABORT_ERR' || e.code === 20;
 }
 
 // The step already proved it: its LAST mutating action was the check command

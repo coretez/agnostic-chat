@@ -1,5 +1,7 @@
 'use strict';
 
+const { CODES, providerError } = require('./errors');
+
 // Connector for OpenAI-compatible APIs (OpenAI, Qwen/DashScope, Kimi/Moonshot,
 // Gemini's OpenAI-compat endpoint). All speak /chat/completions and /models with
 // a Bearer key. Runs in the MAIN process only — the key never reaches the renderer.
@@ -41,7 +43,12 @@ async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }
   } catch (err) {
     // Distinguish the user's STOP from a genuine timeout — same AbortError,
     // very different meaning.
-    if (err.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : `Request timed out after ${timeoutMs / 1000}s`);
+    if (err.name === 'AbortError') {
+      // The cause is known HERE — carry it as a code, not a sentence.
+      throw signal && signal.aborted
+        ? providerError(CODES.USER_ABORT, 'stopped by user')
+        : providerError(CODES.PROVIDER_TIMEOUT, `Request timed out after ${timeoutMs / 1000}s`);
+    }
     throw err;
   } finally {
     clearTimeout(t);
@@ -140,7 +147,11 @@ async function streamChat(base, key, body, onDelta, signal, onRetry) {
           signal: ctrl.signal
         });
       } catch (e) {
-        if (e.name === 'AbortError') throw new Error(signal && signal.aborted ? 'stopped by user' : 'stream stalled (no data)');
+        if (e.name === 'AbortError') {
+          throw signal && signal.aborted
+            ? providerError(CODES.USER_ABORT, 'stopped by user')
+            : providerError(CODES.STREAM_STALLED, 'stream stalled (no data)');
+        }
         const err = new Error(`stream connect failed: ${e.message}`);
         err.retryable = true; // transient network failure, nothing sent to the UI yet
         throw err;
