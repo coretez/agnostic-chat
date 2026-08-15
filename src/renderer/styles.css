@@ -680,3 +680,14 @@ html.busy, html.busy * { cursor: progress !important; }
 .libclear:hover{color:var(--ink)}
 
 @media (max-width:900px){ .libgrid{grid-template-columns:1fr} .libfacets{position:static} }
+
+/* ── Documents sub-tabs: two libraries, one at a time ─────────────────────── */
+.doctabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:14px 0 14px}
+.doctab{display:inline-flex;align-items:center;gap:7px;background:none;border:0;cursor:pointer;
+        padding:8px 14px;margin-bottom:-1px;border-bottom:2px solid transparent;
+        color:var(--ink3);font:600 10px var(--mono);letter-spacing:.14em;text-transform:uppercase}
+.doctab:hover{color:var(--ink2)}
+.doctab--on{color:var(--ink);border-bottom-color:var(--brand)}
+.doctab__n{font:500 10px var(--mono);color:var(--ink3);background:var(--raise);
+           border-radius:99px;padding:1px 6px;letter-spacing:0}
+.doctab--on .doctab__n{color:var(--brand);background:var(--brand-soft)}

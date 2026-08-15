@@ -399,25 +399,37 @@
                 <button class="btn btn--ghost btn--sm" id="docs-tidy" type="button" title="Librarian pass: tag untagged documents and summarize unfiled sessions — tags only, nothing moves on disk">✦ TIDY LIBRARY</button>
                 <button class="btn btn--ghost btn--sm" id="docs-reveal" type="button">⤴ OPEN FOLDER</button>
               </div>
-              <div class="docsec">PROJECT DOCUMENTATION</div>
-              <ul class="connlist" id="docs-canonical"></ul>
-              <div class="docsec docsec--row">GENERATED &amp; UPLOADED
-                <span class="spacer"></span>
-                <span class="libview" id="library-view">
-                  <button class="libview__btn libview__btn--on" data-view="recency" type="button">RECENCY</button>
-                  <button class="libview__btn" data-view="kind" type="button">KIND</button>
-                  <button class="libview__btn" data-view="entity" type="button">ENTITY</button>
-                  <button class="libview__btn" data-view="topic" type="button">TOPIC</button>
-                </span>
+              <!-- Two different libraries with two different jobs: the docs the
+                   planner reads, and the things this project produced. Shown one
+                   at a time — nobody needs both in view at once. -->
+              <div class="doctabs" id="doc-tabs">
+                <button class="doctab doctab--on" data-doctab="canonical" type="button">PROJECT DOCUMENTATION<span class="doctab__n" id="doctab-n-canonical"></span></button>
+                <button class="doctab" data-doctab="library" type="button">GENERATED &amp; UPLOADED<span class="doctab__n" id="doctab-n-library"></span></button>
               </div>
-              <div class="libfilter" id="library-filter" hidden></div>
-              <!-- Faceted browse: rail of combinable dimensions + the result list. -->
-              <div class="libgrid">
-                <aside class="libfacets" id="library-facets"></aside>
-                <div class="liblist">
-                  <div class="libchips" id="library-chips" hidden></div>
-                  <ul class="connlist" id="docs-other"></ul>
-                  <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
+
+              <div class="docpane" data-doctab="canonical">
+                <ul class="connlist" id="docs-canonical"></ul>
+              </div>
+
+              <div class="docpane" data-doctab="library" hidden>
+                <div class="docsec docsec--row">
+                  <span class="spacer"></span>
+                  <span class="libview" id="library-view">
+                    <button class="libview__btn libview__btn--on" data-view="recency" type="button">RECENCY</button>
+                    <button class="libview__btn" data-view="kind" type="button">KIND</button>
+                    <button class="libview__btn" data-view="entity" type="button">ENTITY</button>
+                    <button class="libview__btn" data-view="topic" type="button">TOPIC</button>
+                  </span>
+                </div>
+                <div class="libfilter" id="library-filter" hidden></div>
+                <!-- Faceted browse: rail of combinable dimensions + the result list. -->
+                <div class="libgrid">
+                  <aside class="libfacets" id="library-facets"></aside>
+                  <div class="liblist">
+                    <div class="libchips" id="library-chips" hidden></div>
+                    <ul class="connlist" id="docs-other"></ul>
+                    <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
+                  </div>
                 </div>
               </div>
               <div class="docreader" id="doc-reader" hidden>

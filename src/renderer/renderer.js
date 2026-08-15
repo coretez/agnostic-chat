@@ -797,6 +797,21 @@ const DOC_CANON = [
 state.libraryView = 'recency';
 state.libraryTag = null;   // `${facet}:${slug}` — kept so session filtering still works
 
+// Two libraries answering two different questions: "what does the planner
+// read?" and "what has this project produced?". They are never consulted
+// together, so showing both at once only costs the reader the scroll.
+state.docTab = 'canonical';
+function setDocTab(tab) {
+  state.docTab = tab;
+  for (const p of document.querySelectorAll('.docpane')) p.hidden = p.dataset.doctab !== tab;
+  for (const b of document.querySelectorAll('.doctab')) b.classList.toggle('doctab--on', b.dataset.doctab === tab);
+}
+function setDocTabCount(tab, n) {
+  const el = document.getElementById(`doctab-n-${tab}`);
+  if (el) el.textContent = String(n);
+}
+document.querySelectorAll('.doctab').forEach((b) => { b.onclick = () => setDocTab(b.dataset.doctab); });
+
 // ── Faceted navigation (DESIGN_SPEC §15) ────────────────────────────────────
 // A single active tag is a FILTER. Facets are multi-dimensional and combinable
 // (AND across dimensions, OR within one), and every value carries a count
@@ -981,13 +996,17 @@ async function renderDocumentsPage() {
   };
 
   // Canonical docs in their designed order, with their role as the subtitle.
+  let canonCount = 0;
   for (const c of DOC_CANON) {
     const d = state.documents.find((x) => x.doc_type === c.type);
-    if (d) canonUl.appendChild(row(d, c.sub));
+    if (d) { canonUl.appendChild(row(d, c.sub)); canonCount += 1; }
   }
+  setDocTabCount('canonical', canonCount);
   // Everything else: deliverables, uploads, user docs — filtered by the
   // selected tag, then organized per the current view.
   const pool = state.documents.filter((d) => !canonTypes.has(d.doc_type));
+  setDocTabCount('library', pool.length);
+  setDocTab(state.docTab);
   renderFacetRail(pool);
   renderFacetChips(pool);
   const others = pool.filter((d) => matchesFacets(d));

@@ -464,6 +464,20 @@ unreviewed deliverable, a superseded document still referenced), and only then
 recent items. Recency drops to a section — it is a genuine answer to one
 question, not the organising principle.
 
+### 15.4b Two libraries, one at a time
+The DOCUMENTS page holds two collections that answer different questions:
+**PROJECT DOCUMENTATION** — the canonical set the planner itself reads
+(OBJECTIVES, DESIGN, DEBT, CODING RULES) — and **GENERATED & UPLOADED**, what
+this project has produced or been given. They are never consulted together:
+one is the standing contract, the other is output. Stacking them charged the
+reader a scroll past four fixed rows to reach the list that actually changes,
+and put the facet rail — which only ever applies to the second — alongside the
+first, where it means nothing. They are therefore **tabs**, each carrying its
+count so the shape of both is legible without switching. Canonical opens first:
+it is the smaller, fixed set, and it is what a reader arriving cold needs to
+orient. The chosen tab survives a re-render, so a document saved mid-session
+does not throw the reader back to the default.
+
 ### 15.5 Two view modes, chosen by content
 List for browsing; **timeline** for periodic content, where the x-axis is the
 period and the eye reads coverage and gaps directly. Time-oriented and
