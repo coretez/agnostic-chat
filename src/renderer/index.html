@@ -411,8 +411,15 @@
                 </span>
               </div>
               <div class="libfilter" id="library-filter" hidden></div>
-              <ul class="connlist" id="docs-other"></ul>
-              <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
+              <!-- Faceted browse: rail of combinable dimensions + the result list. -->
+              <div class="libgrid">
+                <aside class="libfacets" id="library-facets"></aside>
+                <div class="liblist">
+                  <div class="libchips" id="library-chips" hidden></div>
+                  <ul class="connlist" id="docs-other"></ul>
+                  <div class="mscreen__empty" id="docs-other-empty" hidden>Nothing yet — generated reports, exports, and uploads land here.</div>
+                </div>
+              </div>
               <div class="docreader" id="doc-reader" hidden>
                 <div class="docreader__bar"><span class="docreader__title" id="doc-reader-title"></span><span class="spacer"></span><button class="btn btn--ghost btn--sm" id="doc-reader-close" type="button">CLOSE</button></div>
                 <div class="docreader__body" id="doc-reader-body"></div>

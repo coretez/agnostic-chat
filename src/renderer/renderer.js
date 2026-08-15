@@ -795,7 +795,84 @@ const DOC_CANON = [
 // the same documents, pivoted, because no single organization fits every
 // retrieval ("last week's work" vs "everything about acme").
 state.libraryView = 'recency';
-state.libraryTag = null;   // `${facet}:${slug}` filter, or null
+state.libraryTag = null;   // `${facet}:${slug}` — kept so session filtering still works
+
+// ── Faceted navigation (DESIGN_SPEC §15) ────────────────────────────────────
+// A single active tag is a FILTER. Facets are multi-dimensional and combinable
+// (AND across dimensions, OR within one), and every value carries a count
+// computed against the OTHER dimensions' selections — so the shape of the
+// library is legible before you click, and a path to zero results is dimmed
+// rather than offered.
+state.facets = { kind: new Set(), tenant: new Set(), produced: new Set(), topic: new Set() };
+
+const FACET_DIMS = [
+  { key: 'kind', label: 'Kind' },
+  { key: 'tenant', label: 'Tenant' },
+  { key: 'produced', label: 'Produced' },
+  { key: 'topic', label: 'Topic' }
+];
+// Relative windows, not calendar quarters: people ask for "last 30 days", and
+// "2026-Q2" only means something if you already know today's date.
+const PRODUCED_BUCKETS = [
+  { key: 'last 7 days', days: 7 },
+  { key: 'last 30 days', days: 30 },
+  { key: 'last 90 days', days: 90 },
+  { key: 'this year', days: 365 },
+  { key: 'older', days: Infinity }
+];
+
+/** Tenant, tolerating the key drift save_document's own schema invites. */
+const docTenant = (d) => {
+  const p = d.properties || {};
+  return p.tenant || p.customer || p.company || null;
+};
+const producedBucket = (d) => {
+  const t = Date.parse(d.created_at || d.updated_at || '');
+  if (!Number.isFinite(t)) return null;
+  const days = (Date.now() - t) / 86400000;
+  return (PRODUCED_BUCKETS.find((b) => days <= b.days) || PRODUCED_BUCKETS[PRODUCED_BUCKETS.length - 1]).key;
+};
+/** Every value a document carries in one dimension (a doc can hold several topics). */
+function facetValues(d, dim) {
+  if (dim === 'kind') return [d.doc_type || d.source || 'other'];
+  if (dim === 'tenant') return [docTenant(d)].filter(Boolean);
+  if (dim === 'produced') return [producedBucket(d)].filter(Boolean);
+  return (d.tags || []).filter((t) => t.facet === 'topic' || t.facet === 'entity').map((t) => t.name);
+}
+/** AND across dimensions, OR within one. `skip` leaves a dimension unapplied so
+ *  its own counts show what selecting each value WOULD yield. */
+function matchesFacets(d, skip) {
+  return FACET_DIMS.every(({ key }) => {
+    const sel = state.facets[key];
+    if (key === skip || !sel.size) return true;
+    return facetValues(d, key).some((v) => sel.has(v));
+  });
+}
+function facetCounts(docs, dim) {
+  const counts = new Map();
+  for (const d of docs.filter((x) => matchesFacets(x, dim))) {
+    for (const v of facetValues(d, dim)) counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  // Values already selected must stay visible even at zero, or they cannot be undone.
+  for (const v of state.facets[dim]) if (!counts.has(v)) counts.set(v, 0);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+}
+function toggleFacet(dim, value) {
+  const sel = state.facets[dim];
+  sel.has(value) ? sel.delete(value) : sel.add(value);
+  // Sessions filter alongside documents on a shared topic/entity (O31).
+  if (dim === 'topic') {
+    const t = (state.libraryTags || []).find((x) => x.name === value && (x.facet === 'topic' || x.facet === 'entity'));
+    state.libraryTag = (t && sel.has(value)) ? `${t.facet}:${t.slug}` : null;
+    renderChats();
+  }
+  renderDocumentsPage();
+}
+const clearFacets = () => {
+  for (const { key } of FACET_DIMS) state.facets[key].clear();
+  state.libraryTag = null;
+  renderDocumentsPage(); renderChats();
+};
 
 function tagChips(tags, { onClick } = {}) {
   const wrap = document.createElement('span');
@@ -910,8 +987,10 @@ async function renderDocumentsPage() {
   }
   // Everything else: deliverables, uploads, user docs — filtered by the
   // selected tag, then organized per the current view.
-  let others = state.documents.filter((d) => !canonTypes.has(d.doc_type));
-  if (state.libraryTag) others = others.filter((d) => hasTag(d, state.libraryTag));
+  const pool = state.documents.filter((d) => !canonTypes.has(d.doc_type));
+  renderFacetRail(pool);
+  renderFacetChips(pool);
+  const others = pool.filter((d) => matchesFacets(d));
   g('docs-other-empty').hidden = others.length > 0;
 
   const groupHeader = (label) => {
@@ -946,6 +1025,64 @@ async function renderDocumentsPage() {
     }
   }
 }
+/** The facet rail: every dimension, every value, with live counts. */
+function renderFacetRail(pool) {
+  const rail = document.getElementById('library-facets');
+  if (!rail) return;
+  rail.innerHTML = '';
+  for (const { key, label } of FACET_DIMS) {
+    const values = facetCounts(pool, key);
+    if (!values.length) continue;
+    const box = document.createElement('div'); box.className = 'facet';
+    const head = document.createElement('div'); head.className = 'facet__h';
+    head.innerHTML = `<span class="facet__lbl">${escapeHtml(label)}</span>`;
+    if (state.facets[key].size) {
+      const clr = document.createElement('button');
+      clr.type = 'button'; clr.className = 'facet__clr'; clr.textContent = 'clear';
+      clr.onclick = () => { state.facets[key].clear(); if (key === 'topic') { state.libraryTag = null; renderChats(); } renderDocumentsPage(); };
+      head.appendChild(clr);
+    }
+    box.appendChild(head);
+    for (const [value, n] of values) {
+      const on = state.facets[key].has(value);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'fv' + (on ? ' fv--on' : '') + (!n && !on ? ' fv--zero' : '');
+      b.innerHTML = `<i class="fv__box"></i><span class="fv__v">${escapeHtml(String(value))}</span><span class="fv__n">${n}</span>`;
+      b.title = `${label}: ${value} — ${n} document${n === 1 ? '' : 's'}`;
+      b.onclick = () => toggleFacet(key, value);
+      box.appendChild(b);
+    }
+    rail.appendChild(box);
+  }
+}
+
+/** Active selections as removable chips, plus the honest "N of M". */
+function renderFacetChips(pool) {
+  const bar = document.getElementById('library-chips');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const active = FACET_DIMS.flatMap(({ key }) => [...state.facets[key]].map((v) => ({ key, v })));
+  bar.hidden = !active.length;
+  for (const { key, v } of active) {
+    const c = document.createElement('button');
+    c.type = 'button'; c.className = 'libchip';
+    c.innerHTML = `${escapeHtml(key)}: ${escapeHtml(String(v))} <span class="libchip__x">×</span>`;
+    c.onclick = () => toggleFacet(key, v);
+    bar.appendChild(c);
+  }
+  if (active.length) {
+    const n = pool.filter((d) => matchesFacets(d)).length;
+    const count = document.createElement('span');
+    count.className = 'libcount'; count.textContent = `${n} of ${pool.length} documents`;
+    bar.appendChild(count);
+    const clr = document.createElement('button');
+    clr.type = 'button'; clr.className = 'libclear'; clr.textContent = 'clear all';
+    clr.onclick = clearFacets;
+    bar.appendChild(clr);
+  }
+}
+
 // View switcher — one active button, re-render on change.
 document.querySelectorAll('#library-view .libview__btn').forEach((b) => {
   b.onclick = () => {

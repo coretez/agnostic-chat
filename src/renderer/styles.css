@@ -646,3 +646,37 @@ html.busy, html.busy * { cursor: progress !important; }
 .palette__item { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 4px; cursor: pointer; font-size: 12.5px; }
 .palette__item:hover, .palette__item.is-active { background: var(--brand-soft); }
 .palette__item .meta { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink3); }
+
+/* ── Faceted library browse (DESIGN_SPEC §15) ─────────────────────────────── */
+.libgrid{display:grid;grid-template-columns:200px 1fr;gap:18px;align-items:start}
+.libfacets{position:sticky;top:8px}
+.liblist{min-width:0}
+
+.facet{margin:0 0 16px}
+.facet__h{display:flex;align-items:center;margin:0 0 5px}
+.facet__lbl{font:600 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)}
+.facet__clr{margin-left:auto;background:none;border:0;cursor:pointer;color:var(--brand);font:10px var(--mono)}
+
+.fv{display:flex;align-items:center;gap:8px;width:100%;padding:4px 8px;border:0;border-radius:4px;
+    background:none;cursor:pointer;color:var(--ink2);font:12px var(--font);text-align:left}
+.fv:hover{background:var(--hov)}
+.fv--on{background:var(--sel);color:var(--ink);box-shadow:inset 2px 0 0 var(--brand)}
+/* Dimmed, not hidden: a zero-count value is visible context, never an offered path. */
+.fv--zero{opacity:.34}
+.fv__box{width:11px;height:11px;flex:none;border:1px solid var(--line);border-radius:2px;background:var(--raise)}
+.fv--on .fv__box{background:var(--brand-deep);border-color:var(--brand-deep)}
+.fv__v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fv__n{margin-left:auto;font:500 11px var(--mono);color:var(--ink3)}
+.fv--on .fv__n{color:var(--brand)}
+
+.libchips{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px}
+.libchip{display:inline-flex;align-items:center;gap:6px;background:var(--brand-soft);border:1px solid var(--brand-deep);
+         color:var(--brand);border-radius:99px;padding:3px 9px;cursor:pointer;
+         font:600 10px var(--mono);letter-spacing:.06em}
+.libchip__x{color:var(--ink3)}
+.libcount{font:11px var(--mono);color:var(--ink3);margin-left:4px}
+.libclear{margin-left:auto;background:none;border:0;cursor:pointer;color:var(--ink3);font:10px var(--mono);
+          letter-spacing:.1em;text-transform:uppercase}
+.libclear:hover{color:var(--ink)}
+
+@media (max-width:900px){ .libgrid{grid-template-columns:1fr} .libfacets{position:static} }
