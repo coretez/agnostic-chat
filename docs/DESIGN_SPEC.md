@@ -472,7 +472,47 @@ and a periodic series is the case that most rewards it. No thumbnail grid —
 these are reports, not images, and a wall of identical page-one previews
 carries no information.
 
-### 15.6 What this does not do
+### 15.6 Where the metadata comes from — the user mostly does not type it
+Facets are worthless if someone has to hand-tag 42 documents, so the honest
+answer to "how does `kind: monthly-report` get set" is **three sources, and the
+user is the last of them**:
+
+1. **The skill's save contract — the bulk, and zero user input.** A skill
+   declares its output shape once, in frontmatter, and every run fills it:
+   `expo-monthly-report` carries `type: monthly-report`,
+   `properties: {tenant: expo, period: "{YYYY-MM}"}`. The July run produced
+   `{"tenant":"expo","period":"2026-07"}` from exactly that. Whoever writes the
+   skill sets the metadata for every document it will ever produce.
+2. **The librarian (O31) fills the gaps** — a dropped-in PDF or an ad-hoc save
+   has no contract, so it gets tagged on save under deterministic validation
+   (known facets, slug dedupe, existing spellings win).
+3. **The user corrects** — in the reader, on a document that is wrong. Not
+   built (O31 lists it as an extension) and it is genuinely needed: today a
+   mis-tag is permanent. Correction is the workflow, authoring is not.
+
+**Typed `kind:monthly-report` is an accelerator, not the entry path.** The
+search box should parse `key:value` into the same facet state a click produces,
+because people who know the vocabulary type faster than they click — but
+nobody should have to learn a query language to browse, and the rail must
+always be able to answer the question on its own.
+
+**The gap this exposes: `properties` is free-form.** The tool schema invites
+drift in its own description — *"tenant/company, period/date… whatever
+applies"* — so two skills will name the same concept `tenant` and `customer`,
+and the facet rail will show both as separate dimensions. Values should stay
+open (any tenant name), but **keys need a controlled vocabulary**: `tenant`,
+`period`, `case_id`, `framework`, with unknown keys kept on the document and
+excluded from the facet rail until promoted. Same shape as the O8 durable-key
+allowlist, and for the same reason — an open key space fills with synonyms.
+
+**One honest correction to §15.4:** the mockup shows a `status` facet
+(reviewed / unreviewed / superseded). *Nothing sets that today* — I invented it
+for the design. It needs a real source before it ships: `superseded` is
+derivable (a newer version or period exists), `unreviewed` could be "never
+opened", and if neither is convincing the facet should be dropped rather than
+faked.
+
+### 15.7 What this does not do
 No folder tree in the UI. Placement (O23) organises the *disk* so files are
 portable and greppable; the interface navigates by facet, and a tree in both
 places means two organisations to keep in sync and a user asking which one is
