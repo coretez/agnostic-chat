@@ -472,7 +472,40 @@ and a periodic series is the case that most rewards it. No thumbnail grid —
 these are reports, not images, and a wall of identical page-one previews
 carries no information.
 
-### 15.6 Where the metadata comes from — the user mostly does not type it
+### 15.5b Two different times, and only one of them is a facet
+The first cut showed a Period facet listing `2026-Q3 · 2026-Q2 · 2026-Q1 ·
+2025`, which conflated two unrelated things:
+
+- **What the document is ABOUT** — the July report covers July. This is
+  intrinsic, comes from the save contract, and is *already drawn better by the
+  series strip*, one cell per period, in the series' own cadence. It does not
+  need to be a facet at all; the strip shows coverage and gaps, which a list of
+  quarter buckets cannot.
+- **When it was PRODUCED** — this is what browsing actually wants, and people
+  do not ask for it in quarters. They ask for **last 7 days · last 30 · last
+  90 · this year · older**. Calendar quarters are a *reporting* convention
+  borrowed into navigation, where they fit badly: "2026-Q2" requires knowing
+  today's date to be useful, "last 30 days" does not.
+
+So: the strip owns *about*, a relative-window facet owns *made*. A quarterly
+artifact still shows quarters — in its own strip, because that is its cadence,
+not because the library imposes quarters on everything.
+
+### 15.6 No status facet — it implies a process that does not exist
+The first cut showed `reviewed / unreviewed / superseded`. Nothing sets those,
+and more importantly nothing *could* without inventing a review workflow this
+product does not have and has not asked for. A facet that describes a process
+nobody performs is worse than no facet: it invites the user to filter by a
+state that never changes.
+
+What remains real is **attention**, and it is derived from facts rather than a
+taxonomy — a routine that did not run, a document whose figures carry no as-of
+time. Those come from the run record and from provenance (O21), both of which
+are actual signals, not labels somebody was supposed to maintain.
+`superseded` is likewise derivable if it is ever wanted — a newer version or
+period exists — and should be computed, never stored as a status.
+
+### 15.7 Where the metadata comes from — the user mostly does not type it
 Facets are worthless if someone has to hand-tag 42 documents, so the honest
 answer to "how does `kind: monthly-report` get set" is **three sources, and the
 user is the last of them**:
@@ -505,14 +538,7 @@ open (any tenant name), but **keys need a controlled vocabulary**: `tenant`,
 excluded from the facet rail until promoted. Same shape as the O8 durable-key
 allowlist, and for the same reason — an open key space fills with synonyms.
 
-**One honest correction to §15.4:** the mockup shows a `status` facet
-(reviewed / unreviewed / superseded). *Nothing sets that today* — I invented it
-for the design. It needs a real source before it ships: `superseded` is
-derivable (a newer version or period exists), `unreviewed` could be "never
-opened", and if neither is convincing the facet should be dropped rather than
-faked.
-
-### 15.7 What this does not do
+### 15.8 What this does not do
 No folder tree in the UI. Placement (O23) organises the *disk* so files are
 portable and greppable; the interface navigates by facet, and a tree in both
 places means two organisations to keep in sync and a user asking which one is
