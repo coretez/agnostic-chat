@@ -691,3 +691,16 @@ html.busy, html.busy * { cursor: progress !important; }
 .doctab__n{font:500 10px var(--mono);color:var(--ink3);background:var(--raise);
            border-radius:99px;padding:1px 6px;letter-spacing:0}
 .doctab--on .doctab__n{color:var(--brand);background:var(--brand-soft)}
+
+/* ── Archive: a place items go, not a disappearance ───────────────────────── */
+.archive-btn{background:none;border:0;cursor:pointer;padding:0 6px;color:var(--ink3);
+             font-family:var(--mono);font-size:8.5px;letter-spacing:1.1px}
+.archive-btn:hover{color:var(--brand)}
+.archive-btn.is-on{color:var(--brand)}
+.list__item--arch{color:var(--ink2)}
+.list__item--arch .title{text-decoration:none}
+/* Restore reads as the way back; delete stays quiet until hovered, so the
+   destructive control is never the eye-catching one. */
+.rowbtn--restore:hover{color:var(--brand)}
+.rowbtn--danger:hover{color:var(--danger)}
+.list__empty{padding:6px 12px;color:var(--ink3);font-family:var(--mono);font-size:10px;line-height:1.5}

@@ -29,6 +29,22 @@ const librarian = require('./librarian');
 const COST_OUTLIER_FACTOR = 3;
 const MIN_COST_HISTORY = 5;
 
+/**
+ * Confirm an irreversible delete, main-side. Destroy-confirmations belong on
+ * the same wall as `coding_bypass` and `check_command`: the renderer asks, the
+ * user answers in a dialog the page cannot draw, style, or click for them.
+ * Cancel is the default button, so a stray Return keeps the data.
+ * @returns {Promise<boolean>} true only on an explicit Delete.
+ */
+async function confirmDelete({ message, detail }) {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  const r = await dialog.showMessageBox(win, {
+    type: 'warning', buttons: ['Delete permanently', 'Cancel'], defaultId: 1, cancelId: 1,
+    message, detail
+  });
+  return r.response === 0;
+}
+
 /** Median of a numeric list, or 0 when there is not enough history to judge. */
 function medianOf(values) {
   const v = values.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
@@ -323,6 +339,26 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   ipcMain.handle('projects:create', (_e, input) => repo.projects.create(input));
   ipcMain.handle('projects:rename', (_e, { id, name }) => repo.projects.rename(id, name));
   ipcMain.handle('projects:archive', (_e, { id }) => repo.projects.archive(id));
+  ipcMain.handle('projects:unarchive', (_e, { id }) => repo.projects.unarchive(id));
+  ipcMain.handle('projects:listArchived', () => repo.projects.listArchived());
+  // Deleting a project cascades across chats, messages, documents, tags,
+  // agents, settings and credentials. Confirmed main-side with the real
+  // counts, and explicit that files on disk are NOT touched.
+  ipcMain.handle('projects:delete', async (_e, { id }) => {
+    const project = repo.projects.get(id);
+    if (!project) return { ok: false, missing: true };
+    const c = repo.projects.contents(id);
+    const ok = await confirmDelete({
+      message: `Permanently delete the project "${project.name}"?`,
+      detail: `${c.chats} chat${c.chats === 1 ? '' : 's'}, ${c.messages} message${c.messages === 1 ? '' : 's'} and `
+        + `${c.documents} library entr${c.documents === 1 ? 'y' : 'ies'} will be erased. This cannot be undone.\n\n`
+        + `The ${c.filesOnDisk} file${c.filesOnDisk === 1 ? '' : 's'} on disk are NOT deleted — they stay where they are, `
+        + 'and the app simply stops tracking them.\n\nTo hide the project without losing anything, archive it instead.'
+    });
+    if (!ok) return { ok: false, cancelled: true };
+    repo.projects.remove(id);
+    return { ok: true };
+  });
   ipcMain.handle('projects:setWorkingDir', (_e, { id, dir }) => repo.projects.setWorkingDir(id, dir));
   // Native folder picker → set the project's working directory.
   ipcMain.handle('projects:pickWorkingDir', async (_e, { id }) => {
@@ -596,6 +632,24 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     return store.toJSON();
   });
   ipcMain.handle('chats:archive', (_e, { id }) => repo.chats.archive(id));
+  ipcMain.handle('chats:unarchive', (_e, { id }) => repo.chats.unarchive(id));
+  ipcMain.handle('chats:listArchived', (_e, { projectId }) => repo.chats.listArchived(projectId));
+  // Permanent, and therefore confirmed MAIN-side showing what is actually
+  // lost — a renderer must not be able to destroy history on its own say-so.
+  ipcMain.handle('chats:delete', async (_e, { id }) => {
+    const chat = repo.chats.get(id);
+    if (!chat) return { ok: false, missing: true };
+    const { messages } = repo.chats.contents(id);
+    const ok = await confirmDelete({
+      message: `Permanently delete "${chat.title || 'Untitled chat'}"?`,
+      detail: `${messages} message${messages === 1 ? '' : 's'} will be erased. This cannot be undone.\n\n`
+        + 'Documents this chat produced belong to the PROJECT and are kept, on disk and in the library.\n\n'
+        + 'To keep the session and only clear it from the list, archive it instead.'
+    });
+    if (!ok) return { ok: false, cancelled: true };
+    repo.chats.remove(id);
+    return { ok: true };
+  });
   ipcMain.handle('messages:list', (_e, { chatId }) => repo.messages.listByChat(chatId));
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
   ipcMain.handle('messages:rate', (_e, { id, rating }) => repo.messages.setRating(id, rating));

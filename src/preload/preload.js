@@ -64,6 +64,10 @@ contextBridge.exposeInMainWorld('api', {
     create: (input) => ipcRenderer.invoke('projects:create', input),
     rename: (id, name) => ipcRenderer.invoke('projects:rename', { id, name }),
     archive: (id) => ipcRenderer.invoke('projects:archive', { id }),
+    unarchive: (id) => ipcRenderer.invoke('projects:unarchive', { id }),
+    listArchived: () => ipcRenderer.invoke('projects:listArchived'),
+    // Permanent; main confirms before anything is removed.
+    delete: (id) => ipcRenderer.invoke('projects:delete', { id }),
     pickWorkingDir: (id) => ipcRenderer.invoke('projects:pickWorkingDir', { id }),
     revealPath: (p) => ipcRenderer.invoke('app:revealPath', p),
     setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model }),
@@ -110,7 +114,11 @@ contextBridge.exposeInMainWorld('api', {
     setMode: (id, mode) => ipcRenderer.invoke('chats:setMode', { id, mode }),
     variables: (id) => ipcRenderer.invoke('chats:variables', { id }),
     setVariable: (id, key, value) => ipcRenderer.invoke('chats:setVariable', { id, key, value }),
-    archive: (id) => ipcRenderer.invoke('chats:archive', { id })
+    archive: (id) => ipcRenderer.invoke('chats:archive', { id }),
+    unarchive: (id) => ipcRenderer.invoke('chats:unarchive', { id }),
+    listArchived: (projectId) => ipcRenderer.invoke('chats:listArchived', { projectId }),
+    // Permanent; main confirms before anything is removed.
+    delete: (id) => ipcRenderer.invoke('chats:delete', { id })
   },
 
   messages: {

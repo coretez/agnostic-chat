@@ -44,7 +44,10 @@
     <div class="body">
       <aside class="sidebar">
         <div class="pane__head">
-          <span>PROJECTS</span>
+          <span id="projects-head">PROJECTS</span>
+          <!-- Archive is a place, not a disappearance: the toggle lives on the
+               list the items left, which is where you look for them. -->
+          <button class="archive-btn" id="projects-archive-btn" type="button" title="Show archived projects">ARCHIVE</button>
           <button class="icon-btn" id="new-project-btn" type="button" title="New project (⌘N)">+</button>
         </div>
         <form class="inline-form" id="new-project-form" hidden>
@@ -53,7 +56,8 @@
         <ul class="list" id="project-list"></ul>
 
         <div class="pane__head pane__head--mt">
-          <span>CHATS</span>
+          <span id="chats-head">CHATS</span>
+          <button class="archive-btn" id="chats-archive-btn" type="button" title="Show archived chats">ARCHIVE</button>
           <button class="icon-btn" id="new-chat-btn" type="button" title="New chat" disabled>+</button>
         </div>
         <ul class="list list--grow" id="chat-list"></ul>

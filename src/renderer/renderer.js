@@ -14,6 +14,8 @@ const el = {
   ovFastDd: $('ov-fast-dd'), ovFastBtn: $('ov-fast-btn'), ovFastLabel: $('ov-fast-label'), ovFastMenu: $('ov-fast-menu'),
   themeBtn: $('theme-btn'), paletteBtn: $('palette-btn'), modelsBtn: $('models-btn'),
   projectList: $('project-list'), chatList: $('chat-list'),
+  projectsHead: $('projects-head'), chatsHead: $('chats-head'),
+  projectsArchiveBtn: $('projects-archive-btn'), chatsArchiveBtn: $('chats-archive-btn'),
   newProjectBtn: $('new-project-btn'), newProjectForm: $('new-project-form'), newProjectInput: $('new-project-input'),
   ovName: $('ov-name'), ovWdPath: $('ov-wd-path'), ovWdChange: $('ov-wd-change'), ovWdReveal: $('ov-wd-reveal'),
   ovOutPath: $('ov-out-path'), ovOutChange: $('ov-out-change'), ovOutReveal: $('ov-out-reveal'),
@@ -381,16 +383,84 @@ function showRail(name) {
   document.querySelectorAll('.rail__panel').forEach((p) => { p.hidden = p.dataset.rail !== name; });
 }
 
+// ── Archive ───────────────────────────────────────────────────────
+// Archiving is only useful if there is a way back, so each list can show what
+// left it, in place. Two distinct actions, never one button wearing two names:
+// ↓ archives (reversible, silent), ✕ deletes (permanent, confirmed by main).
+state.showArchived = { projects: false, chats: false };
+state.archived = { projects: [], chats: [] };
+
+async function loadArchived(which) {
+  if (which === 'projects') state.archived.projects = await window.api.projects.listArchived();
+  else state.archived.chats = state.currentProjectId ? await window.api.chats.listArchived(state.currentProjectId) : [];
+}
+async function toggleArchiveView(which) {
+  state.showArchived[which] = !state.showArchived[which];
+  if (state.showArchived[which]) await loadArchived(which);
+  if (which === 'projects') renderProjects(); else renderChats();
+}
+/** Refresh whichever archive lists are currently on screen. */
+async function refreshOpenArchives() {
+  if (state.showArchived.projects) await loadArchived('projects');
+  if (state.showArchived.chats) await loadArchived('chats');
+}
+function rowButton(glyph, title, cls, onClick) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'rowbtn' + (cls ? ' ' + cls : '');
+  b.textContent = glyph;
+  b.title = title;
+  b.onclick = (e) => { e.stopPropagation(); onClick(); };
+  return b;
+}
+function emptyRow(text) {
+  const li = document.createElement('li');
+  li.className = 'list__empty';
+  li.textContent = text;
+  return li;
+}
+el.projectsArchiveBtn.onclick = () => toggleArchiveView('projects');
+el.chatsArchiveBtn.onclick = () => toggleArchiveView('chats');
+
 // ── Rendering: sidebar/chat ───────────────────────────────────────
 function renderProjects() {
+  const arch = state.showArchived.projects;
   el.projectList.innerHTML = '';
-  for (const p of state.projects) {
-    const li = document.createElement('li');
-    li.className = 'list__item' + (p.id === state.currentProjectId ? ' is-selected' : '');
-    li.textContent = p.name;
-    li.onclick = () => selectProject(p.id);
-    el.projectList.appendChild(li);
+  el.projectsHead.textContent = arch ? 'PROJECTS · ARCHIVED' : 'PROJECTS';
+  el.projectsArchiveBtn.classList.toggle('is-on', arch);
+  el.projectsArchiveBtn.title = arch ? 'Back to active projects' : 'Show archived projects';
+  const rows = arch ? state.archived.projects : state.projects;
+  if (!rows.length) {
+    el.projectList.appendChild(emptyRow(arch ? 'No archived projects.' : 'No projects yet.'));
+    return;
   }
+  for (const p of rows) el.projectList.appendChild(arch ? archivedProjectRow(p) : projectRow(p));
+}
+
+function projectRow(p) {
+  const li = document.createElement('li');
+  li.className = 'list__item' + (p.id === state.currentProjectId ? ' is-selected' : '');
+  li.innerHTML = '<div class="chatrow"><div class="chatrow__text"><div class="title"></div></div>'
+    + '<div class="chatrow__actions"></div></div>';
+  li.querySelector('.title').textContent = p.name;
+  li.querySelector('.chatrow__text').onclick = () => selectProject(p.id);
+  const actions = li.querySelector('.chatrow__actions');
+  actions.appendChild(rowButton('↓', 'Archive project', '', () => archiveProject(p)));
+  actions.appendChild(rowButton('✕', 'Delete project permanently', 'rowbtn--danger', () => deleteProject(p)));
+  return li;
+}
+
+function archivedProjectRow(p) {
+  const li = document.createElement('li');
+  li.className = 'list__item list__item--arch';
+  li.innerHTML = '<div class="chatrow"><div class="chatrow__text"><div class="title"></div><div class="sub"></div></div>'
+    + '<div class="chatrow__actions"></div></div>';
+  li.querySelector('.title').textContent = p.name;
+  li.querySelector('.sub').textContent = 'archived ' + (p.archived_at || '').slice(0, 16);
+  const actions = li.querySelector('.chatrow__actions');
+  actions.appendChild(rowButton('↑', 'Restore project', 'rowbtn--restore', () => restoreProject(p)));
+  actions.appendChild(rowButton('✕', 'Delete project permanently', 'rowbtn--danger', () => deleteProject(p)));
+  return li;
 }
 function renderOverview() {
   const p = state.projects.find((x) => x.id === state.currentProjectId);
@@ -647,24 +717,45 @@ async function setFastModel(providerId, model) {
 }
 
 function renderChats() {
+  const arch = state.showArchived.chats;
   el.chatList.innerHTML = '';
+  el.chatsHead.textContent = arch ? 'CHATS · ARCHIVED' : 'CHATS';
+  el.chatsArchiveBtn.classList.toggle('is-on', arch);
+  el.chatsArchiveBtn.title = arch ? 'Back to active chats' : 'Show archived chats';
   // The librarian's cross-cutting view: an active library tag filters the
   // session list too — "everything about acme", chats and documents alike.
-  const chats = state.libraryTag ? state.chats.filter((c) => hasTag(c, state.libraryTag)) : state.chats;
-  for (const c of chats) {
-    const li = document.createElement('li');
-    li.className = 'list__item list__item--chat' + (c.id === state.currentChatId ? ' is-selected' : '');
-    // The one-line summary (librarian) beats the model name as the subtitle —
-    // it says what the session IS, which is what you scan the list for.
-    const sub = c.summary || (c.model || 'no model').toLowerCase();
-    li.innerHTML = `<div class="chatrow"><div class="chatrow__text"><div class="title">${escapeHtml(c.title || 'Untitled chat')}</div><div class="sub">${escapeHtml(sub)}</div></div><div class="chatrow__actions"><button class="rowbtn" title="Rename">✎</button><button class="rowbtn" title="Delete">✕</button></div></div>`;
-    if (c.summary) li.title = c.summary + ((c.tags || []).length ? `\n${c.tags.map((t) => `${t.facet}:${t.name}`).join(' · ')}` : '');
-    const [renameBtn, delBtn] = li.querySelectorAll('.rowbtn');
-    li.querySelector('.chatrow__text').onclick = () => selectChat(c.id);
-    renameBtn.onclick = (e) => { e.stopPropagation(); startRenameChat(li, c); };
-    delBtn.onclick = (e) => { e.stopPropagation(); archiveChat(c); };
-    el.chatList.appendChild(li);
-  }
+  const pool = arch ? state.archived.chats : state.chats;
+  const chats = state.libraryTag ? pool.filter((c) => hasTag(c, state.libraryTag)) : pool;
+  if (!chats.length && arch) return void el.chatList.appendChild(emptyRow('No archived chats.'));
+  for (const c of chats) el.chatList.appendChild(arch ? archivedChatRow(c) : chatRow(c));
+}
+
+/** The one-line summary (librarian) beats the model name as the subtitle — it
+ *  says what the session IS, which is what you scan the list for. */
+function chatRow(c) {
+  const li = document.createElement('li');
+  li.className = 'list__item list__item--chat' + (c.id === state.currentChatId ? ' is-selected' : '');
+  const sub = c.summary || (c.model || 'no model').toLowerCase();
+  li.innerHTML = `<div class="chatrow"><div class="chatrow__text"><div class="title">${escapeHtml(c.title || 'Untitled chat')}</div><div class="sub">${escapeHtml(sub)}</div></div><div class="chatrow__actions"></div></div>`;
+  if (c.summary) li.title = c.summary + ((c.tags || []).length ? `\n${c.tags.map((t) => `${t.facet}:${t.name}`).join(' · ')}` : '');
+  li.querySelector('.chatrow__text').onclick = () => selectChat(c.id);
+  const actions = li.querySelector('.chatrow__actions');
+  actions.appendChild(rowButton('✎', 'Rename', '', () => startRenameChat(li, c)));
+  actions.appendChild(rowButton('↓', 'Archive chat', '', () => archiveChat(c)));
+  actions.appendChild(rowButton('✕', 'Delete chat permanently', 'rowbtn--danger', () => deleteChat(c)));
+  return li;
+}
+
+function archivedChatRow(c) {
+  const li = document.createElement('li');
+  li.className = 'list__item list__item--chat list__item--arch';
+  const when = 'archived ' + (c.archived_at || '').slice(0, 16);
+  li.innerHTML = `<div class="chatrow"><div class="chatrow__text"><div class="title">${escapeHtml(c.title || 'Untitled chat')}</div><div class="sub">${escapeHtml(when)}</div></div><div class="chatrow__actions"></div></div>`;
+  if (c.summary) li.title = c.summary;
+  const actions = li.querySelector('.chatrow__actions');
+  actions.appendChild(rowButton('↑', 'Restore chat', 'rowbtn--restore', () => restoreChat(c)));
+  actions.appendChild(rowButton('✕', 'Delete chat permanently', 'rowbtn--danger', () => deleteChat(c)));
+  return li;
 }
 
 // Librarian filings land after the turn returns — refresh the affected views
@@ -696,12 +787,31 @@ function startRenameChat(li, c) {
 
 async function archiveChat(c) {
   await window.api.chats.archive(c.id);
+  await afterChatRemoved(c.id);
+}
+async function restoreChat(c) {
+  await window.api.chats.unarchive(c.id);
+  await loadArchived('chats');
   state.chats = await window.api.chats.list(state.currentProjectId);
   renderChats();
-  if (state.currentChatId === c.id) {
-    if (state.chats.length) selectChat(state.chats[0].id);
-    else { state.currentChatId = null; el.messages.innerHTML = ''; turn('NO CHATS YET · HIT + NEXT TO CHATS', 'meta'); el.send.disabled = true; }
-  }
+  selectChat(c.id);
+}
+async function deleteChat(c) {
+  const r = await window.api.chats.delete(c.id);   // main confirms; may cancel
+  if (!r || !r.ok) return;
+  await afterChatRemoved(c.id);
+}
+/** The list lost a chat. Only re-point the transcript if it was the open one. */
+async function afterChatRemoved(id) {
+  await refreshOpenArchives();
+  state.chats = await window.api.chats.list(state.currentProjectId);
+  renderChats();
+  if (state.currentChatId !== id) return;
+  if (state.chats.length) return void selectChat(state.chats[0].id);
+  state.currentChatId = null;
+  el.messages.innerHTML = '';
+  turn('NO CHATS YET · HIT + NEXT TO CHATS', 'meta');
+  el.send.disabled = true;
 }
 // A generated document just landed on disk — refresh the project's doc list.
 async function onDocumentSaved(ev) {
@@ -1932,6 +2042,36 @@ async function loadProjects() {
   renderProjects();
 }
 
+// ── Project archive / delete ──────────────────────────────────────
+async function archiveProject(p) {
+  await window.api.projects.archive(p.id);
+  await afterProjectRemoved(p.id);
+}
+async function restoreProject(p) {
+  await window.api.projects.unarchive(p.id);
+  await loadArchived('projects');
+  await loadProjects();
+  selectProject(p.id);          // restoring is an act of returning to it
+}
+async function deleteProject(p) {
+  const r = await window.api.projects.delete(p.id);   // main confirms; may cancel
+  if (!r || !r.ok) return;
+  await afterProjectRemoved(p.id);
+}
+/** The list lost a project. If it was the open one, land somewhere valid
+ *  rather than leaving the UI pointed at an id that no longer resolves. */
+async function afterProjectRemoved(id) {
+  await refreshOpenArchives();
+  await loadProjects();
+  if (state.currentProjectId !== id) return;
+  state.currentProjectId = null;
+  if (state.projects.length) return void selectProject(state.projects[0].id);
+  state.currentChatId = null;
+  state.chats = [];
+  renderChats();
+  showFirstRun();
+}
+
 async function selectProject(id) {
   state.currentProjectId = id;
   state.currentChatId = null;
@@ -1942,6 +2082,9 @@ async function selectProject(id) {
   renderProjects();
 
   state.chats = await window.api.chats.list(id);
+  // The chat archive is per-project: without this it would keep showing the
+  // previous project's archived sessions under the new project's name.
+  if (state.showArchived.chats) await loadArchived('chats');
   // Bootstrap the canonical doc set (SPEC/DESIGN/PSEUDOCODE/KNOWLEDGE) so the
   // DOCUMENTS tab always shows the project's documentation structure.
   try { await window.api.documents.ensureCanonical(id); } catch {}

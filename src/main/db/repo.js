@@ -42,6 +42,35 @@ const projects = {
       .prepare("UPDATE projects SET archived_at = datetime('now') WHERE id = ?")
       .run(id);
   },
+  // Archiving must be undoable or it is just a slow delete. updated_at is left
+  // alone: restoring a project is not working in it, and bumping it would
+  // reorder the list under the user for no reason.
+  unarchive(id) {
+    getDb().prepare('UPDATE projects SET archived_at = NULL WHERE id = ?').run(id);
+    return projects.get(id);
+  },
+  listArchived() {
+    return getDb()
+      .prepare('SELECT * FROM projects WHERE archived_at IS NOT NULL ORDER BY archived_at DESC')
+      .all();
+  },
+  /** What a delete would take with it. Counted from the same rows the FK
+   *  cascade removes, so the confirmation cannot understate the damage. */
+  contents(id) {
+    const n = (sql) => getDb().prepare(sql).get(id).n;
+    return {
+      chats: n('SELECT COUNT(*) n FROM chats WHERE project_id = ?'),
+      documents: n('SELECT COUNT(*) n FROM documents WHERE project_id = ?'),
+      messages: n('SELECT COUNT(*) n FROM messages WHERE chat_id IN (SELECT id FROM chats WHERE project_id = ?)'),
+      filesOnDisk: n("SELECT COUNT(*) n FROM documents WHERE project_id = ? AND path IS NOT NULL AND path <> ''")
+    };
+  },
+  /** Permanent. Chats, messages, document ROWS, tags, agents, settings and
+   *  credentials go with it via ON DELETE CASCADE. Files on disk do NOT —
+   *  deleting a database row must never reach outside the database. */
+  remove(id) {
+    getDb().prepare('DELETE FROM projects WHERE id = ?').run(id);
+  },
   setWorkingDir(id, dir) {
     getDb()
       .prepare("UPDATE projects SET working_dir = ?, updated_at = datetime('now') WHERE id = ?")
@@ -204,6 +233,26 @@ const chats = {
   },
   archive(id) {
     getDb().prepare("UPDATE chats SET archived_at = datetime('now') WHERE id = ?").run(id);
+  },
+  // Restore. updated_at untouched for the same reason as projects: bringing a
+  // session back is not working in it.
+  unarchive(id) {
+    getDb().prepare('UPDATE chats SET archived_at = NULL WHERE id = ?').run(id);
+    return chats.get(id);
+  },
+  listArchived(projectId) {
+    return getDb()
+      .prepare('SELECT * FROM chats WHERE project_id = ? AND archived_at IS NOT NULL ORDER BY archived_at DESC')
+      .all(projectId);
+  },
+  /** Messages lost if this chat is deleted. Documents are PROJECT-scoped and
+   *  survive — only the chat_documents link goes. */
+  contents(id) {
+    const n = (sql) => getDb().prepare(sql).get(id).n;
+    return { messages: n('SELECT COUNT(*) n FROM messages WHERE chat_id = ?') };
+  },
+  remove(id) {
+    getDb().prepare('DELETE FROM chats WHERE id = ?').run(id);
   },
   // Variable store (working memory) persistence — opaque JSON snapshot; the
   // VariableStore class owns its shape. NULL until a turn captures something.

@@ -1904,6 +1904,45 @@ app.whenReady().then(async () => {
     repo.projects.archive(gp.id);
   }
 
+  // ── Archive / restore / delete ────────────────────────────────────────────
+  // Archiving is reversible and touches nothing else; deleting is permanent
+  // and cascades. The two must never be confusable, in the data layer or the
+  // UI — a control once labelled "Delete" quietly archived instead.
+  {
+    console.log('\n[archive] reversible hiding vs permanent deletion');
+    const ap = repo.projects.create({ name: 'Archive Suite' });
+    const keep = repo.projects.create({ name: 'Untouched' });
+    const ac = repo.chats.create({ projectId: ap.id, title: 'session' });
+    repo.messages.add({ chatId: ac.id, role: 'user', content: 'hello' });
+    const ad = repo.documents.create({ projectId: ap.id, title: 'Deliverable', path: path.join(tmp, 'd.html'), source: 'chat' });
+
+    repo.chats.archive(ac.id);
+    assert(repo.chats.listByProject(ap.id).length === 0, 'archive: the chat leaves the active list');
+    assert(repo.chats.listArchived(ap.id).length === 1, 'archive: and is findable in the archive');
+    repo.chats.unarchive(ac.id);
+    assert(repo.chats.listByProject(ap.id).length === 1, 'archive: restore brings the chat back');
+    assert(repo.chats.get(ac.id).archived_at === null, 'archive: restore clears archived_at');
+    assert(repo.messages.listByChat(ac.id).length === 1, 'archive: a round trip preserves the messages');
+
+    repo.projects.archive(ap.id);
+    assert(!repo.projects.list().some((p) => p.id === ap.id), 'archive: the project leaves the active list');
+    assert(repo.projects.listArchived().some((p) => p.id === ap.id), 'archive: and is findable in the archive');
+    assert(repo.chats.listByProject(ap.id).length === 1, 'archive: archiving a project does NOT archive its chats');
+    repo.projects.unarchive(ap.id);
+    assert(repo.projects.list().some((p) => p.id === ap.id), 'archive: restore brings the project back');
+
+    const c = repo.projects.contents(ap.id);
+    assert(c.chats === 1 && c.documents === 1 && c.messages === 1, 'delete: contents() counts what the cascade will take');
+    assert(c.filesOnDisk === 1, 'delete: files on disk are counted separately from library rows');
+    repo.chats.remove(ac.id);
+    assert(!repo.chats.get(ac.id) && repo.messages.listByChat(ac.id).length === 0, 'delete: a chat takes its messages with it');
+    assert(!!repo.documents.get(ad.id), 'delete: project documents SURVIVE a chat delete');
+    repo.projects.remove(ap.id);
+    assert(!repo.projects.get(ap.id) && !repo.documents.get(ad.id), 'delete: a project cascades to its documents');
+    assert(!!repo.projects.get(keep.id), 'delete: neighbouring projects are untouched');
+    repo.projects.archive(keep.id);
+  }
+
   console.log('\nALL SMOKE TESTS PASSED');
   fs.rmSync(tmp, { recursive: true, force: true });
   app.exit(0);
