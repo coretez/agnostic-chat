@@ -372,9 +372,35 @@ by customer, then by category (monthly reports, health reports, plans).
 Category defaults from the format's family; the DOCUMENTS tab mirrors
 the same tree. Management verbs: supersede, archive, document sets
 (a report + its appendices), cross-references.
+*Observed weaknesses, from a real Expo monthly run (2026-08-14).* The stored
+tree today is:
+
+    monthly-report/expo/expo-monthly-security-report-2026-07-2026-07.html
+    monthly-report/expo/msoc-monthly-report-expo-july-2025-2025-07.md
+    raw-data/expo/expo-monthly-security-report-2026-07-data-2026-07.xls
+
+- **The period is written twice.** The template appends `-{period}` to a title
+  that already carries it, giving `…-2026-07-2026-07`. The template must not
+  re-state a token the title already contains.
+- **Version is doing the job of IDENTITY.** July went to v4 with v1–v3 in
+  `.versions/`. That is right for *revisions of July*, but nothing separates
+  "a corrected July" from "the next month's report". For a periodic document
+  the PERIOD is the identity and the version is the revision within it;
+  conflating them means a re-run for the same period silently becomes v5, and
+  a re-run for a new period looks like an unrelated file.
+- **A series is invisible.** Two monthly reports for the same tenant sit in one
+  flat folder under different naming conventions, with nothing expressing "the
+  Expo monthly report series" — no ordering, no latest, no gap detection (a
+  missing month is undetectable).
+- **The deliverable and its appendix are unlinked.** The `.xls` raw-data export
+  belongs to that HTML report; they live in different type folders with no
+  relation recorded. This is the "document sets" verb, still unbuilt.
+
 Accept: two monthly reports for the same customer land in the same
 folder as versions/siblings; changing the template re-homes future saves
-without breaking the index.
+without breaking the index; a period token appears exactly once in a
+filename; a periodic series can list its members in order and name the
+latest; a report and its appendices resolve to one set.
 **Status: PLANNED** (design: the internal design record §5).
 
 **O24. Format vs type — produce vs render.** A FORMAT is a named,
@@ -672,6 +698,60 @@ and the tokens saved are visible in the ledger; closing an item without
 evidence is refused; the pass runs on the O30 cadence and its findings land in
 DEBT like any other. **Status: PLANNED.**
 
+**O33. Routines — a plan that ran once becomes a plan that runs on a
+schedule.** Producing the Expo monthly report worked; there is no way to make
+it *routine*. The user must be present, must remember, and must re-ask. That
+gap is smaller than it looks: **the plan is already the recipe.** `submit_plan`
+returns a typed artifact — `{goal, steps:[{task, produces, delegate, parallel,
+group}], merge, orchestrator}` — and today it is derived fresh and discarded.
+A routine is that artifact, kept, bound, and fired.
+
+- **CAPTURE.** After a turn completes, its plan is offerable as a routine —
+  the plan, the request that produced it, the mode, the skills in play, the
+  project, and the document targets in force. Saved by the user, never
+  silently: "make this a routine" is a decision, and O8's lesson is that
+  inferring durability is where this goes wrong.
+- **BIND, don't freeze.** A captured July report must not re-issue July
+  forever. Period-like inputs become BINDINGS evaluated at fire time
+  (`period = previous_month`), so the 1 September run asks for August. Bindings
+  are declared data, not string substitution over the request text.
+- **REPLAY over RE-DERIVE, with a fallback.** Re-deriving from the same
+  sentence is not reproducible: measured across identical prompts, plans
+  ranged 3–8 steps and 117k–1.07M input tokens. Replaying the captured steps
+  is cheaper and predictable. Re-derive only when replay cannot bind — a tool
+  a step names no longer exists — and record that it happened.
+- **SCHEDULE.** A spec ("01:00 on the 1st of each month"), the next fire time,
+  the last outcome, and an explicit enable/disable. Missed windows (machine
+  asleep, app closed) resolve by policy — run late once, or skip — never
+  silently.
+- **HEADLESS SAFETY is the hard part.** Nobody is awake at 01:00 to answer a
+  gate. A routine therefore runs under a stated policy, and the defaults are
+  refusals: an O7 align that wants a direction ABORTS and notifies rather than
+  guessing; an O4 shell approval is not silently granted; the O26 check gate
+  still applies; and — the one this test made vivid — the **precondition gate**
+  must abort a run whose declared tools are unreachable. A dead connector at
+  01:00 must never yield a plausible report built from a prior month's numbers.
+  This is the "no unmanaged path" requirement O19 already names for headless
+  runs, arriving before the proxy does.
+- **PROVENANCE is mandatory here.** An unattended document is read later by
+  someone who did not watch it being made, so every routine output states its
+  as-of time and the queries behind it (O21). A stale-but-real figure survives
+  scrutiny in a way an invented one does not — which is precisely why it is
+  more dangerous.
+- **OUTCOME lands somewhere.** Success files the deliverable through O23;
+  failure writes to the O27 ledger and notifies. A routine that quietly stops
+  producing is the worst failure mode, so "did not run" must be as visible as
+  "ran and failed".
+*Source: cron/launchd semantics for missed windows; CI scheduled pipelines
+(pinned recipe + bound parameters, not a re-derived one); the measured
+non-reproducibility of re-derivation in this harness.*
+Accept: a completed turn can be saved as a named routine; its next run binds
+the following period without editing; a scheduled run reproduces the captured
+steps rather than re-planning; a routine whose connector is unauthorized
+aborts and notifies instead of producing a document; every routine output
+carries an as-of time; the run history shows ran / failed / skipped per fire.
+**Status: PLANNED.**
+
 ---
 
 ## Traceability
@@ -696,6 +776,7 @@ DEBT like any other. **Status: PLANNED.**
 | O22 | document lifecycle + review lenses | shipped: DOCUMENTS_RULES + documents-mode align (`plan-derive.js`); planned: lenses in `review.js` |
 | O23 | placement taxonomy + management | planned — `documents.js` placementPath property tokens; `repo.documents` verbs |
 | O24 | format/type split + deterministic render | shipped: html→pdf (`render-pdf.js` + `documents:toPdf`) + format targets v1 (ipc.js documents block + `plan-derive.js` FORMAT TARGET rule); planned: format rows, md target, schema migration |
+| O33 | routines — capture a plan, bind it, schedule it | planned — new `routines.js` (capture from a completed plan + bindings) + `scheduler.js` (fire, missed-window policy, run history); headless policy reuses the O26 check gate and the precondition gate; outcomes to O23 / O27 |
 | O32 | the Registrar — list service over the canonical docs | planned — new `registrar.js`; migrates `project-docs.appendDebt`; VALIDATE runs on the O30 cadence; LIST VIEW replaces whole-set injection in `project-docs.load()` |
 | O25 | widget library | planned — new `widgets.js` deterministic renderer (SVG + md degradations) |
 | O26 | framework check gate | shipped: `runCheckCommand` (coding-tools.js) + `gateStep` (execute.js) + baseline/final wiring + Overview CHECK COMMAND card (ipc.js, renderer); smoke §O26 |
