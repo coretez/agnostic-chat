@@ -345,7 +345,71 @@ on/off · model-specific chat rows · light/dark for all pages.
 5. **Overview (continuity)** — Index/Handoff/Tasks/Inbox, auto-maintained.
 6. **Skills page + Command Palette** — per-project toggles; ⌘K navigation.
 
-## 14. Open decisions
+## 14. Routines (O33) — interface design
+
+There is no surface for this today: nine pages, four chat rails, nothing that
+mentions a schedule. The backend design was written first, so this section
+exists to keep the UI from being retrofitted onto it.
+
+**The governing idea: capture happens where the work happened.** A routine is
+not authored from a blank form — it is a plan that already ran and worked.
+Asking someone to re-describe in a builder what they just watched succeed is
+how these features end up unused.
+
+### 14.1 Capture — the PLAN rail
+The right rail already narrates the live plan. When a turn completes
+successfully, its plan header gains **SAVE AS ROUTINE**. That is the entire
+capture affordance, and it sits three inches from the steps that just ran.
+
+Clicking opens a small sheet, pre-filled from the turn rather than empty:
+- **Name** — defaulted from the goal ("Expo monthly security report")
+- **Runs** — a plain-language schedule (`monthly on the 1st at 01:00`), not a
+  cron string; cron is the storage format, never the input
+- **Bindings** — the period-like values the plan used, each with what they
+  should become on the next run: `period 2026-07 → previous month`. This is the
+  one genuinely new concept, so it gets the most explanation and a worked
+  example of the next three fire dates.
+- **On failure** — notify / notify and disable
+
+Nothing is inferred. O8's lesson applies directly: durability is a decision the
+user makes, never one the system guesses.
+
+### 14.2 ROUTINES — a top-level page
+Routines are first-class objects with history, like documents and skills, and
+history needs room a card cannot give. Sits after AGENTS in the tab bar.
+
+Each row: name · what it produces · schedule in words · **next fire** · last
+outcome as a status dot (ran / failed / skipped / disabled) · an enable toggle.
+Selecting a row opens a detail pane with the captured plan **read-only** (the
+same step list the PLAN rail draws, so it is recognisably the thing that ran),
+the bindings with their next resolved values, and the run history.
+
+Run history is the part that earns the page: one line per fire — when, outcome,
+duration, the document produced (deep-linked into DOCUMENTS), or the reason it
+did not run. `skipped` states its cause in words: *"Fluency Expo was
+unauthorized — no document was produced."* A routine that quietly stops
+producing is the worst failure mode, so a gap in the series is drawn as a gap,
+not as an absence of rows.
+
+### 14.3 Where failure surfaces
+A 01:00 failure must be visible at 09:00 without hunting:
+- the **ROUTINES tab label** carries a count badge when any routine is in a
+  failed state
+- **OVERVIEW** gains one line in the project header — next fire, or the failure
+  if there is one
+- the outcome is written to the O27 debt ledger like any other finding
+
+No modal, no notification centre popup. The badge persists until the run
+succeeds or the routine is disabled — failures should not be dismissible by
+acknowledgement, only by resolution.
+
+### 14.4 What this deliberately does not have
+No visual schedule builder, no calendar grid, no dependency graph between
+routines, no per-step editing of a captured plan. Editing a captured plan in a
+GUI recreates the planner badly; if the plan is wrong, run the turn again and
+capture the better one — the capture is cheap, which is the whole point.
+
+## 15. Open decisions
 - Model roster/versions to display (prototype shows Opus/Sonnet **4.5**, GPT-4o,
   Local Llama 3.3; align to whatever we actually call at runtime).
 - Provider set at launch (Anthropic + OpenAI + Ollama shown).

@@ -212,6 +212,63 @@ registry can be exercised by smoke without a live model, and a
 behavior is a model question, and this session established that model questions
 need replicates, not a single confident sample.
 
+## Workstream: O33 routines — goals to completion
+
+**The unresolved question first, because it decides everything else: what runs
+the routine at 01:00 when Shamrock is closed?** Shamrock is a local-first
+desktop app with no server. A schedule is worthless if it only fires while the
+window happens to be open, and "the monthly report" is precisely the case where
+nobody is watching. Three options:
+
+- **A · in-app only** — fire while the app runs, otherwise catch up on next
+  launch. Trivial, honest, and does not deliver the asked-for capability: a
+  01:00 monthly run simply will not happen.
+- **B · launchd + a headless run mode** (recommended) — a per-user LaunchAgent
+  wakes at the fire time and starts Shamrock with `--routine <id>`, which runs
+  one turn without a window and exits. macOS-native, no daemon resident, no
+  server, and it matches what O19 already requires of headless runs: they
+  resolve credentials and policy the same way, with no unmanaged path.
+  `StartCalendarInterval` also queues a missed fire when the Mac was asleep,
+  which is the behaviour we want and would otherwise have to build.
+- **C · resident helper** — always-on background process. Most capable, worst
+  fit: a second long-lived thing holding keys, for one feature.
+
+Everything below assumes B, and the headless run mode is the first real work.
+
+### A · Period-as-identity (O23) — MUST land first
+A periodic document is identified by its PERIOD; the version is the revision
+within it. Until that split exists, the first scheduled run files August as
+v5 of July. Also fixes the doubled period in filenames.
+**Done when:** two periods are two documents, a re-run of the same period
+replaces rather than accumulates, and a series can list its members in order.
+
+### B · Headless run mode
+`--routine <id>`: boot main without a window, resolve the project/provider,
+run one turn, write outcome, exit non-zero on failure. The gate policy is
+refusal-by-default — align aborts, shell approval is not auto-granted, the O26
+check gate applies, and the precondition gate aborts a run whose declared tools
+are unreachable.
+**Done when:** a routine runs end-to-end from the command line with no window,
+and a dead connector produces an abort + a recorded failure rather than a
+document.
+
+### C · Capture + bind
+Save a completed turn's plan as a named routine; declare bindings evaluated at
+fire time (`period = previous_month`). Replay the captured steps; re-derive only
+when a step's tools no longer resolve, and record that it happened.
+**Done when:** a July capture run in September asks for August without editing,
+and replay is byte-comparable in step shape to the captured plan.
+
+### D · Schedule + history
+The LaunchAgent, next/last fire, enable/disable, missed-window policy, and a
+per-fire history of ran / failed / skipped with the reason.
+**Done when:** disabling removes the agent, a failure is visible without
+hunting, and "did not run" is as loud as "ran and failed".
+
+**Sequencing:** A before D absolutely. B before C is convenient but not
+required. The interface (DESIGN_SPEC §14) can be built against C's data model
+before D exists.
+
 ## Definition of done for the phase
 
 - The app shows, per project, a trend of objectives 1–8 with real (not estimated)
