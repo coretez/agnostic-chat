@@ -409,7 +409,77 @@ routines, no per-step editing of a captured plan. Editing a captured plan in a
 GUI recreates the planner badly; if the plan is wrong, run the turn again and
 capture the better one — the capture is cheap, which is the whole point.
 
-## 15. Open decisions
+## 15. Document library — retrieval strategy
+
+Today the library defaults to a recency list with single-tag pivots
+(`state.libraryView`, `state.libraryTag`). That is fine for "what did I just
+make" and answers nothing else. Recency is the one ordering guaranteed to
+decay: the document you need at month-end is the one from *last* month, and by
+definition it has been pushed down by everything since.
+
+**Start from the questions, not the layout.** A user of this library asks:
+*what is the latest Expo monthly report* · *did August actually run* ·
+*everything for Expo* · *what did we produce this quarter* · *where is that
+thing about the Falcon sensors* · *what needs my attention*. A recency list
+answers only the first, and only for a few days.
+
+### 15.1 Facets, not a filter
+What ships is a *filter* — one `facet:slug` at a time. Faceted navigation is
+multi-dimensional and combinable, and each value carries a **count reflecting
+the current result set**, so the interface shows the shape of the library
+before you commit to a click and never offers a path to zero results. NN/g puts
+task completion 25–50% faster with facets than keyword search alone, and the
+facets must be domain-specific to earn that: here **tenant · period · type ·
+status · topic**, which is exactly the vocabulary O31's librarian already
+assigns. The data exists; the navigation does not.
+
+Text search sits alongside, not instead: faceted search is text over the
+unstructured part and facets over the structured part. Neither alone is enough.
+
+### 15.2 Series are first-class objects
+A monthly report is not a document, it is the August member of a series. This
+is the largest retrieval gap and the one the current design cannot express at
+all. A series row shows its members as a **period strip** — one cell per period,
+filled where a document exists and **empty where it does not**. A missing month
+is drawn as a gap.
+
+This matters more once routines (O33) run unattended: the failure mode of a
+scheduled report is not a loud error, it is a month that quietly never appears.
+The library is where that becomes visible, and a gap in a strip is noticed in a
+way an absent row never is. Requires O23's period-as-identity split — until
+periods are identities rather than versions, a series cannot be enumerated.
+
+### 15.3 Saved views are library objects
+A view someone returns to weekly ("Expo monthlies", "unreviewed this quarter")
+should be a thing in the library, not a filter state to reconstruct each time.
+Treating a saved query as a first-class library object is a well-worn document-
+management pattern, and it is what turns facets from a search tool into
+navigation. Saved views appear beside documents in the sidebar; the default
+landing view is itself one, so it can be changed rather than hard-coded.
+
+### 15.4 The default view answers, it does not list
+Landing on the library should show, in order: **series with their period
+strips** (including gaps), **anything needing attention** (a failed routine, an
+unreviewed deliverable, a superseded document still referenced), and only then
+recent items. Recency drops to a section — it is a genuine answer to one
+question, not the organising principle.
+
+### 15.5 Two view modes, chosen by content
+List for browsing; **timeline** for periodic content, where the x-axis is the
+period and the eye reads coverage and gaps directly. Time-oriented and
+content-oriented views over the same set is standard in document management,
+and a periodic series is the case that most rewards it. No thumbnail grid —
+these are reports, not images, and a wall of identical page-one previews
+carries no information.
+
+### 15.6 What this does not do
+No folder tree in the UI. Placement (O23) organises the *disk* so files are
+portable and greppable; the interface navigates by facet, and a tree in both
+places means two organisations to keep in sync and a user asking which one is
+authoritative. No manual tagging as the primary path — the librarian tags on
+save; hand-editing is a correction, not the workflow.
+
+## 16. Open decisions
 - Model roster/versions to display (prototype shows Opus/Sonnet **4.5**, GPT-4o,
   Local Llama 3.3; align to whatever we actually call at runtime).
 - Provider set at launch (Anthropic + OpenAI + Ollama shown).
