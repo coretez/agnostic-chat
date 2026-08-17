@@ -85,16 +85,28 @@ async function buildToolset(projectId = null) {
     .filter((s) => s.enabled);
   const tools = [];
   const routes = new Map();
+  // Keep the historic `<sanitized-name>__` prefix for the first occurrence so
+  // existing skill tool scopes remain valid. Later collisions receive a stable
+  // id suffix; otherwise their routes would silently overwrite the first one
+  // and a tool call could reach the wrong server.
+  const baseCounts = new Map();
+  const seenBases = new Set();
+  for (const s of servers) {
+    const base = sanitize(s.name) || 'srv';
+    baseCounts.set(base, (baseCounts.get(base) || 0) + 1);
+  }
   for (const s of servers) {
     let conn;
     try { conn = await ensure(s); } catch (e) { console.error('[mcp] connect failed', s.name, e && e.message); continue; }
     let list;
     try { list = await conn.listTools(); } catch (e) { console.error('[mcp] listTools failed', s.name, e && e.message); continue; }
-    const prefix = sanitize(s.name) || `srv${s.id}`;
+    const base = sanitize(s.name) || 'srv';
+    const prefix = baseCounts.get(base) > 1 && seenBases.has(base) ? `${base}_s${s.id}` : base;
+    seenBases.add(base);
     for (const t of list) {
       const ns = `${prefix}__${t.name}`;
       tools.push({ name: ns, description: t.description, inputSchema: t.inputSchema });
-      routes.set(ns, { serverId: s.id, original: t.name });
+      routes.set(ns, { serverId: s.id, original: t.name, prefix });
     }
   }
   if (tools.length > MAX_TOOLS) {

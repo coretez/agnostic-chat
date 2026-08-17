@@ -48,10 +48,11 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
     // far (tool trace, streamed text) is preserved; the caller persists it.
     if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
     i++;
-    emit({ type: 'model', model });
+    const iteration = i - 1;
+    emit({ type: 'model', model, iteration });
     let res;
     try {
-      res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
+      res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text, iteration }) });
     } catch (e) {
       // The abort signal kills the in-flight HTTP call — surface that as a
       // clean stop, not an error.
@@ -91,14 +92,14 @@ async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIte
   // user with a dangling preamble ("Let me investigate…" and nothing more), force
   // ONE last tool-less call so the model must write a conclusion from what it has
   // already gathered. This guarantees every turn ends with a real answer.
-  emit({ type: 'model', model });
+  emit({ type: 'model', model, iteration: i });
   let wrap;
   try {
     wrap = await chat({
       model,
       messages: [...history, { role: 'user', content: 'You have reached the tool-call limit — do NOT call any more tools. Using everything you have already gathered above, write your complete final answer now.' }],
       tools: [],
-      onDelta: (d) => emit({ type: 'token', text: d.text })
+      onDelta: (d) => emit({ type: 'token', text: d.text, iteration: i })
     });
     addUsage(wrap.usage);
   } catch (e) { wrap = { text: '' }; }

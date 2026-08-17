@@ -21,6 +21,7 @@ const projectDocs = require('../src/main/project-docs');
 const { planContext } = require('../src/main/plan-derive');
 const { DEFAULT_TEMPLATE } = require('../src/main/documents');
 const { spawnSync } = require('node:child_process');
+const { buildProjectDocumentsContext, PROJECT_DOC_TOTAL_CAP } = require('../src/main/ipc');
 
 function assert(cond, msg) {
   if (!cond) throw new Error('ASSERT FAILED: ' + msg);
@@ -54,6 +55,17 @@ app.whenReady().then(async () => {
   assert(repo.documents.listByChat(chat.id)[0].relation === 'created', 'doc linked to chat as created');
   // Cross-project isolation
   assert(repo.documents.listByProject(projB.id).length === 0, 'projB sees none of projA docs');
+  const chatB = repo.chats.create({ projectId: projB.id, title: 'Other project' });
+  let crossProjectLinkRejected = false;
+  try { repo.documents.linkToChat({ chatId: chatB.id, documentId: doc.id }); } catch { crossProjectLinkRejected = true; }
+  assert(crossProjectLinkRejected && repo.documents.listByChat(chatB.id).length === 0, 'cross-project document links are rejected');
+  const docContext = buildProjectDocumentsContext([
+    { title: 'Onboarding Checklist', mime_type: 'text/markdown', content: '# Checklist\nVerify access.' },
+    { title: 'Empty note', content: null }
+  ]);
+  assert(docContext.includes('Verify access.') && docContext.includes('Empty note'), 'project document context includes durable content and metadata');
+  const cappedDocContext = buildProjectDocumentsContext([{ title: 'Huge', content: 'z'.repeat(PROJECT_DOC_TOTAL_CAP * 2) }]);
+  assert(cappedDocContext.length < PROJECT_DOC_TOTAL_CAP + 1000 && cappedDocContext.includes('truncated'), 'project document context is bounded before model injection');
 
   // Generated-document placement + write + versioning + index
   const { placementPath, writeDocument, resolveOutputDir } = require('../src/main/documents');
@@ -136,15 +148,31 @@ app.whenReady().then(async () => {
   assert(called.text === 'echo: hi', 'manager.callTool executed the tool over a live connection');
   mcpManager.disposeAll();
 
+  // Sanitized server-name collisions must produce distinct, stable routes.
+  const collideA = repo.mcp.add({ name: 'Collision API', transport: 'stdio', command: 'node', args: [path.join(__dirname, 'fake-mcp-server.js')], enabled: true });
+  const collideB = repo.mcp.add({ name: 'Collision API', transport: 'stdio', command: 'node', args: [path.join(__dirname, 'fake-mcp-server.js')], enabled: true });
+  const collisionTs = await mcpManager.buildToolset();
+  const collisionEchoes = collisionTs.tools.filter((t) => {
+    const route = collisionTs.routes.get(t.name);
+    return t.name.endsWith('__echo') && route && [collideA.id, collideB.id].includes(route.serverId);
+  });
+  assert(collisionEchoes.length === 2 && new Set(collisionEchoes.map((t) => t.name)).size === 2, 'colliding MCP server names receive distinct tool namespaces');
+  const collisionPrefixes = collisionEchoes.map((t) => collisionTs.routes.get(t.name).prefix);
+  assert(collisionPrefixes.includes('Collision_API') && collisionPrefixes.some((p) => /Collision_API_s\d+/.test(p)), 'MCP collision handling preserves the original prefix and gives later servers an id suffix');
+  mcpManager.disposeAll();
+
   // Chat loop: fake connector requests a tool, then answers using the result
   let step = 0;
-  const fakeChat = async ({ messages }) => {
-    if (step++ === 0) return { text: '', toolCalls: [{ id: 'c1', name: 'echo', args: { text: 'hi' } }] };
+  const streamEvents = [];
+  const fakeChat = async ({ messages, onDelta }) => {
+    if (step++ === 0) { onDelta({ text: 'intermediate prose' }); return { text: 'intermediate prose', toolCalls: [{ id: 'c1', name: 'echo', args: { text: 'hi' } }] }; }
+    onDelta({ text: 'final stream' });
     return { text: `final: ${messages[messages.length - 1].content}`, toolCalls: [] };
   };
-  const loop = await runChatLoop({ chat: fakeChat, callTool: async (n, a) => ({ text: `echo: ${a.text}`, isError: false }), model: 'm', messages: [{ role: 'user', content: 'q' }], tools: [] });
+  const loop = await runChatLoop({ chat: fakeChat, callTool: async (n, a) => ({ text: `echo: ${a.text}`, isError: false }), model: 'm', messages: [{ role: 'user', content: 'q' }], tools: [], onEvent: (e) => streamEvents.push(e) });
   assert(loop.toolTrace.length === 1 && loop.toolTrace[0].name === 'echo', 'chat loop recorded one tool call');
   assert(loop.reply === 'final: echo: hi', 'chat loop fed tool result back and produced final answer');
+  assert(streamEvents.filter((e) => e.type === 'token').map((e) => e.iteration).join(',') === '0,1', 'stream events identify their model iteration so intermediate prose can be discarded');
 
   // A workflow that never stops calling tools must still END with a real answer:
   // on hitting the iteration cap, force one tool-less wrap-up call.

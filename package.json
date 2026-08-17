@@ -8,6 +8,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test": "electron scripts/smoke.js",
+    "test:syntax": "find src scripts -name '*.js' -print0 | xargs -0 -n1 node --check",
     "icon": "electron scripts/make-icon.js",
     "pack": "electron-builder --mac --dir",
     "dist": "electron-builder --mac"

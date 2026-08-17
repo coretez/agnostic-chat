@@ -173,6 +173,9 @@ const agents = {
 
 // ── Chats & messages ──────────────────────────────────────────────────────
 const chats = {
+  get(id) {
+    return getDb().prepare('SELECT * FROM chats WHERE id = ?').get(id);
+  },
   create({ projectId, title = null, model = null }) {
     const db = getDb();
     const info = db
@@ -286,11 +289,17 @@ const documents = {
   },
   /** Link an existing document to a chat (created | referenced | edited). */
   linkToChat({ chatId, documentId, relation = 'referenced' }) {
-    getDb()
+    const result = getDb()
       .prepare(
-        'INSERT OR REPLACE INTO chat_documents (chat_id, document_id, relation) VALUES (?, ?, ?)'
+        `INSERT OR REPLACE INTO chat_documents (chat_id, document_id, relation)
+         SELECT ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM chats c JOIN documents d ON d.project_id = c.project_id
+           WHERE c.id = ? AND d.id = ?
+         )`
       )
-      .run(chatId, documentId, relation);
+      .run(chatId, documentId, relation, chatId, documentId);
+    if (result.changes !== 1) throw new Error('Cannot link a document to a chat in another project.');
   },
   listByChat(chatId) {
     return getDb()

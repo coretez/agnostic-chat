@@ -87,7 +87,8 @@ const state = {
   editing: null,            // provider id being edited, or null for new
   editorType: null,         // provider type selected in the editor dropdown
   modelOptions: [],         // model ids offered in the Default-model combobox
-  testedModels: null        // models from the last successful test in the editor
+  testedModels: null,       // models from the last successful test in the editor
+  activeTurnId: null        // prevents overlapping sends while navigation remains available
 };
 
 function whoLabel(model) {
@@ -935,16 +936,16 @@ const CONTRIB = {
 function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 function fmtDur(ms) { if (ms == null) return ''; return ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's' : Math.round(ms) + 'ms'; }
 
-function captureInternals(ev) {
-  if (!state.currentChatId) return;
-  state.internals[state.currentChatId] = { ledger: ev, toolTurns: [], process: [] };
-  updateCtxMeter();
-  if (state.page === 'internals') renderInternals();
+function captureInternals(ev, chatId = state.currentChatId) {
+  if (!chatId) return;
+  state.internals[chatId] = { ledger: ev, toolTurns: [], process: [] };
+  if (chatId === state.currentChatId) updateCtxMeter();
+  if (chatId === state.currentChatId && state.page === 'internals') renderInternals();
 }
 // Sub-agent lifecycle events (delegate → runSubagent) build the thread tree.
-function captureProcess(ev) {
+function captureProcess(ev, chatId = state.currentChatId) {
   if (ev.kind === 'skill-select') return; // carried on the ledger; nothing to accumulate
-  const rec = state.internals[state.currentChatId];
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.process = rec.process || [];
   // Plan-and-execute lifecycle (execute.js/plan-derive.js) — tracked on rec.plan
@@ -952,7 +953,7 @@ function captureProcess(ev) {
   // variable captures. Handled BEFORE the sub-agent branch below so these kinds
   // never get misread as sub-agent updates.
   const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1, 'group-start': 1, 'group-merge': 1, 'group-merged': 1 };
-  if (ev.kind === 'align') { rec.aligned = ev.decisions || true; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
+  if (ev.kind === 'align') { rec.aligned = ev.decisions || true; if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (PLAN_KINDS[ev.kind]) {
     if (ev.kind === 'plan') {
       rec.plan = { goal: ev.goal || '', merge: ev.merge || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
@@ -967,11 +968,11 @@ function captureProcess(ev) {
       else if (ev.kind === 'var-set' || ev.kind === 'var-capture') { rec.plan.vars = (rec.plan.vars || 0) + 1; }
       else if (ev.kind === 'mid-turn-compact') { rec.plan.compacted = true; }
     }
-    if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+    if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'process') renderInternals();
     return;
   }
-  if (ev.kind === 'merge-start') { rec.merge = { status: 'running', count: ev.count }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
-  if (ev.kind === 'merge-done') { rec.merge = { status: 'done', tokens: ev.tokens }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
+  if (ev.kind === 'merge-start') { rec.merge = { status: 'running', count: ev.count }; if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
+  if (ev.kind === 'merge-done') { rec.merge = { status: 'done', tokens: ev.tokens }; if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
   if (ev.kind === 'subagent-start') {
     rec.process.push({ agent: ev.agent, task: ev.task, status: 'running', tools: 0, conclusionTokens: 0, inputTokens: 0 });
   } else {
@@ -986,17 +987,17 @@ function captureProcess(ev) {
       cur.durationMs = ev.durationMs;
     }
   }
-  if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+  if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'process') renderInternals();
 }
-function captureInternalsTools(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureInternalsTools(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.toolTurns = ev.trace || [];        // authoritative reconcile at end of turn
-  if (state.page === 'internals') renderInternals();
+  if (chatId === state.currentChatId && state.page === 'internals') renderInternals();
 }
 // Live: a tool just returned mid-loop — append it (filtered) and tick occupancy.
-function captureInternalsToolEnd(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureInternalsToolEnd(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.toolTurns = rec.toolTurns || [];
   const raw = Math.ceil((ev.resultChars || 0) / 4);
@@ -1007,15 +1008,15 @@ function captureInternalsToolEnd(ev) {
     const tb = rec.ledger.contributors.find((c) => c.key === 'tools');
     if (tb) tb.tokens += tok; else rec.ledger.contributors.push({ key: 'tools', tokens: tok });
   }
-  updateCtxMeter();
-  if (state.page === 'internals') renderInternals();
+  if (chatId === state.currentChatId) updateCtxMeter();
+  if (chatId === state.currentChatId && state.page === 'internals') renderInternals();
 }
 
-function captureMetrics(ev) {
-  const rec = state.internals[state.currentChatId];
+function captureMetrics(ev, chatId = state.currentChatId) {
+  const rec = state.internals[chatId];
   if (!rec) return;
   rec.metrics = ev;
-  if (state.page === 'internals' && state.internalsLens === 'context') renderInternals();
+  if (chatId === state.currentChatId && state.page === 'internals' && state.internalsLens === 'context') renderInternals();
 }
 
 // Render the MEASURED card (real provider usage + reductions) in the CONTEXT lens.
@@ -1578,7 +1579,7 @@ async function selectProject(id) {
 
 async function selectChat(id) {
   state.currentChatId = id;
-  el.send.disabled = false;
+  el.send.disabled = !!state.activeTurnId;
   const chat = state.chats.find((c) => c.id === id);
   if (chat?.model) { state.selected = resolveProvider(chat.model); el.modelLabel.textContent = chat.model; }
   updateCodeToggle();
@@ -1749,11 +1750,21 @@ function renderAlignForm(body, ev) {
 
 async function submit() {
   if (el.send.dataset.mode === 'stop') return; // a turn is running — the button is the stop control
+  if (state.activeTurnId) { flashComposer('a response is already running'); return; }
   const text = el.input.value.trim();
   if ((!text && !state.attachments.length) || !state.currentChatId) return;
   const missing = missingPrereqs();
   if (missing.length) { showSetupNotice(missing); return; }
   const attached = state.attachments.slice();
+  // Freeze the destination and connection before any awaited work. Navigation
+  // remains available while a model runs, so mutable global selection state is
+  // never safe to consult later in this turn.
+  const originChatId = state.currentChatId;
+  const originProjectId = state.currentProjectId;
+  const originProviderId = state.selected?.providerId;
+  const originModel = state.selected?.model;
+  const turnId = crypto.randomUUID();
+  state.activeTurnId = turnId;
   state.attachments = []; renderAttachChips();
   const userTurn = turn(text || '📎 (attached files)', 'user');
   if (attached.length) attachChipsOnTurn(userTurn, attached);
@@ -1764,21 +1775,29 @@ async function submit() {
   el.send.dataset.mode = 'stop';
   el.send.textContent = '⏹ STOP & SAVE';
   document.documentElement.classList.add('busy');
-  await window.api.messages.add({ chatId: state.currentChatId, role: 'user', content: text });
-  // Keep attachments as project documents so they persist + appear in the rail.
-  if (attached.length && state.currentProjectId) {
-    // Written to disk (not just indexed) so the coding tools can actually open
-    // them, and so the paths can be handed to the planner with this turn.
-    for (const a of attached) {
-      try {
-        const r = await window.api.documents.saveUpload({ projectId: state.currentProjectId, name: a.name, content: a.content });
-        if (r && r.path) a.path = r.path;
-      } catch {}
+  try {
+    await window.api.messages.add({ chatId: originChatId, role: 'user', content: text });
+    // Write uploads to disk so coding tools can open them, then index them as
+    // durable project documents for bounded model context on future turns.
+    if (attached.length && originProjectId) {
+      for (const a of attached) {
+        const saved = await window.api.documents.saveUpload({ projectId: originProjectId, name: a.name, content: a.content });
+        if (saved?.path) a.path = saved.path;
+      }
+      if (state.currentProjectId === originProjectId) {
+        state.documents = await window.api.documents.list(originProjectId); renderDocs();
+      }
     }
-    state.documents = await window.api.documents.list(state.currentProjectId); renderDocs();
+  } catch (err) {
+    if (state.currentChatId === originChatId) turn(`ERROR · could not save message or attachment: ${err?.message || 'unknown error'}`, 'meta');
+    else console.error('[submit] could not save message or attachment', err);
+    state.activeTurnId = null;
+    el.send.disabled = !state.currentChatId;
+    document.documentElement.classList.remove('busy');
+    return;
   }
 
-  const model = state.selected?.model;
+  const model = originModel;
   const thinking = turn('', 'assistant', model);
   const body = thinking.querySelector('.turn__body');
   const dots = document.createElement('span'); dots.className = 'typing'; dots.innerHTML = '<span></span><span></span><span></span>';
@@ -1788,6 +1807,7 @@ async function submit() {
   planReset();
   let streamed = '';
   let alignEv = null; // structured O7 decisions — rendered as a form after the reply lands
+  let streamIteration = -1;
   const nearBottom = () => el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
   // Mid-turn "tool-call limit reached" prompt: let the user grant more steps.
   function showLimitPrompt(iterations) {
@@ -1877,12 +1897,22 @@ async function submit() {
   }
 
   const unsub = window.api.onChatProgress((ev) => {
+    if (ev.turnId !== turnId || ev.chatId !== originChatId) return;
     if (ev.type === 'token') {
+      if (ev.iteration !== streamIteration) { streamed = ''; streamIteration = ev.iteration; }
       streamed += ev.text;
       const stick = nearBottom();
       streamRender(body, streamed); // prose live; html/svg buffered as placeholders
       if (stick) el.messages.scrollTop = el.messages.scrollHeight;
-    } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
+    } else if (ev.type === 'model') {
+      if (ev.iteration !== streamIteration) {
+        streamed = '';
+        streamIteration = ev.iteration;
+        body.textContent = '';
+        body.appendChild(status);
+      }
+      status.textContent = 'thinking…';
+    }
     else if (ev.type === 'process' && ev.kind === 'planning') { if (!streamed) status.textContent = 'deriving plan…'; }
     else if (ev.type === 'process' && ev.kind === 'planning-done') { if (!streamed) status.textContent = ev.steps ? `plan: ${ev.steps} steps` : 'thinking…'; }
     else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
@@ -1890,48 +1920,58 @@ async function submit() {
     else if (ev.type === 'stuck') { showStuckPrompt(ev); }
     else if (ev.type === 'action-approve') { showActionPrompt(ev); }
     else if (ev.type === 'align-form') { alignEv = ev; }
-    else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
-    else if (ev.type === 'internals') { captureInternals(ev); }
-    else if (ev.type === 'internals-tools') { captureInternalsTools(ev); }
-    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev); }
-    else if (ev.type === 'process') { captureProcess(ev); }
-    else if (ev.type === 'metrics') { captureMetrics(ev); }
+    else if (ev.type === 'stream-reset') { streamed = ''; streamIteration = -1; }  // synthesis begins — steps streamed above were working text, not the reply
+    else if (ev.type === 'internals') { captureInternals(ev, originChatId); }
+    else if (ev.type === 'internals-tools') { captureInternalsTools(ev, originChatId); }
+    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev, originChatId); }
+    else if (ev.type === 'process') { captureProcess(ev, originChatId); }
+    else if (ev.type === 'metrics') { captureMetrics(ev, originChatId); }
     else if (ev.type === 'document-saved') { onDocumentSaved(ev); }
-    planEvent(ev);
+    if (state.currentChatId === originChatId) planEvent(ev);
   });
 
   try {
-    const history = (await window.api.messages.list(state.currentChatId)).map((m) => ({ role: m.role, content: m.content }));
+    const history = (await window.api.messages.list(originChatId)).map((m) => ({ role: m.role, content: m.content }));
     if (attached.length && history.length) {
       const block = attached.map((a) => `\n\n[Attached file: ${a.name}${a.path ? ` — saved at ${a.path}` : ''}]\n\`\`\`\n${a.content}\n\`\`\``).join('');
       const last = history[history.length - 1];
       history[history.length - 1] = { ...last, content: (last.content || '') + block };
     }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: state.currentProjectId, chatId: state.currentChatId, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
-    if (res.compressed) {
+    const res = await window.api.sendMessage({
+      providerId: originProviderId, model, messages: history, text,
+      projectId: originProjectId, chatId: originChatId, turnId,
+      attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length }))
+    });
+    if (res.compressed && thinking.parentNode === el.messages) {
       const note = document.createElement('div');
       note.className = 'turn turn--meta';
       note.innerHTML = '<div class="turn__body">⚡ EARLIER HISTORY COMPRESSED TO SAVE CONTEXT</div>';
       el.messages.insertBefore(note, thinking);
     }
     clearTimeout(_streamPending);
-    // Planned turns: the authoritative reply is the synthesis (res.reply);
-    // streamed may hold per-step working text if stream-reset was missed.
-    let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
+    // The loop result is authoritative. `streamed` may contain prose from an
+    // earlier tool-request iteration and must never become durable history.
+    let finalText = (res.reply || '(empty response)').trim();
     if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
-    renderAssistantBody(body, finalText);
-    thinking._copyText = finalText;
-    if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);
-    if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
-    if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
-    el.messages.scrollTop = el.messages.scrollHeight;
-    await window.api.messages.add({ chatId: state.currentChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
+    await window.api.messages.add({ chatId: originChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
+    if (thinking.isConnected) {
+      renderAssistantBody(body, finalText);
+      thinking._copyText = finalText;
+      if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);
+      if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
+      if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
+      el.messages.scrollTop = el.messages.scrollHeight;
+    } else if (state.currentChatId === originChatId) {
+      renderMessages(await window.api.messages.list(originChatId));
+    }
   } catch (err) {
     thinking.className = 'turn turn--meta';
     thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(err?.message ?? 'request failed')}</div>`;
   } finally {
     unsub(); planStop(); renderVars();
-    el.send.dataset.mode = ''; el.send.textContent = 'SEND'; el.send.disabled = false;
+    if (state.activeTurnId === turnId) state.activeTurnId = null;
+    el.send.dataset.mode = ''; el.send.textContent = 'SEND';
+    el.send.disabled = !state.currentChatId;
     document.documentElement.classList.remove('busy'); el.input.focus();
   }
 }

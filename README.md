@@ -52,7 +52,8 @@ npm start
 The SQLite database and encrypted secrets live in the app's `userData` directory (outside this repo), so cloning the repo never carries any keys.
 
 ```bash
-node scripts/smoke.js   # smoke checks (DB, providers, MCP, compression, chat loop, skills)
+npm test                # Electron smoke checks (DB, providers, MCP, compression, chat loop, skills)
+npm run test:syntax     # parse every JavaScript source file
 ```
 
 ## Layout
