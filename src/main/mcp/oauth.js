@@ -32,7 +32,15 @@ async function fetchJson(url, opts = {}) {
     });
     const text = await res.text();
     let j = null; try { j = JSON.parse(text); } catch {}
-    if (!res.ok) throw new Error(`HTTP ${res.status}${j && j.error ? ': ' + (j.error_description || j.error) : ''}`);
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}${j && j.error ? ': ' + (j.error_description || j.error) : ''}`);
+      // Keep the MACHINE-READABLE code. "invalid_grant" is the difference
+      // between "try again in a moment" and "this grant is gone forever", and
+      // that distinction cannot be recovered from the prose afterwards.
+      err.oauthError = (j && j.error) || null;
+      err.status = res.status;
+      throw err;
+    }
     return j;
   } finally { clearTimeout(t); }
 }
@@ -49,7 +57,15 @@ async function fetchForm(url, form, opts = {}) {
     });
     const text = await res.text();
     let j = null; try { j = JSON.parse(text); } catch {}
-    if (!res.ok) throw new Error(`HTTP ${res.status}${j && j.error ? ': ' + (j.error_description || j.error) : ''}`);
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}${j && j.error ? ': ' + (j.error_description || j.error) : ''}`);
+      // Keep the MACHINE-READABLE code. "invalid_grant" is the difference
+      // between "try again in a moment" and "this grant is gone forever", and
+      // that distinction cannot be recovered from the prose afterwards.
+      err.oauthError = (j && j.error) || null;
+      err.status = res.status;
+      throw err;
+    }
     return j;
   } finally { clearTimeout(t); }
 }
@@ -123,6 +139,20 @@ async function exchangeCode(tokenEndpoint, { code, redirectUri, clientId, client
   return r;
 }
 
+/**
+ * True when a refresh failure means the GRANT IS DEAD, not that the network
+ * hiccuped. Servers that rotate refresh tokens (OAuth 2.1 / RFC 6819 §5.2.2.3)
+ * treat a second presentation of a spent token as evidence of theft and revoke
+ * the whole token family — so retrying does not just fail, it is the thing that
+ * destroys the grant. `invalid_grant` is the standard code; the replay wording
+ * is matched too because not every server sets the code.
+ */
+function isDeadGrant(error) {
+  if (!error) return false;
+  if (error.oauthError === 'invalid_grant' || error.oauthError === 'invalid_request') return true;
+  return /replay detected|token (?:has been )?revoked|refresh token (?:is )?(?:invalid|expired)/i.test(error.message || '');
+}
+
 /** Refresh an access token. Returns the fields to merge into the stored token set. */
 async function refresh(oauth) {
   if (!oauth.refresh_token) throw new Error('no refresh token');
@@ -141,39 +171,47 @@ async function refresh(oauth) {
  * Run the full interactive flow. `openExternal(url)` opens the system browser.
  * @returns {Promise<object>} token set to store encrypted
  */
-async function runAuthFlow(serverUrl, { openExternal }) {
-  const { as, scope } = await discover(serverUrl);
-  const { server, port, waitForCode } = await startLoopback();
-  try {
-    const redirectUri = `http://127.0.0.1:${port}/callback`;
-    if (!as.registration_endpoint) throw new Error('server does not support dynamic client registration');
-    const reg = await registerClient(as.registration_endpoint, redirectUri, scope);
-    const pkce = buildPkce();
-    const state = base64url(crypto.randomBytes(16));
-    const authUrl = `${as.authorization_endpoint}?` + new URLSearchParams({
-      response_type: 'code', client_id: reg.client_id, redirect_uri: redirectUri,
-      code_challenge: pkce.challenge, code_challenge_method: 'S256', state,
-      ...(scope ? { scope } : {})
-    }).toString();
-
-    await openExternal(authUrl);
-    const { code, state: returnedState } = await waitForCode();
-    if (!code) throw new Error('no authorization code returned');
-    if (returnedState !== state) throw new Error('state mismatch (possible CSRF)');
-
-    const tok = await exchangeCode(as.token_endpoint, { code, redirectUri, clientId: reg.client_id, clientSecret: reg.client_secret, verifier: pkce.verifier });
-    return {
-      access_token: tok.access_token,
-      refresh_token: tok.refresh_token || null,
-      expires_at: tok.expires_in ? Date.now() + tok.expires_in * 1000 : null,
-      client_id: reg.client_id,
-      client_secret: reg.client_secret || null,
-      token_endpoint: as.token_endpoint,
-      scope
-    };
-  } finally {
-    server.close();
-  }
+function authorizationUrl(as, registration, redirectUri, pkce, state, scope) {
+  const parameters = new URLSearchParams({
+    response_type: 'code', client_id: registration.client_id, redirect_uri: redirectUri,
+    code_challenge: pkce.challenge, code_challenge_method: 'S256', state,
+    ...(scope ? { scope } : {})
+  });
+  return `${as.authorization_endpoint}?${parameters}`;
 }
 
-module.exports = { runAuthFlow, refresh, discover, buildPkce, startLoopback, base64url };
+function storedTokenSet(token, registration, as, scope) {
+  return {
+    access_token: token.access_token, refresh_token: token.refresh_token || null,
+    expires_at: token.expires_in ? Date.now() + token.expires_in * 1000 : null,
+    client_id: registration.client_id, client_secret: registration.client_secret || null,
+    token_endpoint: as.token_endpoint, scope
+  };
+}
+
+async function authorizeWithLoopback(as, scope, loopback, openExternal) {
+  const redirectUri = `http://127.0.0.1:${loopback.port}/callback`;
+  if (!as.registration_endpoint) throw new Error('server does not support dynamic client registration');
+  const registration = await registerClient(as.registration_endpoint, redirectUri, scope);
+  const pkce = buildPkce();
+  const state = base64url(crypto.randomBytes(16));
+  await openExternal(authorizationUrl(as, registration, redirectUri, pkce, state, scope));
+  const returned = await loopback.waitForCode();
+  if (!returned.code) throw new Error('no authorization code returned');
+  if (returned.state !== state) throw new Error('state mismatch (possible CSRF)');
+  const token = await exchangeCode(as.token_endpoint, {
+    code: returned.code, redirectUri, clientId: registration.client_id,
+    clientSecret: registration.client_secret, verifier: pkce.verifier
+  });
+  return storedTokenSet(token, registration, as, scope);
+}
+
+async function runAuthFlow(serverUrl, { openExternal }) {
+  const { as, scope } = await discover(serverUrl);
+  const loopback = await startLoopback();
+  try { return await authorizeWithLoopback(as, scope, loopback, openExternal); }
+  finally { loopback.server.close(); }
+}
+
+module.exports = {
+  isDeadGrant, runAuthFlow, refresh, discover, buildPkce, startLoopback, base64url };

@@ -73,12 +73,19 @@ phases from read-only → interactive.
 
 In priority order (highest value / lowest risk first):
 
-1. **Tool-result trimming (Stage 2).** All three vendors converge here; it's the
+1. **Tool-result trimming (Stage 2) — SHIPPED 2026-08-31.** All three vendors converge here; it's the
    biggest win for an MCP-heavy app like ours where tool outputs dominate token
    growth. Keep the last N rounds verbatim, collapse older ones to a stub
    ("[result cleared — 8.2k tokens]"). Cheap, near-lossless, cache-friendly.
    *Guardrail (per the "GC without write barriers" critique): never drop pinned
-   results; always keep the most recent round.*
+   results; always keep the most recent round.* Shamrock now keeps the two
+   newest assistant/tool rounds verbatim and deterministically reduces older
+   large results to bounded head/tail evidence plus retained source URLs.
+   Tool-call pairing remains intact, and `tool-history-compact` process events
+   report the denominator (`inspected`) as well as compacted count and saved
+   characters. This runs inside both flat and planned loops, before threshold-
+   based history summarization, so one research step cannot compound its own
+   prompt indefinitely.
 2. **Cache-stable, incremental compaction (Stage 3).** Stop regenerating one
    giant summary from scratch (which nukes the prompt cache every time). Keep a
    stable prefix and fold only newly-aged turns into a running summary.
@@ -97,7 +104,7 @@ In priority order (highest value / lowest risk first):
   event vocabulary; refactor the existing assemble/compact path to emit events;
   build the CONTEXT tab (occupancy + timeline + assembled-prompt viewer),
   read-only. *Delivers the differentiator immediately, before any new algorithm.*
-- **Phase 1 — Tool-result trimming**, visible in the timeline from day one.
+- **Phase 1 — Tool-result trimming — SHIPPED**, visible in the timeline from day one.
 - **Phase 2 — Incremental, cache-stable compaction**; make the summary viewable
   then editable.
 - **Phase 3 — Sub-agents** with the sub-agent tree view.

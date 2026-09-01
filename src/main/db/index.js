@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 
 // Bump this and add a migration block below when the schema changes.
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 22;
 
 let db = null;
 
@@ -27,11 +27,7 @@ function openDatabase(dbPath) {
   return db;
 }
 
-function migrate(database) {
-  const { user_version: current } = database
-    .prepare('PRAGMA user_version')
-    .get();
-
+function migrateVersions1To5(database, current) {
   if (current < 1) {
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     database.exec(schema);
@@ -93,6 +89,9 @@ function migrate(database) {
     if (!cols.includes('working_dir')) database.exec('ALTER TABLE projects ADD COLUMN working_dir TEXT');
   }
 
+}
+
+function migrateVersions6To10(database, current) {
   // v6: projects.preferred_model (model new chats default to for this project).
   if (current < 6) {
     const cols = database.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
@@ -153,6 +152,9 @@ function migrate(database) {
     if (!cols.includes('cheat_sheet')) database.exec('ALTER TABLE projects ADD COLUMN cheat_sheet TEXT');
   }
 
+}
+
+function migrateVersions11To12(database, current) {
   // v11: task-level timing/tokens + turn duration.
   if (current < 11) {
     const tcols = database.prepare('PRAGMA table_info(turn_metrics)').all().map((c) => c.name);
@@ -183,6 +185,9 @@ function migrate(database) {
     if (!tcols.includes('tool_fell_back')) database.exec('ALTER TABLE turn_metrics ADD COLUMN tool_fell_back INTEGER');
   }
 
+}
+
+function migrateVersions13To15(database, current) {
   // v13: generated-document management — per-project output dir + rich document
   // metadata (type, version, properties: tenant/period/etc.) for a findable, indexed
   // document library.
@@ -212,6 +217,9 @@ function migrate(database) {
     if (!tcols.includes('vars_captured')) database.exec('ALTER TABLE turn_metrics ADD COLUMN vars_captured INTEGER');
   }
 
+}
+
+function migrateVersions16To19(database, current) {
   // v16: per-chat coding-harness toggle — enables the jailed file/shell tool
   // pack (coding-tools.js) rooted at the project's working_dir.
   if (current < 16) {
@@ -246,6 +254,9 @@ function migrate(database) {
     if (!mcols.includes('rating')) database.exec('ALTER TABLE messages ADD COLUMN rating INTEGER');
   }
 
+}
+
+function migrateVersions20To22(database, current) {
   // v20: the Librarian (O31) — faceted tags over documents AND chats so the
   // library and session list stay organized as they grow, plus a one-line
   // session summary. Tags are project-scoped, facet-namespaced (topic / kind /
@@ -282,8 +293,79 @@ function migrate(database) {
     if (!ccols.includes('summary')) database.exec('ALTER TABLE chats ADD COLUMN summary TEXT');
   }
 
-  // Future migrations go here as `if (current < N) { ... }` blocks.
+  // v21: app-global downstream LLM firewall connections plus a metadata-only
+  // audit trail. Raw prompts/responses are intentionally never stored here.
+  if (current < 21) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS llm_guards (
+        id INTEGER PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'openai_proxy', label TEXT,
+        base_url TEXT NOT NULL, auth_mode TEXT NOT NULL DEFAULT 'passthrough',
+        secret_ciphertext BLOB, enabled INTEGER NOT NULL DEFAULT 0,
+        status TEXT, status_detail TEXT, last_checked_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS llm_guard_events (
+        id INTEGER PRIMARY KEY,
+        guard_id INTEGER REFERENCES llm_guards(id) ON DELETE SET NULL,
+        provider_id INTEGER REFERENCES providers(id) ON DELETE SET NULL,
+        chat_id INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+        turn_id TEXT, model TEXT, operation TEXT NOT NULL DEFAULT 'chat',
+        decision TEXT NOT NULL, duration_ms INTEGER, detail TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_events_created ON llm_guard_events(id DESC);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_chat ON llm_guard_events(chat_id, id DESC);
+    `);
+  }
 
+  // v22: durable workflow contracts and per-step checkpoints. These records
+  // contain execution metadata and sanitized traces, never connector secrets.
+  if (current < 22) {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS workflow_runs (
+        id INTEGER PRIMARY KEY,
+        turn_id TEXT NOT NULL UNIQUE,
+        project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+        chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'generic',
+        contract_json TEXT NOT NULL,
+        plan_json TEXT,
+        status TEXT NOT NULL DEFAULT 'running',
+        current_step TEXT,
+        state_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+        id INTEGER PRIMARY KEY,
+        run_id INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        step_key TEXT NOT NULL,
+        step_json TEXT,
+        result_json TEXT,
+        values_json TEXT,
+        tool_trace_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (run_id, step_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_chat ON workflow_runs(chat_id, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_run ON workflow_checkpoints(run_id, id ASC);
+    `);
+  }
+
+}
+
+function migrate(database) {
+  const { user_version: current } = database.prepare('PRAGMA user_version').get();
+  migrateVersions1To5(database, current);
+  migrateVersions6To10(database, current);
+  migrateVersions11To12(database, current);
+  migrateVersions13To15(database, current);
+  migrateVersions16To19(database, current);
+  migrateVersions20To22(database, current);
   if (current !== SCHEMA_VERSION) {
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }

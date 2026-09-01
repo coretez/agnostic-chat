@@ -4,6 +4,7 @@ const { app, BrowserWindow, shell } = require('electron');
 const path = require('node:path');
 
 const { openDatabase } = require('./db');
+const repo = require('./db/repo');
 const devServer = require('./dev-server');
 const { registerIpc } = require('./ipc');
 const mcpManager = require('./mcp/manager');
@@ -34,8 +35,8 @@ if (app.isPackaged && (app.commandLine.hasSwitch('remote-debugging-port') || app
  *  - sandbox: true — renderer runs in an OS-level sandbox.
  * The renderer reaches the outside world ONLY through the typed bridge in preload.js.
  */
-function createWindow() {
-  const win = new BrowserWindow({
+function windowOptions() {
+  return {
     width: 1100,
     height: 760,
     minWidth: 720,
@@ -52,52 +53,53 @@ function createWindow() {
       sandbox: true,
       webviewTag: true // artifact panel embeds a real Chromium view (hardened below)
     }
-  });
+  };
+}
 
-  // Harden any <webview> (artifact preview): no Node, isolated, no preload,
-  // and it can never spawn app windows.
-  win.webContents.on('will-attach-webview', (_e, webPreferences) => {
-    delete webPreferences.preload;
-    webPreferences.nodeIntegration = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.sandbox = true;
-    // NOTE: do NOT set webPreferences.plugins here. It looks like the fix for
-    // a PDF showing black, and measurement says the opposite: with a file:
-    // URL, plugins:false renders the document (1693 distinct colours in a
-    // captured frame) and plugins:true fails the load outright with
-    // ERR_FAILED. The black screen was the data: URL, not the plugin flag.
-  });
+function hardenWebview(_event, webPreferences) {
+  delete webPreferences.preload;
+  webPreferences.nodeIntegration = false;
+  webPreferences.contextIsolation = true;
+  webPreferences.sandbox = true;
+}
 
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-
-  // Diagnostics: surface renderer console + preload errors in the terminal.
-  win.webContents.on('preload-error', (_e, p, error) => {
-    console.error('[preload-error]', p, error && (error.stack || error.message || error));
+function attachDiagnostics(window) {
+  window.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error('[preload-error]', preloadPath, error && (error.stack || error.message || error));
   });
-  win.webContents.on('console-message', (...args) => {
-    const msg = args.length >= 3 ? args[2] : (args[0] && args[0].message);
-    console.log('[renderer]', msg);
+  window.webContents.on('console-message', (...args) => {
+    const message = args.length >= 3 ? args[2] : (args[0] && args[0].message);
+    console.log('[renderer]', message);
   });
+}
 
-  // Open target=_blank / window.open links in the user's real browser, never
-  // in-app — and only web URLs: file:/custom schemes via openExternal are an
-  // execution primitive (same rule as ipc's app:openExternal).
-  win.webContents.setWindowOpenHandler(({ url }) => {
+function restrictNavigation(window) {
+  window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  // The app window must never navigate away from its own local file.
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) e.preventDefault();
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) event.preventDefault();
   });
+}
 
-  if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+function createWindow() {
+  const window = new BrowserWindow(windowOptions());
+  window.webContents.on('will-attach-webview', (_e, webPreferences) => {
+    hardenWebview(_e, webPreferences);
+  });
+  window.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  attachDiagnostics(window);
+  restrictNavigation(window);
+  if (isDev) window.webContents.openDevTools({ mode: 'detach' });
 }
 
 app.whenReady().then(() => {
   // Open the DB in the app's userData dir and register all IPC handlers
   // before the first window can talk to them.
   openDatabase(path.join(app.getPath('userData'), 'agnostic-chat.db'));
+  const recovered = repo.workflowRuns.recoverInterrupted();
+  if (recovered) console.log(`[workflow recovery] marked ${recovered} interrupted run(s) partial`);
   registerIpc();
 
   createWindow();

@@ -118,20 +118,15 @@ function partitionRecords(raw) {
 /** Ratified direction decisions, deterministically validated (O8). */
 function normalizeRecords(raw) { return partitionRecords(raw).records; }
 
+function addPlanningStandards(parts, rulebook, formatTarget) {
+  if (rulebook) parts.push('PROJECT RULEBOOK (non-negotiable rules for all work in this repository — every plan and step must comply):\n' + clip(rulebook, 6000));
+  if (formatTarget) parts.push('OUTPUT FORMAT TARGET (library file — the visual standard every produced document must reproduce; plan an early step to read it): ' + formatTarget);
+}
+
 function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents = [], projectDocs = '', repoMap = '', rulebook = '', formatTarget = '', branding = '', rawData = false }) {
   const parts = [];
   if (cheatSheet) parts.push('PROJECT BRIEF:\n' + clip(cheatSheet, 4000));
-  if (rulebook) {
-    // O29: the working-dir rulebook (AGENT_RULES.md | AGENTS.md | CLAUDE.md)
-    // travels beside the brief — plans and steps must comply with it, and
-    // anything the repo's own rulebook forbids is out of bounds for a plan.
-    parts.push('PROJECT RULEBOOK (non-negotiable rules for all work in this repository — every plan and step must comply):\n' + clip(rulebook, 6000));
-  }
-  if (formatTarget) {
-    // O24: the documents harness's visual standard — plans that produce a
-    // document must read it early and compose against it.
-    parts.push('OUTPUT FORMAT TARGET (library file — the visual standard every produced document must reproduce; plan an early step to read it): ' + formatTarget);
-  }
+  addPlanningStandards(parts, rulebook, formatTarget);
   if (branding) parts.push('TARGET DOCUMENT BRANDING (apply to every deliverable): ' + clip(branding, 800));
   if (rawData) parts.push('RAW DATA EXPORT: ON — plans that produce a report must also save the collected tabular data as a spreadsheet (save_document, format "xlsx", type "raw-data", content JSON {"sheets":[{"name","rows"}]}).');
   if (repoMap) {
@@ -167,6 +162,20 @@ function planContext({ cheatSheet, loadedSkills = [], tools = [], store, agents 
   return parts.join('\n\n') || '(no additional context)';
 }
 
+function normalizedDecisions(parsed, enabled) {
+  if (!enabled || !Array.isArray(parsed.decisions)) return [];
+  return parsed.decisions.filter((decision) => decision && typeof decision.question === 'string' && decision.question.trim()).map((decision) => ({
+    question: decision.question.trim(),
+    options: (Array.isArray(decision.options) ? decision.options : []).filter((option) => typeof option === 'string' && option.trim()).map((option) => option.trim()),
+    recommendation: typeof decision.recommendation === 'string' ? decision.recommendation.trim() : ''
+  }));
+}
+
+function normalizedOrchestrator(parsed) {
+  if (!parsed.orchestrator || typeof parsed.orchestrator !== 'object') return null;
+  return { merge: String(parsed.orchestrator.merge || '').trim(), on_conflict: String(parsed.orchestrator.on_conflict || '').trim() };
+}
+
 // Coding-mode plan-shape contract (HARNESS_OBJECTIVES O7/O10): alignment
 // before direction-setting work, verification after code-writing work, and no
 // steps the runtime can't perform. Appended to the guidance only when the
@@ -191,7 +200,9 @@ const DOCUMENTS_RULES = `
 - COLLECT IN PARALLEL: collection steps that pull from independent sources should be delegate=true, and parallel when they don't depend on each other's discoveries.
 - BUILD ON THE LIBRARY: when the request extends or revises existing work, an early step reads the relevant library documents (read_file at the PROJECT LIBRARY paths). Revise an existing document by saving the same title/type again (versioning is automatic) — never create a near-duplicate.
 - DELIVERABLE CONTRACT: the final document is saved with save_document (title, type, format, properties including customer/tenant and period where they apply); the chat reply is a short summary naming the saved file — never the full document pasted into chat.
+- SAVE-FIRST FOR LARGE DOCUMENTS: compose and call save_document in the SAME step. Never produce a full report/HTML body as an intermediate step result for a later save step; that generates the document twice and leaves no durable artifact if the first generation stalls. After save_document succeeds, return only the saved path and a compact status summary.
 - VERIFY: a plan that produces a document MUST end with a verification step that re-checks the saved document's claims against the collected data and sources, its internal consistency (numbers, dates, names), and its completeness against the request — fixing and re-saving if needed.
+- SOURCE-GROUNDED SYSTEM DOCUMENTATION: when documenting how this program, its modes, or a process actually works, first inspect the relevant implementation files with read_file. The saved artifact must include a short "Source evidence" section naming the inspected paths. A diagram that merely restates the prompt is incomplete.
 - FORMAT TARGET: when the context names an OUTPUT FORMAT TARGET file, the plan MUST read it (read_file) before any compose step, and the compose step MUST reproduce its visual system — fonts, masthead, header, section styling, tables, charts, print rules — with the new content. The format is the project's standard, not a suggestion.
 - DOCUMENT TARGETS: the project's Target Document Format, Target Document Branding, and raw-data export are project-level facts — when set they appear in this context. If the user asks for a document while the format or branding is MISSING from the context, include a decision for each missing target (the user can answer in chat or set them on the project OVERVIEW under DOCUMENT TARGETS). When the user states a target in chat, put it in "record" — {key:"document_branding"}, {key:"document_format"}, or {key:"document_rawdata", value:"on"|"off"} — so it persists to the project.`;
 
@@ -279,21 +290,13 @@ async function derivePlan({ connector, model, userText, cheatSheet, loadedSkills
     // Alignment outcome (O7): open direction decisions end the turn awaiting
     // the user — no steps run. Only honored in the modes whose rules elicit
     // it (coding: platform/stack; documents: audience/format/type).
-    const decisions = ((codingMode || documentsMode) && Array.isArray(parsed.decisions) ? parsed.decisions : [])
-      .filter((d) => d && typeof d.question === 'string' && d.question.trim())
-      .map((d) => ({
-        question: d.question.trim(),
-        options: (Array.isArray(d.options) ? d.options : []).filter((o) => typeof o === 'string' && o.trim()).map((o) => o.trim()),
-        recommendation: typeof d.recommendation === 'string' ? d.recommendation.trim() : ''
-      }));
+    const decisions = normalizedDecisions(parsed, codingMode || documentsMode);
     if (decisions.length) return { simple: true, align: true, decisions, goal: parsed.goal || '', steps: [], record , droppedRecords };
     const steps = normalizeSteps(parsed.steps);
     const merge = typeof parsed.merge === 'string' ? parsed.merge.trim() : '';
     // O16: the recombination contract for fan-out groups — the planner that
     // divides work also authors how it merges.
-    const orchestrator = parsed.orchestrator && typeof parsed.orchestrator === 'object'
-      ? { merge: String(parsed.orchestrator.merge || '').trim(), on_conflict: String(parsed.orchestrator.on_conflict || '').trim() }
-      : null;
+    const orchestrator = normalizedOrchestrator(parsed);
     // A 0/1-step plan is the trivial-turn gate: nothing to orchestrate.
     if (parsed.simple || steps.length <= 1) return { simple: true, goal: parsed.goal || '', steps, merge, record , droppedRecords };
     return { simple: false, goal: parsed.goal || '', steps, merge, record, orchestrator , droppedRecords };

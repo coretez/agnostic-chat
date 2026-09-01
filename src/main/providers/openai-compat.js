@@ -6,56 +6,26 @@ const { CODES, providerError } = require('./errors');
 // Gemini's OpenAI-compat endpoint). All speak /chat/completions and /models with
 // a Bearer key. Runs in the MAIN process only — the key never reaches the renderer.
 
-const { withRetry, httpError } = require('./retry');
+const { withRetry } = require('./retry');
+const { requestJson, guardMetadata, createStreamDeadline, connectStream } = require('./http-transport');
+const STREAM_TOTAL_TIMEOUT_MS = 180000;
+const CHAT_REQUEST_RETRIES = 0;
 
 function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
 
 // Chain an external abort signal (the user's STOP) onto a request's internal
 // timeout controller, so a stop kills the in-flight HTTP call immediately.
-function linkSignal(ctrl, signal) {
-  if (!signal) return;
-  if (signal.aborted) { ctrl.abort(); return; }
-  signal.addEventListener('abort', () => ctrl.abort(), { once: true });
-}
-
 async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }) {
-  const ctrl = new AbortController();
-  linkSignal(ctrl, signal);
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl.signal
-    });
-    const text = await res.text();
-    let json;
-    try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-    if (!res.ok) {
-      const detail = json?.error?.message || json?.message || (text ? text.slice(0, 400) : '');
-      throw httpError(res.status, detail, res.headers.get('retry-after'));
-    }
-    return json;
-  } catch (err) {
-    // Distinguish the user's STOP from a genuine timeout — same AbortError,
-    // very different meaning.
-    if (err.name === 'AbortError') {
-      // The cause is known HERE — carry it as a code, not a sentence.
-      throw signal && signal.aborted
-        ? providerError(CODES.USER_ABORT, 'stopped by user')
-        : providerError(CODES.PROVIDER_TIMEOUT, `Request timed out after ${timeoutMs / 1000}s`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(t);
-  }
+  return requestJson(url, {
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    method, body, timeoutMs, signal
+  });
 }
 
-function safeJson(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
+function parseToolArgs(s) {
+  try { return { ok: true, args: JSON.parse(s || '{}') }; }
+  catch { return { ok: false, args: null }; }
+}
 
 // Normalize an MCP tool's JSON Schema for provider function-calling. Gemini's
 // OpenAI-compatible endpoint (and strict OpenAI) reject several JSON-Schema
@@ -109,8 +79,8 @@ function toOpenAiMsg(m) {
   return { role: m.role, content: m.content ?? '' };
 }
 
-// Streaming chat completion (SSE). Idle-timeout based — no total timeout, so a
-// long generation never times out as long as tokens keep flowing.
+// Streaming chat completion (SSE). Both idle and wall-clock deadlines apply:
+// keepalive/reasoning traffic must not hold a workflow checkpoint forever.
 // Normalize an OpenAI-style usage object to our shape (best-effort; null if absent).
 function normalizeUsage(u) {
   if (!u) return null;
@@ -122,93 +92,97 @@ function normalizeUsage(u) {
   };
 }
 
-async function streamChat(base, key, body, onDelta, signal, onRetry) {
-  const ctrl = new AbortController();
-  linkSignal(ctrl, signal);
-  // Idle = time with NO stream data. Thinking models (Kimi K2.x, o-series
-  // style) can reason silently for minutes before the first delta — 90s
-  // aborted healthy requests mid-think (seen live 2026-08-08: a monthly-
-  // report turn died with "This operation was aborted"). A stalled stream
-  // still dies, just patiently.
-  const IDLE = 300000;
-  let idle = setTimeout(() => ctrl.abort(), IDLE);
-  const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
-  let res;
-  try {
-    // The connect phase is safely retryable — nothing has streamed yet. Once
-    // deltas flow, failures surface as errors instead (no duplicate output).
-    res = await withRetry(async () => {
-      let r;
-      try {
-        r = await fetch(`${base}/chat/completions`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-          body: JSON.stringify(body),
-          signal: ctrl.signal
-        });
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          throw signal && signal.aborted
-            ? providerError(CODES.USER_ABORT, 'stopped by user')
-            : providerError(CODES.STREAM_STALLED, 'stream stalled (no data)');
-        }
-        const err = new Error(`stream connect failed: ${e.message}`);
-        err.retryable = true; // transient network failure, nothing sent to the UI yet
-        throw err;
-      }
-      if (!r.ok) { const t = await r.text(); throw httpError(r.status, t.slice(0, 400), r.headers.get('retry-after')); }
-      return r;
-    }, { retries: 3, signal: ctrl.signal, onRetry });
-  } catch (e) { clearTimeout(idle); throw e; }
+function mergeOpenAiToolDelta(state, toolDelta) {
+  const index = toolDelta.index ?? 0;
+  let toolCall = state.toolCallsByIndex.get(index);
+  if (!toolCall) {
+    toolCall = { id: toolDelta.id, type: toolDelta.type || 'function', function: { name: '', arguments: '' } };
+    state.toolCallsByIndex.set(index, toolCall);
+  }
+  if (toolDelta.id) toolCall.id = toolDelta.id;
+  if (toolDelta.function?.name) toolCall.function.name = toolDelta.function.name;
+  if (toolDelta.function?.arguments) toolCall.function.arguments += toolDelta.function.arguments;
+  for (const key of Object.keys(toolDelta)) {
+    if (!['index', 'id', 'type', 'function'].includes(key)) toolCall[key] = toolDelta[key];
+  }
+}
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let text = '';
-  let usage = null;
-  let finishReason = null;
-  const byIndex = new Map();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bump();
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (data === '[DONE]') { buf = ''; break; }
-        let j; try { j = JSON.parse(data); } catch { continue; }
-        // In-stream error frame (compat gateways emit these on mid-stream
-        // failure). Silently dropping it presented partial text as a complete
-        // answer — surface it as the failure it is.
-        if (j.error) throw new Error(`stream error: ${j.error.message || JSON.stringify(j.error).slice(0, 200)}`);
-        if (j.usage) usage = j.usage; // final chunk (include_usage) carries token counts
-        const choice = j.choices?.[0] || {};
-        if (choice.finish_reason) finishReason = choice.finish_reason;
-        const delta = choice.delta || {};
-        if (delta.content) { text += delta.content; onDelta({ text: delta.content }); }
-        for (const tc of (delta.tool_calls || [])) {
-          const idx = tc.index ?? 0;
-          let cur = byIndex.get(idx);
-          if (!cur) { cur = { id: tc.id, type: tc.type || 'function', function: { name: '', arguments: '' } }; byIndex.set(idx, cur); }
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) cur.function.name = tc.function.name;
-          if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
-          for (const k of Object.keys(tc)) if (!['index', 'id', 'type', 'function'].includes(k)) cur[k] = tc[k]; // preserve extras (e.g. gemini thought_signature)
-        }
-      }
+function processOpenAiEvent(state, event, onDelta) {
+  if (event.error) throw new Error(`stream error: ${event.error.message || JSON.stringify(event.error).slice(0, 200)}`);
+  if (event.usage) state.usage = event.usage;
+  const choice = event.choices?.[0] || {};
+  if (choice.finish_reason) state.finishReason = choice.finish_reason;
+  const delta = choice.delta || {};
+  if (delta.content) {
+    state.text += delta.content;
+    onDelta({ text: delta.content });
+  }
+  for (const toolDelta of delta.tool_calls || []) mergeOpenAiToolDelta(state, toolDelta);
+}
+
+function processOpenAiLines(state, onDelta) {
+  let newlineIndex;
+  while ((newlineIndex = state.buffer.indexOf('\n')) >= 0) {
+    const line = state.buffer.slice(0, newlineIndex).trim();
+    state.buffer = state.buffer.slice(newlineIndex + 1);
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') { state.buffer = ''; break; }
+    try { processOpenAiEvent(state, JSON.parse(data), onDelta); } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      throw error;
     }
-  } finally { clearTimeout(idle); }
+  }
+}
 
-  const tcArr = [...byIndex.values()];
-  const assistantRaw = { role: 'assistant', content: text || null };
-  if (tcArr.length) assistantRaw.tool_calls = tcArr;
-  const toolCalls = tcArr.map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-  return { text, toolCalls, assistantRaw, usage: normalizeUsage(usage), finishReason, truncated: finishReason === 'length' };
+async function readOpenAiStream(response, onDelta, deadline) {
+  const state = { buffer: '', text: '', usage: null, finishReason: null, toolCallsByIndex: new Map() };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    deadline.bump();
+    state.buffer += decoder.decode(value, { stream: true });
+    processOpenAiLines(state, onDelta);
+  }
+  return state;
+}
+
+function openAiStreamResult(state, response) {
+  const toolCallMessages = [...state.toolCallsByIndex.values()];
+  const assistantRaw = { role: 'assistant', content: state.text || null };
+  if (toolCallMessages.length) assistantRaw.tool_calls = toolCallMessages;
+  const parsedToolCalls = toolCallMessages.map((toolCall) => ({ toolCall, parsed: parseToolArgs(toolCall.function?.arguments) }));
+  // A length-capped response is not a committed function call. Its JSON may
+  // be cut mid-string (the common case) or happen to close just before other
+  // required output was truncated. Never route either form to a mutating tool.
+  const malformedCount = parsedToolCalls.filter((entry) => !entry.parsed.ok).length;
+  const toolCalls = state.finishReason === 'length' ? [] : parsedToolCalls
+    .filter((entry) => entry.parsed.ok)
+    .map(({ toolCall, parsed }) => ({ id: toolCall.id, name: toolCall.function?.name, args: parsed.args }));
+  return {
+    text: state.text, toolCalls, assistantRaw, usage: normalizeUsage(state.usage), finishReason: state.finishReason,
+    truncated: state.finishReason === 'length', malformedToolCalls: malformedCount,
+    discardedToolCalls: state.finishReason === 'length' ? toolCallMessages.length : malformedCount,
+    guardMeta: guardMetadata(response)
+  };
+}
+
+async function streamChat(base, key, body, onDelta, signal, onRetry, timeoutMs = STREAM_TOTAL_TIMEOUT_MS) {
+  const deadline = createStreamDeadline(signal, timeoutMs);
+  try {
+    const response = await connectStream({
+      url: `${base}/chat/completions`,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body, signal, onRetry, deadline
+    });
+    const state = await readOpenAiStream(response, onDelta, deadline);
+    return openAiStreamResult(state, response);
+  } catch (error) {
+    if (error?.name === 'AbortError') throw signal?.aborted ? providerError(CODES.USER_ABORT, 'stopped by user') : deadline.timeoutError();
+    throw error;
+  } finally { deadline.clear(); }
 }
 
 /**
@@ -218,12 +192,15 @@ function openaiCompat({ baseUrl, key }) {
   const base = trimSlash(baseUrl);
   return {
     async listModels() {
-      const json = await req(`${base}/models`, { key, timeoutMs: 15000 });
+      const { json } = await req(`${base}/models`, { key, timeoutMs: 15000 });
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).filter(isLikelyChatModel).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal, onRetry }) {
-      const body = { model, messages: messages.map(toOpenAiMsg), stream: !!onDelta };
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal, onRetry, timeoutMs = STREAM_TOTAL_TIMEOUT_MS }) {
+      timeoutMs = Math.max(30000, Math.min(600000, Number(timeoutMs) || STREAM_TOTAL_TIMEOUT_MS));
+      const outboundMessages = messages.map(toOpenAiMsg).filter((message) =>
+        !(message.role === 'assistant' && !message.content && !(message.tool_calls && message.tool_calls.length)));
+      const body = { model, messages: outboundMessages, stream: !!onDelta };
       if (onDelta) body.stream_options = { include_usage: true }; // ask for a final usage chunk
       if (maxTokens) body.max_tokens = maxTokens;
       if (tools && tools.length) {
@@ -237,15 +214,18 @@ function openaiCompat({ baseUrl, key }) {
       }
       if (!onDelta) {
         // Non-streaming path (used for test pings + compression summaries).
-        const json = await withRetry(() => req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs: 300000, signal }), { retries: 3, signal, onRetry });
+        const { json, responseMeta } = await withRetry(() => req(`${base}/chat/completions`, { key, method: 'POST', body, timeoutMs, signal }), { retries: CHAT_REQUEST_RETRIES, signal, onRetry });
         const choice = json?.choices?.[0] || {};
         const msg = choice.message || {};
-        const toolCalls = (msg.tool_calls || []).map((tc) => ({ id: tc.id, name: tc.function?.name, args: safeJson(tc.function?.arguments) }));
-        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage), finishReason: choice.finish_reason || null, truncated: choice.finish_reason === 'length' };
+        const parsedToolCalls = (msg.tool_calls || []).map((tc) => ({ tc, parsed: parseToolArgs(tc.function?.arguments) }));
+        const truncated = choice.finish_reason === 'length';
+        const toolCalls = truncated ? [] : parsedToolCalls.filter((entry) => entry.parsed.ok)
+          .map(({ tc, parsed }) => ({ id: tc.id, name: tc.function?.name, args: parsed.args }));
+        return { text: msg.content || '', toolCalls, assistantRaw: msg, raw: json, usage: normalizeUsage(json.usage), finishReason: choice.finish_reason || null, truncated, malformedToolCalls: parsedToolCalls.filter((entry) => !entry.parsed.ok).length, discardedToolCalls: truncated ? parsedToolCalls.length : parsedToolCalls.filter((entry) => !entry.parsed.ok).length, guardMeta: responseMeta };
       }
-      return streamChat(base, key, body, onDelta, signal, onRetry);
+      return streamChat(base, key, body, onDelta, signal, onRetry, timeoutMs);
     }
   };
 }
 
-module.exports = { openaiCompat };
+module.exports = { openaiCompat, STREAM_TOTAL_TIMEOUT_MS, CHAT_REQUEST_RETRIES };

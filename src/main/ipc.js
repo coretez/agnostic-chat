@@ -1,13 +1,15 @@
 'use strict';
 
 const { ipcMain, shell, dialog, BrowserWindow } = require('electron');
+const path = require('node:path');
 const repo = require('./db/repo');
 const { getConnector, testConnection, registryList } = require('./providers');
+const { normalizeBaseUrl, testGuard } = require('./guards');
 const { connectAndList } = require('./mcp/client');
 const mcpManager = require('./mcp/manager');
 const { runAuthFlow } = require('./mcp/oauth');
 const { runChatLoop } = require('./chat-loop');
-const { executePlan, executeStep, synthesize } = require('./execute');
+const { executePlan, executeStep, synthesize, renderProviderPausedReply, planStatusResults } = require('./execute');
 const { reviewChanges } = require('./review');
 const { derivePlan, refinePlan } = require('./plan-derive');
 const { VariableStore, SET_VARIABLE_TOOL } = require('./variables');
@@ -15,19 +17,84 @@ const { enrichSkillRow, parseFrontmatter, skillPreconditions } = require('./skil
 const { runSubagent, mergeResults, DEFAULT_AGENT, DELEGATE_TOOL, ASSIGN_TOOL } = require('./subagent');
 const { runEvaluator } = require('./evaluator');
 const { selectContext, applyToolCeiling } = require('./context-select');
+const { TurnToolCache } = require('./turn-tool-cache');
 const { buildCodingTools, buildLibraryTools, hasGit, initGit, commitStep, runCheckCommand, didMutate, MUTATING_TOOLS, WRITING_TOOLS } = require('./coding-tools');
 const { driftScan } = require('./drift');
 const projectDocs = require('./project-docs');
 const { updateDocs } = require('./doc-writer');
 const webTools = require('./web-tools');
 const projectFacts = require('./project-facts');
+const devServer = require('./dev-server');
+const { ensureStockHost } = require('./workflow-hosting');
+const { verifyPrimarySources } = require('./primary-source-verifier');
 const librarian = require('./librarian');
+const { createWorkflowContract, renderContract, scopeAlignment, constrainPlan, filterMcpToolset, shouldRepairAcceptance, validateWorkflow, renderResumeContext, withResumeContext, resumePlan, focusResumedStockStep, effectiveStepOutputTokenBudget, effectiveStepDurationBudget, effectiveProviderResponseBudget } = require('./workflow-contracts');
 
 // Cost-outlier detection (O14): a turn is flagged when it costs this many
 // times the project's recent median input tokens. Needs MIN_HISTORY prior
 // measured turns before it says anything, so a new project stays quiet.
 const COST_OUTLIER_FACTOR = 3;
 const MIN_COST_HISTORY = 5;
+
+// Once a plan has explicit delegated/parallel steps, ad-hoc delegate/assign
+// calls inside a sequential step make the run unbounded and unauditable. The
+// planner owns delegation in planned mode; step models receive only domain
+// tools plus set_variable (injected by executeStep itself).
+function toolsForPlannedStep(tools = []) {
+  return tools.filter((t) => t && !['set_variable', 'delegate', 'assign'].includes(t.name));
+}
+
+function reviewRepairVerified(result, checkRequired, checkState) {
+  return !(result && result.incomplete) && (!checkRequired || !!(checkState && checkState.ran && !checkState.failing));
+}
+
+function recordDelegatedResult(delegation, taskLog, result, label) {
+  delegation.count += 1;
+  delegation.absorbedTokens += result.inputTokens || 0;
+  taskLog.push({ kind: 'subagent', label, tokens: result.inputTokens || result.conclusionTokens || 0, durationMs: result.durationMs, ok: true });
+}
+
+function expandParallelStepTask(step, planSteps) {
+  const shorthand = String(step && step.task || '').match(/^same as step\s+(\d+)/i);
+  if (!shorthand) return String(step && step.task || '');
+  const reference = (planSteps || []).find((candidate) => Number(candidate.id) === Number(shorthand[1]));
+  if (!reference) return String(step.task || '');
+  const ordinal = String(step.produces || '').match(/investigation_(\d+)/i);
+  return ordinal ? String(reference.task || '').replace(/\btop_case_\d+_id\b/g, `top_case_${ordinal[1]}_id`) : String(reference.task || '');
+}
+
+function modeFlowSourceContext(contract, repoMap) {
+  if (!contract || contract.kind !== 'mode-flow' || !repoMap) return '';
+  return `\n\nAUTHORITATIVE SOURCE ROOT FILE MAP — these are application files, separate from the document library. Read relevant source files from these exact paths before drawing conclusions:\n${String(repoMap).slice(0, 12000)}`;
+}
+
+function combineAbortSignals(signals = []) {
+  const active = signals.filter(Boolean);
+  if (active.length < 2) return active[0];
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(active);
+  const ctrl = new AbortController();
+  for (const signal of active) {
+    if (signal.aborted) { ctrl.abort(); break; }
+    signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+  return ctrl.signal;
+}
+
+let mcpAuthBroadcastInstalled = false;
+
+function guardedConnector(provider, providerKey, context = {}) {
+  const guard = repo.guards.active();
+  if (!guard) return getConnector(provider, providerKey);
+  const guardKey = repo.guards.reveal(guard.id);
+  if (guard.auth_mode === 'bearer' && !guardKey) throw new Error(`${guard.label || 'The enabled guard'} needs a bearer token.`);
+  return getConnector(provider, providerKey, {
+    guard, guardKey,
+    onAudit: (event) => {
+      try { return repo.guards.recordEvent({ guardId: guard.id, providerId: provider.id, ...context, ...event }); }
+      catch (error) { console.error('[guard audit]', error && error.message); }
+    }
+  });
+}
 
 /**
  * Confirm an irreversible delete, main-side. Destroy-confirmations belong on
@@ -108,53 +175,49 @@ function classifyContributor(m) {
   return null; // history/current decided by position
 }
 
-function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelect, toolScope }) {
+function ledgerTokenBuckets(convo, tools) {
   const buckets = { system: 0, skills: 0, summary: 0, history: 0, current: 0, tools: 0 };
-  const nonSystem = convo.filter((m) => m.role !== 'system');
-  const lastNonSystem = nonSystem[nonSystem.length - 1];
-  for (const m of convo) {
-    const t = estimateTokens([m]);
-    const bucket = classifyContributor(m);
-    if (bucket) buckets[bucket] += t;
-    else if (m === lastNonSystem) buckets.current += t;
-    else buckets.history += t;
+  const nonSystem = convo.filter((message) => message.role !== 'system');
+  const current = nonSystem[nonSystem.length - 1];
+  for (const message of convo) {
+    const bucket = classifyContributor(message);
+    buckets[bucket || (message === current ? 'current' : 'history')] += estimateTokens([message]);
   }
   buckets.tools = tools && tools.length ? Math.ceil(JSON.stringify(tools).length / 4) : 0;
+  return { buckets, current };
+}
 
-  const total = Object.values(buckets).reduce((a, b) => a + b, 0);
-  const window = contextWindowFor(model);
-  const contributors = Object.entries(buckets)
-    .filter(([, v]) => v > 0)
-    .map(([key, tokens]) => ({ key, tokens }));
-
+function ledgerEvents({ convo, compressed, tokensBefore, skillSelect, toolScope }) {
   const events = [];
-  if (skillSelect) {
-    events.push({ type: 'skill-select', available: skillSelect.available, selected: (skillSelect.selected || []).length, saved: skillSelect.savedTokens || 0, error: skillSelect.error });
-  }
-  if (toolScope) {
-    events.push({ type: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
-  }
+  if (skillSelect) events.push({ type: 'skill-select', available: skillSelect.available, selected: (skillSelect.selected || []).length, saved: skillSelect.savedTokens || 0, error: skillSelect.error });
+  if (toolScope) events.push({ type: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
   if (compressed) {
-    const after = estimateTokens(convo);
-    events.push({ type: 'compact', tokensBefore, tokensAfter: after, saved: Math.max(0, tokensBefore - after) });
+    const tokensAfter = estimateTokens(convo);
+    events.push({ type: 'compact', tokensBefore, tokensAfter, saved: Math.max(0, tokensBefore - tokensAfter) });
   }
+  return events;
+}
 
-  // The exact message list handed to the model (large individual messages capped
-  // for transport, with a note — the point is faithful visibility).
-  const CAP = 20000;
-  const assembled = convo.map((m) => {
-    const content = m.content || '';
-    const clipped = content.length > CAP;
+function assembledLedgerMessages(convo, current) {
+  const cap = 20000;
+  return convo.map((message) => {
+    const content = message.content || ''; const clipped = content.length > cap;
     return {
-      role: m.role,
-      contributor: classifyContributor(m) || (m === lastNonSystem ? 'current' : 'history'),
-      tokens: estimateTokens([m]),
-      content: clipped ? content.slice(0, CAP) : content,
-      clippedChars: clipped ? content.length - CAP : 0,
-      toolCalls: (m.toolCalls || []).map((t) => t.name)
+      role: message.role, contributor: classifyContributor(message) || (message === current ? 'current' : 'history'),
+      tokens: estimateTokens([message]), content: clipped ? content.slice(0, cap) : content,
+      clippedChars: clipped ? content.length - cap : 0,
+      toolCalls: (message.toolCalls || []).map((tool) => tool.name)
     };
   });
+}
 
+function buildLedger({ convo, tools, model, compressed, tokensBefore, skillSelect, toolScope }) {
+  const { buckets, current } = ledgerTokenBuckets(convo, tools);
+  const total = Object.values(buckets).reduce((a, b) => a + b, 0);
+  const window = contextWindowFor(model);
+  const contributors = Object.entries(buckets).filter(([, tokens]) => tokens > 0).map(([key, tokens]) => ({ key, tokens }));
+  const events = ledgerEvents({ convo, compressed, tokensBefore, skillSelect, toolScope });
+  const assembled = assembledLedgerMessages(convo, current);
   return { type: 'internals', model, window, total, contributors, events, assembled, toolCount: tools ? tools.length : 0, skillSelect: skillSelect || null };
 }
 
@@ -333,7 +396,7 @@ function buildVocabulary(projectId) {
   return v;
 }
 
-function registerIpc() { // (documentPathAllowed exported below for smoke coverage)
+function registerProjectHandlers() {
   // Projects
   ipcMain.handle('projects:list', (_e, opts) => repo.projects.list(opts));
   ipcMain.handle('projects:create', (_e, input) => repo.projects.create(input));
@@ -423,6 +486,9 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     if (res.canceled || !res.filePaths.length) return { ok: false };
     return { ok: true, project: repo.projects.setOutputDir(id, res.filePaths[0]) };
   });
+}
+
+function registerDocumentFileHandlers() {
   ipcMain.handle('documents:remove', (_e, { id }) => repo.documents.remove(id));
   // Attachments are written to disk under the project's document library —
   // an upload that exists only as a DB blob cannot be opened by read_file,
@@ -438,7 +504,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     let row = null;
     try {
       row = repo.documents.saveGenerated({
-        projectId, title: safe, path: w.absPath, mimeType: 'text/plain',
+        projectId, title: safe, path: w.absPath, mimeType: docs.mimeForPath(w.absPath),
         source: 'upload', docType: null, version: w.version
       });
     } catch (e) { console.error('[upload index]', e && e.message); }
@@ -472,9 +538,12 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         if (/\.(xlsx?|docx?|pptx?|png|jpe?g|gif|zip|bin)$/i.test(d.path)) {
           return { binary: true, mime: d.mime_type || 'application/octet-stream', title: d.title, path: d.path, bytes: fs.statSync(d.path).size };
         }
-        return { content: fs.readFileSync(d.path, 'utf8'), mime: d.mime_type || 'text/plain', title: d.title };
+        // Resolve against the PATH: an upload is indexed with a hardcoded
+        // label regardless of what it is, so trusting mime_type alone showed
+        // uploaded .html as source text instead of rendering it.
+        return { content: fs.readFileSync(d.path, 'utf8'), mime: docs.mimeForPath(d.path, d.mime_type), title: d.title };
       }
-      return { content: d.content || '', mime: d.mime_type || 'text/plain', title: d.title };
+      return { content: d.content || '', mime: docs.mimeForPath(d.path, d.mime_type), title: d.title };
     } catch (e) { return { error: e.message }; }
   });
   // Open a PDF in its own hardened window. Measured 2026-08-14: the artifact
@@ -518,6 +587,9 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     return { created, backfilled };
   });
 
+}
+
+function registerAgentMetricSettingsHandlers() {
   // Agents (authored per-project sub-agent definitions)
   ipcMain.handle('agents:list', (_e, { projectId }) => repo.agents.listByProject(projectId));
   ipcMain.handle('agents:create', (_e, input) => repo.agents.create(input));
@@ -527,6 +599,14 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   // Turn metrics (telemetry) — read-only for the readout + trend view
   ipcMain.handle('metrics:listByChat', (_e, { chatId }) => repo.metrics.listByChat(chatId));
   ipcMain.handle('metrics:listByProject', (_e, { projectId }) => repo.metrics.listByProject(projectId));
+  ipcMain.handle('workflows:latest', (_e, { chatId }) => {
+    const run = repo.workflowRuns.latestIncomplete(chatId);
+    return run ? { ...run, checkpoints: repo.workflowRuns.checkpoints(run.id) } : null;
+  });
+  ipcMain.handle('workflows:get', (_e, { runId }) => {
+    const run = repo.workflowRuns.get(runId);
+    return run ? { ...run, checkpoints: repo.workflowRuns.checkpoints(run.id) } : null;
+  });
 
   // Settings (small key/value store; project_id null = global)
   ipcMain.handle('settings:get', (_e, { key, projectId = null }) => repo.settings.get(key, projectId));
@@ -568,7 +648,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     const key = repo.providers.reveal(providerId);
     if (!key) return { error: `No API key stored for ${provider.label || provider.type}.`, findings: [] };
     try {
-      const connector = getConnector(provider, key);
+      const connector = guardedConnector(provider, key);
       return await runEvaluator({ connector, model: model || provider.default_model, digest });
     } catch (e) {
       return { error: e && e.message ? e.message : 'evaluation failed', findings: [] };
@@ -594,7 +674,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // callback can refuse everything without ever being consulted.
       const coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction: async () => false, projectId });
       const rb = projectDocs.readRulebook(project.working_dir);
-      const connector = getConnector(provider, key);
+      const connector = guardedConnector(provider, key);
       const scan = await driftScan({
         connector, model: model || provider.default_model, coding, root: project.working_dir,
         rulebook: rb ? rb.text : '', docsBlock: projectDocs.load(projectId, 4000)
@@ -607,6 +687,9 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     }
   });
 
+}
+
+function registerChatMessageHandlers() {
   // Chats & messages
   ipcMain.handle('chats:list', (_e, { projectId }) => {
     const rows = repo.chats.listByProject(projectId);
@@ -654,6 +737,9 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   ipcMain.handle('messages:add', (_e, input) => repo.messages.add(input));
   ipcMain.handle('messages:rate', (_e, { id, rating }) => repo.messages.setRating(id, rating));
 
+}
+
+function registerDocumentLibraryHandlers() {
   // Documents (project-scoped) + chat links
   // DOCUMENT TARGETS (Overview form): list the project's installed format
   // targets + which is active, and install a new one (file picker → copied
@@ -720,6 +806,55 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     return repo.documents.create(input);
   });
   ipcMain.handle('documents:linkToChat', (_e, input) => repo.documents.linkToChat(input));
+}
+
+function tagFiledItem(projectId, targetId, targetType, tags) {
+  for (const item of tags) {
+    const tag = repo.tags.ensure(projectId, item.facet, item.name);
+    if (tag && targetType === 'document') repo.tags.tagDocument(targetId, tag.id);
+    if (tag && targetType === 'chat') repo.tags.tagChat(targetId, tag.id);
+  }
+}
+
+async function tidyProjectDocuments({ projectId, connector, model }) {
+  const tagged = repo.tags.forProjectDocuments(projectId); const filed = [];
+  const documents = repo.documents.listByProject(projectId).filter((document) => !(tagged[document.id] || []).length).slice(0, 15);
+  for (const document of documents) {
+    let head = String(document.content || '').slice(0, 2000);
+    try { if (!head && document.path && documentPathAllowed(document.path)) head = require('node:fs').readFileSync(document.path, 'utf8').slice(0, 2000); } catch {}
+    const result = await librarian.fileDocument({ connector, model, meta: { title: document.title, type: document.doc_type, properties: document.properties || {} }, contentHead: head, vocabulary: buildVocabulary(projectId) });
+    tagFiledItem(projectId, document.id, 'document', result.tags);
+    if (result.tags.length) filed.push({ id: document.id, title: document.title, tags: result.tags.length });
+  }
+  return filed;
+}
+
+async function tidyProjectChats({ projectId, connector, model }) {
+  const tagged = repo.tags.forProjectChats(projectId); const filed = [];
+  const chats = repo.chats.listByProject(projectId).filter((chat) => !chat.summary || !(tagged[chat.id] || []).length).slice(0, 10);
+  for (const chat of chats) {
+    const result = await librarian.fileSession({ connector, model, messages: repo.messages.listByChat(chat.id), currentTitle: chat.title || '', vocabulary: buildVocabulary(projectId) });
+    if (result.summary) repo.chats.setSummary(chat.id, result.summary);
+    if (result.title && !chat.title) repo.chats.rename(chat.id, result.title);
+    tagFiledItem(projectId, chat.id, 'chat', result.tags);
+    if (result.summary || result.tags.length) filed.push({ id: chat.id, tags: result.tags.length });
+  }
+  return filed;
+}
+
+async function handleLibraryTidy(_event, { projectId, providerId, model }) {
+  const provider = providerId ? repo.providers.get(providerId) : null;
+  const key = provider ? repo.providers.reveal(providerId) : null;
+  if (!provider || !key) return { ok: false, error: 'no provider available for the librarian' };
+  const options = { projectId, connector: guardedConnector(provider, key), model: provider.fast_model || model || provider.default_model };
+  let documents = []; let chats = [];
+  try {
+    documents = await tidyProjectDocuments(options); chats = await tidyProjectChats(options);
+    return { ok: true, documents: documents.length, chats: chats.length };
+  } catch (error) { return { ok: false, error: error.message, documents: documents.length, chats: chats.length }; }
+}
+
+function registerLibrarianHandlers() {
 
   // ── Librarian surface (O31) ───────────────────────────────────────────────
   ipcMain.handle('library:tags', (_e, { projectId }) => repo.tags.listByProject(projectId));
@@ -728,45 +863,73 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   // Batch tidy: file untagged documents and unfiled sessions (bounded per
   // run). Tags/summaries only — nothing moves on disk, everything reversible,
   // provenance recorded — so it applies directly and reports what it did.
-  ipcMain.handle('library:tidy', async (_e, { projectId, providerId, model }) => {
-    const provider = providerId ? repo.providers.get(providerId) : null;
-    const key = provider ? repo.providers.reveal(providerId) : null;
-    if (!provider || !key) return { ok: false, error: 'no provider available for the librarian' };
-    const connector = getConnector(provider, key);
-    const fm = provider.fast_model || model || provider.default_model;
-    const filedDocs = []; const filedChats = [];
-    try {
-      const tagged = repo.tags.forProjectDocuments(projectId);
-      const docsToFile = repo.documents.listByProject(projectId).filter((d) => !(tagged[d.id] || []).length).slice(0, 15);
-      for (const d of docsToFile) {
-        let head = String(d.content || '').slice(0, 2000);
-        try { if (!head && d.path && documentPathAllowed(d.path)) head = require('node:fs').readFileSync(d.path, 'utf8').slice(0, 2000); } catch {}
-        const filed = await librarian.fileDocument({
-          connector, model: fm,
-          meta: { title: d.title, type: d.doc_type, properties: d.properties || {} },
-          contentHead: head, vocabulary: buildVocabulary(projectId)
-        });
-        for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagDocument(d.id, tag.id); }
-        if (filed.tags.length) filedDocs.push({ id: d.id, title: d.title, tags: filed.tags.length });
-      }
-      const chatTagged = repo.tags.forProjectChats(projectId);
-      const chatsToFile = repo.chats.listByProject(projectId).filter((c) => !c.summary || !(chatTagged[c.id] || []).length).slice(0, 10);
-      for (const c of chatsToFile) {
-        const filed = await librarian.fileSession({
-          connector, model: fm, messages: repo.messages.listByChat(c.id),
-          currentTitle: c.title || '', vocabulary: buildVocabulary(projectId)
-        });
-        if (filed.summary) repo.chats.setSummary(c.id, filed.summary);
-        if (filed.title && !c.title) repo.chats.rename(c.id, filed.title);
-        for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagChat(c.id, tag.id); }
-        if (filed.summary || filed.tags.length) filedChats.push({ id: c.id, tags: filed.tags.length });
-      }
-      return { ok: true, documents: filedDocs.length, chats: filedChats.length };
-    } catch (e) {
-      return { ok: false, error: e.message, documents: filedDocs.length, chats: filedChats.length };
-    }
-  });
+  ipcMain.handle('library:tidy', handleLibraryTidy);
   ipcMain.handle('documents:listByChat', (_e, { chatId }) => repo.documents.listByChat(chatId));
+}
+
+async function skillImportContext(serverId) {
+  const toolset = await mcpManager.buildToolset();
+  const pick = (suffix) => toolset.tools.find((tool) => tool.name.endsWith(suffix) && (!serverId || (toolset.routes.get(tool.name) || {}).serverId === serverId));
+  const updateTool = pick('__skills_update');
+  if (!updateTool) throw new Error('That MCP server does not expose a skills_update tool (or it is not connected — sign in first).');
+  const updateServerId = (toolset.routes.get(updateTool.name) || {}).serverId;
+  const server = updateServerId ? repo.mcp.get(updateServerId) : null;
+  return { toolset, updateTool, versionTool: pick('__version_check'), toolPrefix: server ? mcpManager.sanitize(server.name) : null };
+}
+
+async function availableSkillNames(context) {
+  if (!context.versionTool) return [];
+  try {
+    const result = await mcpManager.callTool(context.versionTool.name, { client: 'claude' }, context.toolset.routes);
+    return parseSkillNames(result.text);
+  } catch (error) { console.error('[skills import] version_check', error && error.message); return []; }
+}
+
+async function installNamedSkills(context, names, emit) {
+  const installed = [];
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index]; emit({ phase: 'install', name, done: index, total: names.length });
+    try {
+      const result = await mcpManager.callTool(context.updateTool.name, { skill_names: [name], client: 'claude' }, context.toolset.routes);
+      const fluency = parseFluencySkillItems(result.text, context.toolPrefix);
+      const parsed = fluency.length ? fluency : parseSkillsPayload(result.text);
+      for (const skill of parsed) { const installedName = skill.name || name; repo.skills.upsertByName({ ...skill, name: installedName }); if (!installed.includes(installedName)) installed.push(installedName); }
+      if (!parsed.length) { installed.push(name); repo.skills.upsertByName({ name, definition: result.text }); }
+    } catch (error) { console.error('[skills import] fetch', name, error && error.message); emit({ phase: 'error', name, error: error.message }); }
+  }
+  return installed;
+}
+
+async function installBulkSkills(context, emit) {
+  emit({ phase: 'bulk' });
+  const result = await mcpManager.callTool(context.updateTool.name, { client: 'claude' }, context.toolset.routes);
+  const fluency = parseFluencySkillItems(result.text, context.toolPrefix);
+  const parsed = fluency.length ? fluency : parseSkillsPayload(result.text); const installed = [];
+  for (let index = 0; index < parsed.length; index++) {
+    const skill = parsed[index];
+    if (!skill.name) continue;
+    emit({ phase: 'install', name: skill.name, done: index, total: parsed.length });
+    repo.skills.upsertByName(skill); installed.push(skill.name);
+  }
+  return installed;
+}
+
+async function handleSkillImport(event, { serverId } = {}) {
+  const emit = (progress) => { try { event.sender.send('skills:progress', progress); } catch {} };
+  let context;
+  try { context = await skillImportContext(serverId); }
+  catch (error) { return { ok: false, error: error.message }; }
+  emit({ phase: 'list' });
+  const names = await availableSkillNames(context);
+  if (names.length) emit({ phase: 'list-done', total: names.length });
+  let installed;
+  try { installed = names.length ? await installNamedSkills(context, names, emit) : await installBulkSkills(context, emit); }
+  catch (error) { return { ok: false, error: error.message }; }
+  emit({ phase: 'done', count: installed.length });
+  return installed.length ? { ok: true, count: installed.length, names: installed } : { ok: false, error: 'No skills were returned (raw output logged).' };
+}
+
+function registerSkillHandlers() {
 
   // Skills + per-project scoping
   ipcMain.handle('skills:list', () => repo.skills.list());
@@ -778,62 +941,11 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   ipcMain.handle('skills:update', (_e, { id, patch }) => repo.skills.update(id, patch));
   ipcMain.handle('skills:remove', (_e, { id }) => repo.skills.remove(id));
 
-  // Import skills from a connected MCP server's `skills_update` tool.
-  ipcMain.handle('skills:importFromMcp', async (_e, { serverId } = {}) => {
-    const emit = (p) => { try { _e.sender.send('skills:progress', p); } catch {} };
-    let ts;
-    try { ts = await mcpManager.buildToolset(); } catch (e) { return { ok: false, error: e.message }; }
-    const pick = (suffix) => ts.tools.find((t) => t.name.endsWith(suffix) && (!serverId || (ts.routes.get(t.name) || {}).serverId === serverId));
-    const vc = pick('__version_check');
-    const su = pick('__skills_update');
-    if (!su) return { ok: false, error: 'That MCP server does not expose a skills_update tool (or it is not connected — sign in first).' };
-    // Same `<server>__` namespace buildToolset() uses — needed so mcp_functions
-    // parsed out of each skill's frontmatter become real, matchable tool names.
-    const suServerId = (ts.routes.get(su.name) || {}).serverId;
-    const suServer = suServerId ? repo.mcp.get(suServerId) : null;
-    const toolPrefix = suServer ? mcpManager.sanitize(suServer.name) : null;
+  ipcMain.handle('skills:importFromMcp', handleSkillImport);
 
-    // 1) Get the list of available skills (small) via version_check.
-    emit({ phase: 'list' });
-    let names = [];
-    if (vc) {
-      try {
-        const r = await mcpManager.callTool(vc.name, { client: 'claude' }, ts.routes);
-        names = parseSkillNames(r.text);
-      } catch (e) { console.error('[skills import] version_check', e && e.message); }
-    }
+}
 
-    // 2) Fetch + install each skill individually (avoids the giant payload).
-    const installed = [];
-    if (names.length) {
-      emit({ phase: 'list-done', total: names.length });
-      for (let i = 0; i < names.length; i++) {
-        const name = names[i];
-        emit({ phase: 'install', name, done: i, total: names.length });
-        try {
-          const r = await mcpManager.callTool(su.name, { skill_names: [name], client: 'claude' }, ts.routes);
-          const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
-          const use = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
-          for (const s of use) { const nm = s.name || name; repo.skills.upsertByName({ ...s, name: nm }); if (!installed.includes(nm)) installed.push(nm); }
-          if (!use.length) installed.push(name), repo.skills.upsertByName({ name, definition: r.text });
-        } catch (e) { console.error('[skills import] fetch', name, e && e.message); emit({ phase: 'error', name, error: e.message }); }
-      }
-    } else {
-      // Fallback: no parseable list — pull the bundle once (main-side parse; never hits the model).
-      emit({ phase: 'bulk' });
-      try {
-        const r = await mcpManager.callTool(su.name, { client: 'claude' }, ts.routes);
-        const fluencyParsed = parseFluencySkillItems(r.text, toolPrefix);
-        const parsed = fluencyParsed.length ? fluencyParsed : parseSkillsPayload(r.text);
-        for (let i = 0; i < parsed.length; i++) { const s = parsed[i]; if (!s.name) continue; emit({ phase: 'install', name: s.name, done: i, total: parsed.length }); repo.skills.upsertByName(s); installed.push(s.name); }
-      } catch (e) { return { ok: false, error: e.message }; }
-    }
-
-    emit({ phase: 'done', count: installed.length });
-    if (!installed.length) return { ok: false, error: 'No skills were returned (raw output logged).' };
-    return { ok: true, count: installed.length, names: installed };
-  });
-
+function registerProviderHandlers() {
   // Credentials — metadata in/out only; plaintext never crosses this boundary.
   ipcMain.handle('credentials:list', (_e, opts) => repo.credentials.list(opts));
   ipcMain.handle('credentials:set', (_e, input) => repo.credentials.set(input));
@@ -877,8 +989,117 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     return result;
   });
 
+}
+
+function registerGuardHandlers() {
+  // Downstream LLM firewall connections. An enabled guard changes where model
+  // traffic goes, so activation is confirmed in the trusted main process and
+  // names the exact endpoint. Secrets only travel renderer → main.
+  const confirmGuardEnable = async (guard) => {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    const r = await dialog.showMessageBox(win, {
+      type: 'warning', buttons: ['Enable guard', 'Cancel'], defaultId: 1, cancelId: 1,
+      message: `Route supported model traffic through ${guard.label || 'this guard'}?`,
+      detail: `${guard.base_url || guard.baseUrl}\n\nPrompts, tool definitions, and model responses will pass through this endpoint. Only enable endpoints you trust.`
+    });
+    return r.response === 0;
+  };
+  ipcMain.handle('guards:list', () => repo.guards.list());
+  ipcMain.handle('guards:events', (_e, { limit = 100 } = {}) => repo.guards.events(limit));
+  ipcMain.handle('guards:add', async (_e, input = {}) => {
+    const clean = { ...input, baseUrl: normalizeBaseUrl(input.baseUrl), authMode: input.authMode === 'bearer' ? 'bearer' : 'passthrough' };
+    if (clean.kind === 'trylon') clean.authMode = 'passthrough';
+    if (clean.authMode === 'bearer' && !clean.secret) return { ok: false, error: 'A bearer token is required for this guard.' };
+    if (clean.enabled && !(await confirmGuardEnable(clean))) return { ok: false, cancelled: true };
+    return { ok: true, guard: repo.guards.add(clean) };
+  });
+  ipcMain.handle('guards:update', async (_e, { id, patch = {} }) => {
+    const current = repo.guards.get(id);
+    if (!current) return { ok: false, error: 'Guard not found' };
+    const clean = { ...patch };
+    if (clean.baseUrl !== undefined) clean.baseUrl = normalizeBaseUrl(clean.baseUrl);
+    if (clean.authMode !== undefined) clean.authMode = clean.authMode === 'bearer' ? 'bearer' : 'passthrough';
+    const effectiveKind = clean.kind || current.kind;
+    if (effectiveKind === 'trylon') clean.authMode = 'passthrough';
+    const effectiveAuth = clean.authMode || current.auth_mode;
+    if (effectiveAuth === 'bearer' && !clean.secret && !current.has_secret) return { ok: false, error: 'A bearer token is required for this guard.' };
+    if (clean.enabled === true && !current.enabled) {
+      const preview = { ...current, ...clean, base_url: clean.baseUrl || current.base_url };
+      if (!(await confirmGuardEnable({ ...preview, base_url: undefined, baseUrl: preview.base_url }))) return { ok: false, cancelled: true };
+    }
+    return { ok: true, guard: repo.guards.update(id, clean) };
+  });
+  ipcMain.handle('guards:remove', (_e, { id }) => { repo.guards.remove(id); return { ok: true }; });
+  ipcMain.handle('guards:test', async (_e, input = {}) => {
+    let guard; let secret;
+    const testsSavedConfiguration = !!input.id && input.baseUrl === undefined && input.authMode === undefined && input.secret === undefined;
+    if (input.id) {
+      const saved = repo.guards.get(input.id);
+      guard = saved;
+      if (!guard) return { ok: false, error: 'Guard not found' };
+      secret = input.secret || repo.guards.reveal(input.id);
+      if (input.baseUrl !== undefined) guard = { ...guard, base_url: normalizeBaseUrl(input.baseUrl) };
+      if (input.authMode !== undefined) guard = { ...guard, auth_mode: input.authMode === 'bearer' ? 'bearer' : 'passthrough' };
+    } else {
+      guard = { base_url: normalizeBaseUrl(input.baseUrl), auth_mode: input.authMode === 'bearer' ? 'bearer' : 'passthrough' };
+      secret = input.secret || null;
+    }
+    const result = await testGuard({ baseUrl: guard.base_url, authMode: guard.auth_mode, secret });
+    if (testsSavedConfiguration) repo.guards.update(input.id, { status: result.ok ? 'ok' : 'error', statusDetail: result.error || result.detail || null, markChecked: true });
+    return result;
+  });
+
+}
+
+async function outdatedServerSkills(toolset, server, prefix, localSkills) {
+  const versionTool = toolset.tools.find((tool) => tool.name === prefix + 'version_check');
+  if (!versionTool) return [];
+  try {
+    const result = await mcpManager.callTool(versionTool.name, { client: 'claude' }, toolset.routes);
+    const remote = parseSkillVersions(result.text); const outdated = [];
+    for (const skill of localSkills) {
+      const remoteVersion = remote[skill.name];
+      const localVersion = String((parseFrontmatter(skill.definition || '').meta || {}).version || '');
+      if (remoteVersion && localVersion && localVersion !== remoteVersion) outdated.push({ name: skill.name, local: localVersion, remote: remoteVersion });
+    }
+    return outdated;
+  } catch (error) { console.error('[mcp checkSync] version_check', server.name, error && error.message); return []; }
+}
+
+async function serverSyncResult(toolset, server, localSkills) {
+  const prefix = mcpManager.sanitize(server.name) + '__';
+  const live = toolset.tools.filter((tool) => (toolset.routes.get(tool.name) || {}).serverId === server.id).map((tool) => tool.name.replace(prefix, '')).sort();
+  if (!live.length) return null;
+  const cached = (server.tools || []).map((tool) => tool.name).sort();
+  const toolsAdded = live.filter((tool) => !cached.includes(tool));
+  const toolsRemoved = cached.filter((tool) => !live.includes(tool));
+  const skillsOutdated = await outdatedServerSkills(toolset, server, prefix, localSkills);
+  return { serverId: server.id, name: server.name, toolsAdded: toolsAdded.length, toolsRemoved: toolsRemoved.length, skillsOutdated, drift: !!(toolsAdded.length || toolsRemoved.length || skillsOutdated.length) };
+}
+
+async function handleMcpSyncCheck(_event, { serverId } = {}) {
+  let toolset;
+  try { toolset = await mcpManager.buildToolset(); }
+  catch (error) { return { ok: false, error: error.message }; }
+  const servers = repo.mcp.list().filter((server) => server.enabled && (!serverId || server.id === serverId));
+  const localSkills = repo.skills.list(); const results = [];
+  for (const server of servers) {
+    const result = await serverSyncResult(toolset, server, localSkills);
+    if (result) results.push(result);
+  }
+  return { ok: true, servers: results };
+}
+
+function registerMcpHandlers() {
   // MCP servers — metadata only out; env/token stay in main.
   ipcMain.handle('mcp:list', () => repo.mcp.list());
+  ipcMain.handle('mcp:authStatus', (_e, { serverId } = {}) => mcpManager.authStatus(serverId));
+  if (!mcpAuthBroadcastInstalled) {
+    mcpAuthBroadcastInstalled = true;
+    mcpManager.onAuthStatus((status) => {
+      for (const win of BrowserWindow.getAllWindows()) { try { win.webContents.send('mcp:auth-status', status); } catch {} }
+    });
+  }
   // A stdio MCP server is an arbitrary command this app will spawn — that
   // decision is confirmed in MAIN, not taken on a renderer message alone
   // (mcp:add + mcp:connect was renderer-to-RCE with no second wall).
@@ -919,42 +1140,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
   // what the app is actually using and report — the renderer badges it and
   // offers a one-click refresh (mcp:connect re-caches tools; then
   // skills:importFromMcp re-imports skills). Never silently out of sync.
-  ipcMain.handle('mcp:checkSync', async (_e, { serverId } = {}) => {
-    let ts;
-    try { ts = await mcpManager.buildToolset(); } catch (e) { return { ok: false, error: e.message }; }
-    const servers = repo.mcp.list().filter((s) => s.enabled && (!serverId || s.id === serverId));
-    const localSkills = repo.skills.list();
-    const out = [];
-    for (const s of servers) {
-      const prefix = mcpManager.sanitize(s.name) + '__';
-      const live = ts.tools.filter((t) => (ts.routes.get(t.name) || {}).serverId === s.id).map((t) => t.name.replace(prefix, '')).sort();
-      if (!live.length) continue;   // not connected this pass — nothing to compare
-      const cached = (s.tools || []).map((t) => t.name).sort();
-      const toolsAdded = live.filter((t) => !cached.includes(t));
-      const toolsRemoved = cached.filter((t) => !live.includes(t));
-      const skillsOutdated = [];
-      const vc = ts.tools.find((t) => t.name === prefix + 'version_check');
-      if (vc) {
-        try {
-          const r = await mcpManager.callTool(vc.name, { client: 'claude' }, ts.routes);
-          const remote = parseSkillVersions(r.text);
-          for (const sk of localSkills) {
-            const rv = remote[sk.name];
-            if (!rv) continue;
-            const lv = String((parseFrontmatter(sk.definition || '').meta || {}).version || '');
-            if (lv && lv !== rv) skillsOutdated.push({ name: sk.name, local: lv, remote: rv });
-          }
-        } catch (e) { console.error('[mcp checkSync] version_check', s.name, e && e.message); }
-      }
-      out.push({
-        serverId: s.id, name: s.name,
-        toolsAdded: toolsAdded.length, toolsRemoved: toolsRemoved.length,
-        skillsOutdated,
-        drift: !!(toolsAdded.length || toolsRemoved.length || skillsOutdated.length)
-      });
-    }
-    return { ok: true, servers: out };
-  });
+  ipcMain.handle('mcp:checkSync', handleMcpSyncCheck);
   ipcMain.handle('mcp:connect', async (_e, input) => {
     if (input.id) {
       console.log('[main] mcp:connect', { id: input.id });
@@ -983,6 +1169,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       const secret = repo.mcp.reveal(id) || {};
       secret.oauth = tokenSet;
       repo.mcp.update(id, { secret, status: 'ok', statusDetail: 'authorized', markChecked: true });
+      mcpManager.noteAuthorized(id, tokenSet.expires_at);
       return { ok: true, scope: tokenSet.scope };
     } catch (e) {
       console.error('[mcp oauth]', e && (e.stack || e.message));
@@ -991,8 +1178,11 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     }
   });
 
+}
+
+function registerChatExecutionHandler() {
   // Chat — route to the selected provider connection; requires one to be set.
-  ipcMain.handle('chat:send', async (_e, payload) => {
+  ipcMain.handle('chat:send', async function handleChatSend(_e, payload) {
     const text = typeof payload?.text === 'string' ? payload.text : '';
     const providerId = payload?.providerId;
     const model = payload?.model;
@@ -1004,35 +1194,62 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
     // without this it plans against the typed sentence alone and asks the user
     // for files they already sent.
     const attachments = Array.isArray(payload?.attachments) ? payload.attachments : [];
-    const plannerText = attachments.length
+    let plannerText = attachments.length
       ? text + '\n\nFILES ATTACHED TO THIS MESSAGE — already saved in the project. Read them with read_file at these exact paths; do NOT ask the user where they are:\n'
         + attachments.map((a) => `- ${a.path || a.name}${a.chars ? ` (${a.chars} chars)` : ''}`).join('\n')
       : text;
 
-    if (providerId) {
-      const provider = repo.providers.get(providerId);
-      if (!provider) throw new Error('Selected connection no longer exists.');
-      if (!provider.enabled) throw new Error(`${provider.label || provider.type} is disabled.`);
-      const key = repo.providers.reveal(providerId);
-      if (!key) throw new Error(`No API key stored for ${provider.label || provider.type}.`);
-      const connector = getConnector(provider, key);
-      const chosenModel = model || provider.default_model;
-      const fastModel = provider.fast_model || chosenModel;
-      // Turn identity: every progress event carries this id, and the control
-      // channels (chat:abort / chat:continue) only act when the id matches —
-      // with two turns in flight, an approval or STOP meant for one can never
-      // resolve against the other. The renderer mints the id so it can filter
-      // events into the right submit closure from the very first event.
+    async function runProviderTurn() {
+      async function initializeProviderTurn() {
+      function selectedProviderConfiguration() {
+        const selected = repo.providers.get(providerId);
+        if (!selected) throw new Error('Selected connection no longer exists.');
+        if (!selected.enabled) throw new Error(`${selected.label || selected.type} is disabled.`);
+        const secret = repo.providers.reveal(providerId);
+        if (!secret) throw new Error(`No API key stored for ${selected.label || selected.type}.`);
+        const selectedModel = model || selected.default_model;
+        return { provider: selected, key: secret, chosenModel: selectedModel, fastModel: selected.fast_model || selectedModel };
+      }
+      function loadWorkflowResume(chatId) {
+        const output = { workflowResume: null, workflowCheckpoints: [], workflowResumeContext: '' };
+        const asked = !!payload?.resumeRunId || /^\s*(?:continue|resume|retry)\b/i.test(text);
+        if (!chatId || !asked) return output;
+        const candidate = payload?.resumeRunId ? repo.workflowRuns.get(payload.resumeRunId) : repo.workflowRuns.latestIncomplete(chatId);
+        if (!candidate || Number(candidate.chat_id) !== Number(chatId)) return output;
+        output.workflowResume = candidate;
+        output.workflowCheckpoints = repo.workflowRuns.checkpoints(candidate.id);
+        output.workflowResumeContext = renderResumeContext(candidate, output.workflowCheckpoints);
+        emitProgress({ type: 'process', kind: 'workflow-resume', runId: candidate.id, checkpoints: output.workflowCheckpoints.length });
+        return output;
+      }
+      const { provider, key, chosenModel, fastModel } = selectedProviderConfiguration();
       const turnId = (payload && payload.turnId) ? String(payload.turnId) : `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
       const emitProgress = (ev) => { try { _e.sender.send('chat:progress', { turnId, ...ev }); } catch {} };
       const turnStart = Date.now();
       const chatId = payload?.chatId || null;
+      const requestChat = chatId ? repo.chats.get(chatId) : null;
+      const requestMode = (requestChat && (requestChat.mode || (requestChat.coding_mode ? 'code' : ''))) || 'work';
+      let resume = { workflowResume: null, workflowCheckpoints: [], workflowResumeContext: '' };
+      try { resume = loadWorkflowResume(chatId); } catch (error) { console.error('[workflow resume]', error && error.message); }
+      const { workflowResume, workflowCheckpoints, workflowResumeContext } = resume;
+      if (workflowResumeContext) plannerText += '\n\n' + workflowResumeContext;
+      const workflowContract = workflowResume && workflowResume.contract && Object.keys(workflowResume.contract).length
+        ? workflowResume.contract
+        : createWorkflowContract({ text: plannerText, mode: requestMode, turnId });
+      plannerText += '\n\n' + renderContract(workflowContract);
+      let workflowRun = null;
+      let workflowAcceptance = null;
       const taskLog = []; // per-task timing/tokens (sub-agents; tools added post-loop)
+      const connector = guardedConnector(provider, key, { chatId, turnId });
+      return { provider, chosenModel, fastModel, turnId, emitProgress, turnStart, chatId, workflowResume, workflowCheckpoints, workflowResumeContext, workflowContract, workflowRun, workflowAcceptance, taskLog, connector };
+      }
+      let { provider, chosenModel, fastModel, turnId, emitProgress, turnStart, chatId, workflowResume, workflowCheckpoints, workflowResumeContext, workflowContract, workflowRun, workflowAcceptance, taskLog, connector } = await initializeProviderTurn();
 
       // STOP support (abort + save work): the renderer's STOP button fires
       // chat:abort. The signal kills the in-flight provider HTTP call, and
       // every loop checks isAborted() at its next boundary — variables,
       // step results, tool trace, and metrics are all still persisted.
+      function prepareInteractionRuntime() {
       let aborted = false;
       const turnAbort = new AbortController();
       const abortListener = (_ev, p) => {
@@ -1041,13 +1258,48 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       };
       ipcMain.on('chat:abort', abortListener);
       const isAborted = () => aborted;
-      const chatAbortable = (a) => connector.chat({
-        ...a,
-        signal: turnAbort.signal,
-        // Connector-level retry (429/overload/transient 5xx) surfaces in the
-        // glass box instead of looking like a silent stall.
-        onRetry: (r) => emitProgress({ type: 'process', kind: 'retry', attempt: r.attempt, status: r.status, delayMs: r.delayMs })
-      });
+      const securityState = { block: null, usage: null };
+      // A blocked turn still spent everything it spent before the block.
+      const mergeBlockedUsage = (aggregate, blocked) => {
+        if (!aggregate && !blocked) return null;
+        if (!aggregate) return blocked;
+        if (!blocked) return aggregate;
+        const add = (k) => (aggregate[k] || 0) + (blocked[k] || 0);
+        return {
+          ...aggregate,
+          inputTokens: add('inputTokens'), outputTokens: add('outputTokens'),
+          cachedTokens: add('cachedTokens'), cacheCreationTokens: add('cacheCreationTokens'),
+          calls: add('calls'), measured: !!(aggregate.measured || blocked.measured)
+        };
+      };
+      const firewallError = () => {
+        const error = new Error((securityState.block && securityState.block.message) || 'Model traffic was blocked by the configured guard.');
+        error.code = 'LLM_GUARD_BLOCKED';
+        error.security = securityState.block;
+        return error;
+      };
+      const chatAbortable = async (a) => {
+        // A planner may retry a failed structured-output call. Once the guard
+        // has blocked this turn, every later model attempt is stopped here
+        // without touching the network again.
+        if (securityState.block) throw firewallError();
+        const response = await connector.chat({
+          ...a,
+          signal: combineAbortSignals([turnAbort.signal, a && a.signal]),
+          // Connector-level retry (429/overload/transient 5xx) surfaces in the
+          // glass box instead of looking like a silent stall.
+          onRetry: (r) => emitProgress({ type: 'process', kind: 'retry', attempt: r.attempt, status: r.status, delayMs: r.delayMs })
+        });
+        if (response && response.security && response.security.blocked) {
+          securityState.block = response.security;
+          securityState.usage = response.usage || null;
+          throw firewallError();
+        }
+        return response;
+      };
+      // Ordinary planning and chat retain the provider's 180s default. Only
+      // workflow execution steps receive the contract-scoped extended bound.
+      const workflowStepChat = (a) => chatAbortable({ ...a, timeoutMs: effectiveProviderResponseBudget(workflowContract) });
 
       // One-shot user prompts (limit / stuck / action-approve): emit an event,
       // await the reply on chat:continue. Waiters are a FIFO queue — parallel
@@ -1072,100 +1324,80 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         const iv = setInterval(() => { if (isAborted()) finish(0); }, 500);
         emitProgress(event);
       });
+      return { isAborted, mergeBlockedUsage, firewallError, chatAbortable, workflowStepChat, askUser, promptListener, abortListener, securityState };
+      }
+      const { isAborted, mergeBlockedUsage, firewallError, chatAbortable, workflowStepChat, askUser, promptListener, abortListener, securityState } = prepareInteractionRuntime();
 
+      async function prepareTurnContext() {
       const projectId = payload?.projectId;
-
-      // Gather tools from enabled MCP servers (skips any that fail to connect).
-      // Project-scoped: a project_mcp row with enabled=0 keeps that server's
-      // whole catalog out of this project's turns (opt-out, like skills).
-      // Done before skill handling — the unified context planner below needs
-      // both the skill menu and the tool menu at once.
-      let toolset = { tools: [], routes: new Map() };
-      try { toolset = await mcpManager.buildToolset(projectId); } catch (e) { console.error('[mcp] buildToolset', e && e.message); }
-
-      // Skills: enabled = candidate. Tools: gathered above. ONE planning call
-      // (context-select.js) decides both which skills to load in full and
-      // which tools to expose for this turn — always run, not gated on size;
-      // gating on thresholds was exactly what let a turn's fixed overhead
-      // (skills + tool schemas) balloon past what a request actually needed.
-      let base = messages;
-      let skillSelect = null;
-      let loadedSkills = []; // skills actually in scope this turn — drives the tool ceiling below
-      let es = [];
-      if (projectId) {
-        try { es = repo.skills.listEnabledForProject(projectId); } catch (e) { console.error('[skills]', e && e.message); }
-        // Read-time healing (skill-content.js): rows imported before the
-        // Fluency envelope parser existed hold the raw delivery JSON and a
-        // NULL description — extract the embedded SKILL.md body, frontmatter
-        // description, and declared mcp_functions so selection, planning and
-        // injection all see real instructions regardless of import vintage.
+      async function loadWorkflowToolset() {
+        let available = { tools: [], routes: new Map() };
+        try { available = await mcpManager.buildToolset(projectId); } catch (error) { console.error('[mcp] buildToolset', error && error.message); }
+        const inspected = available.tools.length; const filtered = filterMcpToolset(workflowContract, available);
+        if (filtered.blocked) emitProgress({ type: 'process', kind: 'workflow-tool-policy', workflow: workflowContract.kind, category: 'mcp', inspected, allowed: 0, blocked: filtered.blocked });
+        return filtered;
+      }
+      function loadProjectSkills(toolset) {
+        if (!projectId) return [];
+        let skills = [];
+        try { skills = repo.skills.listEnabledForProject(projectId); } catch (error) { console.error('[skills]', error && error.message); }
+        if (workflowContract.toolPolicy && workflowContract.toolPolicy.projectSkills === 'deny') {
+          emitProgress({ type: 'process', kind: 'workflow-tool-policy', workflow: workflowContract.kind, category: 'project-skills', inspected: skills.length, allowed: 0, blocked: skills.length });
+          return [];
+        }
+        try { return skills.map((skill) => enrichSkillRow(skill, toolset.tools.map((tool) => tool.name))); }
+        catch (error) { console.error('[skills enrich]', error && error.message); return skills; }
+      }
+      async function selectTurnContext(skills, toolset) {
         try {
-          const toolNames = toolset.tools.map((t) => t.name);
-          es = es.map((s) => enrichSkillRow(s, toolNames));
-        } catch (e) { console.error('[skills enrich]', e && e.message); }
+          const selection = await selectContext({ connector: { chat: chatAbortable }, model: fastModel, skills, tools: toolset.tools, userText: plannerText });
+          if (selection.error) console.warn('[context-select]', selection.error);
+          if (selection.skillMismatch) console.warn('[context-select] mismatch —', selection.skillMismatch);
+          if (selection.toolMismatch) console.warn('[context-select] mismatch —', selection.toolMismatch);
+          return selection;
+        } catch (error) { console.error('[context-select]', error && error.message); return { skillNames: [], toolNames: [], error: error.message }; }
       }
-
-      let planned = { skillNames: [], toolNames: [] };
-      try {
-        planned = await selectContext({ connector: { chat: chatAbortable }, model: fastModel, skills: es, tools: toolset.tools, userText: plannerText });
-        // A soft failure (unparseable JSON, etc.) is returned, not thrown — log
-        // it here so it's visible in real time, not just reverse-engineered
-        // later from a suspicious "0 skills loaded" turn.
-        if (planned.error) console.warn('[context-select]', planned.error);
-        if (planned.skillMismatch) console.warn('[context-select] mismatch —', planned.skillMismatch);
-        if (planned.toolMismatch) console.warn('[context-select] mismatch —', planned.toolMismatch);
-      } catch (e) {
-        console.error('[context-select]', e && e.message);
-        planned = { skillNames: [], toolNames: [], error: e.message };
+      function injectSelectedSkills(skills, selection) {
+        if (!skills.length) return { base: messages, skillSelect: null, loadedSkills: [] };
+        const names = new Set(selection.skillNames.map((name) => name.toLowerCase()));
+        const loadedSkills = skills.filter((skill) => names.has(skill.name.toLowerCase()));
+        const fullTokens = estimateTokens(skills.map((skill) => ({ content: skill.definition || skill.description || '' })));
+        const loadedTokens = estimateTokens(loadedSkills.map((skill) => ({ content: skill.definition || skill.description || '' })));
+        const skillSelect = { available: skills.length, selected: loadedSkills.map((skill) => skill.name), fullTokens, loadedTokens, savedTokens: Math.max(0, fullTokens - loadedTokens), error: selection.error || selection.skillMismatch };
+        const menu = skills.map((skill) => `- ${skill.name}: ${String(skill.description || '').replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
+        const loaded = loadedSkills.map((skill) => `## ${skill.name}\n${skill.definition || skill.description || ''}`).join('\n\n');
+        const system = 'Project skills — you can use these. Menu (name — when to use):\n' + menu + (loaded ? '\n\nInstructions loaded for this turn:\n\n' + loaded : '\n\n(No skill instructions loaded this turn. If one of the above is needed, say so.)');
+        emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
+        return { base: [{ role: 'system', content: system }, ...messages], skillSelect, loadedSkills };
       }
-
-      if (es.length) {
+      async function compressTurnContext(base) {
+        if (securityState.block) return { convo: base, compressed: false };
         try {
-          const fullTokens = estimateTokens(es.map((s) => ({ content: s.definition || s.description || '' })));
-          const chosenNames = new Set(planned.skillNames.map((n) => n.toLowerCase()));
-          const toLoad = es.filter((s) => chosenNames.has(s.name.toLowerCase()));
-          const menu = es.map((s) => `- ${s.name}: ${String(s.description || '').replace(/\s+/g, ' ').slice(0, 160)}`).join('\n');
-          const loaded = toLoad.map((s) => `## ${s.name}\n${s.definition || s.description || ''}`).join('\n\n');
-          const loadedTokens = estimateTokens(toLoad.map((s) => ({ content: s.definition || s.description || '' })));
-          skillSelect = { available: es.length, selected: toLoad.map((s) => s.name), fullTokens, loadedTokens, savedTokens: Math.max(0, fullTokens - loadedTokens), error: planned.error || planned.skillMismatch };
-          const sys = 'Project skills — you can use these. Menu (name — when to use):\n' + menu
-            + (loaded ? '\n\nInstructions loaded for this turn:\n\n' + loaded
-                      : '\n\n(No skill instructions loaded this turn. If one of the above is needed, say so.)');
-          base = [{ role: 'system', content: sys }, ...messages];
-          emitProgress({ type: 'process', kind: 'skill-select', available: skillSelect.available, selected: skillSelect.selected, savedTokens: skillSelect.savedTokens });
-          loadedSkills = toLoad;
-        } catch (e) { console.error('[skills inject]', e && e.message); }
+          const output = await maybeCompress({ messages: base, contextWindow: contextWindowFor(chosenModel), summarize: async (older) => {
+            const response = await chatAbortable({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
+            return response.text || '';
+          } });
+          return { convo: output.messages, compressed: output.compressed };
+        } catch (error) { if (error && error.code !== 'LLM_GUARD_BLOCKED') console.error('[compress]', error && error.message); return { convo: base, compressed: false }; }
       }
-
-      // Compress older history if it nears the model's context window (uses the fast model).
-      let convo = base;
-      let compressed = false;
-      try {
-        const out = await maybeCompress({
-          messages: base,
-          contextWindow: contextWindowFor(chosenModel),
-          summarize: async (older) => {
-            const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
-            return r.text || '';
-          }
-        });
-        convo = out.messages; compressed = out.compressed;
-      } catch (e) { console.error('[compress]', e && e.message); }
-
-      // Tool ceiling: enforce any declared skill tool scope over the planner's
-      // picks (context-select.js's applyToolCeiling — a hard restriction the
-      // operator authored on a skill, not just a relevance hint). Falls back
-      // to the full catalog (not an arbitrary slice) if planning produced no
-      // usable picks at all.
-      let scopedTools = toolset.tools;
-      let toolScope = null;
-      if (toolset.tools.length) {
-        const ceiling = applyToolCeiling({ loadedSkills, toolNames: planned.toolNames, allTools: toolset.tools });
-        scopedTools = ceiling.tools;
-        toolScope = { totalAvailable: toolset.tools.length, scoped: scopedTools.length, bySkills: ceiling.bySkills, fellBack: ceiling.fellBack };
-        if (ceiling.fellBack) console.warn('[context-select] no usable tool picks — falling back to the full catalog' + (planned.error ? ` (${planned.error})` : ''));
-        emitProgress({ type: 'process', kind: 'tool-scope', totalAvailable: toolScope.totalAvailable, scoped: toolScope.scoped, bySkills: toolScope.bySkills, fellBack: toolScope.fellBack });
+      function scopeTurnTools(toolset, loadedSkills, selection) {
+        if (!toolset.tools.length) return { scopedTools: toolset.tools, toolScope: null };
+        const ceiling = applyToolCeiling({ loadedSkills, toolNames: selection.toolNames, allTools: toolset.tools, selectionSucceeded: !!selection.selectionSucceeded });
+        const toolScope = { totalAvailable: toolset.tools.length, scoped: ceiling.tools.length, bySkills: ceiling.bySkills, fellBack: ceiling.fellBack };
+        if (ceiling.fellBack) console.warn('[context-select] no usable tool picks — falling back to the full catalog' + (selection.error ? ` (${selection.error})` : ''));
+        emitProgress({ type: 'process', kind: 'tool-scope', ...toolScope });
+        return { scopedTools: ceiling.tools, toolScope };
       }
+      const toolset = await loadWorkflowToolset();
+      const enabledSkills = loadProjectSkills(toolset);
+      const planned = await selectTurnContext(enabledSkills, toolset);
+      const skillContext = injectSelectedSkills(enabledSkills, planned);
+      const { base, skillSelect, loadedSkills } = skillContext;
+      let { convo, compressed } = await compressTurnContext(base);
+      let { scopedTools, toolScope } = scopeTurnTools(toolset, loadedSkills, planned);
+      return { projectId, toolset, base, skillSelect, loadedSkills, convo, compressed, scopedTools, toolScope };
+      }
+      let { projectId, toolset, base, skillSelect, loadedSkills, convo, compressed, scopedTools, toolScope } = await prepareTurnContext();
 
       // ── Chat mode (per-chat, titlebar): WORK · DOCUMENTS · CODE ──────────
       // WORK — the general agentic harness (MCP tools + skills + planning);
@@ -1184,6 +1416,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // planner derives steps with them, the executor can call them, and
       // sub-agents inherit them — they are the point of the mode, never
       // subject to relevance selection.
+      function prepareTurnMode() {
       const project = projectId ? repo.projects.get(projectId) : null;
       const chatRow = chatId ? repo.chats.get(chatId) : null;
       const chatMode = (chatRow && (chatRow.mode || (chatRow.coding_mode ? 'code' : ''))) || 'work';
@@ -1193,80 +1426,78 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // repo (git-versioned, visible to the agent's own file tools and to any
       // repo analysis), else in the document library.
       const docsBase = (project && project.working_dir) || outputDir;
+      const artifactBaseline = new Map();
+      try {
+        if (chatId) for (const d of repo.documents.listByChat(chatId)) artifactBaseline.set(d.id, { version: d.version, updated_at: d.updated_at });
+      } catch {}
       let coding = null;
       let library = null;
       let formatTarget = '';
       let branding = '';
       let rawData = false;
-      if (chatMode === 'documents') {
+      function resolveDocumentTargets() {
+        try {
+          const fsx = require('node:fs'); const px = require('node:path');
+          formatTarget = String(repo.settings.get('output_format', projectId) || '').trim();
+          if (!formatTarget) {
+            const formats = fsx.readdirSync(px.join(outputDir, 'formats')).filter((file) => file.toLowerCase().endsWith('.html'));
+            if (formats.length === 1) formatTarget = px.join('formats', formats[0]);
+          }
+        } catch {}
+        try { branding = String(repo.settings.get('output_branding', projectId) || '').trim(); } catch {}
+        try { rawData = repo.settings.get('output_rawdata', projectId) === '1'; } catch {}
+      }
+      function documentFormatInstructions() {
+        return formatTarget ? '\n\nOUTPUT FORMAT TARGET: "' + formatTarget + '" in the document library is the visual standard for every document you produce. Read it with read_file BEFORE composing, and reproduce its fonts, masthead, header block, numbered section headings, tables, chart styling, callouts, spacing, and print rules EXACTLY — replacing the sample content with this turn\'s real content. Branding and layout come from the format target; sections and data come from the task and skill. The format\'s web-font stylesheet links are the only permitted external references; keep every font-family fallback stack so offline rendering degrades gracefully.' : '';
+      }
+      function documentTargetInstructions() {
+        const brand = branding ? '\n\nTARGET DOCUMENT BRANDING (apply to every deliverable, on top of the format): ' + branding : '';
+        const data = rawData ? '\n\nRAW DATA EXPORT IS ON: alongside every report, also save the collected tabular data as a spreadsheet — save_document with format "xlsx", type "raw-data", the same title plus " — Data", the same properties, and content as JSON {"sheets":[{"name":"…","rows":[[header…],[values…]]}]} (one sheet per dataset; the app renders the Excel file deterministically).' : '';
+        const missing = (!formatTarget || !branding) ? '\n\nDOCUMENT TARGETS MISSING: ' + [!formatTarget ? 'Target Document Format' : '', !branding ? 'Target Document Branding' : ''].filter(Boolean).join(' and ') + ' is not set for this project. Before producing a document, ask the user for the missing target(s) — they can answer here in chat or set it on the project OVERVIEW page under DOCUMENT TARGETS. Do not silently invent branding or a format.' : '';
+        return brand + data + missing;
+      }
+      function documentModeInstructions(sourceReadRoots) {
+        const source = sourceReadRoots.length ? ' plus the project source directory at ' + sourceReadRoots[0] : '';
+        const libraryList = projectId ? projectDocs.listLibrary(projectId) : '';
+        return 'DOCUMENTS MODE: the deliverable of this chat is documents, not chat prose. Produce or update documents with the save_document tool — reports, briefs, specs, analyses, exports — which saves into the project document library, versioned and filed. A substantial answer should land as a saved document, with the chat reply a short summary that names the saved file. The document library is at ' + outputDir + ' — read_file, list_dir, and grep_files are jailed to it' + source + ', so you can read and build on every document already there and inspect project source read-only. When the user iterates on a document, save the revision under the same title and type rather than creating a near-duplicate. Use research tools to collect material and track which source supports each claim.' + documentFormatInstructions() + documentTargetInstructions() + (libraryList ? '\n\nPROJECT LIBRARY — documents already saved for this project; read them at these exact paths:\n' + libraryList : '');
+      }
+      function configureDocumentsMode() {
+        if (chatMode !== 'documents') return;
         // The documents harness (O20/O22), built on the coding-harness
         // pattern: a jailed tool pack + a mode note + planner rules. Hands
         // differ — read-only, jailed to the LIBRARY; no shell; publication
         // goes through save_document (versioned, indexed, placed).
-        library = buildLibraryTools({ root: outputDir });
+        const sourceReadRoots = (project && project.working_dir && path.resolve(project.working_dir) !== path.resolve(outputDir))
+          ? [project.working_dir] : [];
+        library = buildLibraryTools({ root: outputDir, readRoots: sourceReadRoots });
         // Web tools join the planning menu like coding mode — collection is
         // research, and the planner must see the collection tools to plan it.
         scopedTools = [...scopedTools, ...library.tools, ...webTools.WEB_TOOLS];
-        // O24: the project's OUTPUT FORMAT TARGET — a sample document whose
-        // visual system every deliverable must reproduce (branding lives in
-        // the format, sections in the skill/task). Explicit per-project
-        // setting wins; else a single .html in the library's formats/ folder
-        // is the target. A SYSTEM capability, not a skill's.
-        try {
-          const fsx = require('node:fs'); const px = require('node:path');
-          const set = String(repo.settings.get('output_format', projectId) || '').trim();
-          if (set) formatTarget = set;
-          else {
-            const fl = fsx.readdirSync(px.join(outputDir, 'formats')).filter((f) => f.toLowerCase().endsWith('.html'));
-            if (fl.length === 1) formatTarget = px.join('formats', fl[0]);
-          }
-        } catch {}
-        // The other two DOCUMENT TARGETS (Overview form ↔ chat, either fills
-        // them): branding text applied on top of the format, and the
-        // raw-data checkbox that adds an Excel export beside each report.
-        try { branding = String(repo.settings.get('output_branding', projectId) || '').trim(); } catch {}
-        try { rawData = repo.settings.get('output_rawdata', projectId) === '1'; } catch {}
-        convo = [{
-          role: 'system',
-          content: 'DOCUMENTS MODE: the deliverable of this chat is documents, not chat prose. '
-            + 'Produce or update documents with the save_document tool — reports, briefs, specs, analyses, exports — '
-            + 'which saves into the project document library, versioned and filed. A substantial answer should land '
-            + 'as a saved document, with the chat reply a short summary that names the saved file. '
-            + 'The document library is at ' + outputDir + ' — read_file, list_dir, and grep_files are jailed to it, '
-            + 'so you can read and build on every document already there. When the user iterates on a document, '
-            + 'save the revision under the same title and type (versioning is automatic) rather than creating a '
-            + 'near-duplicate or pasting long content into chat. Use the research tools to collect material before '
-            + 'writing, and keep track of which source supports each claim.'
-            + (formatTarget
-              ? '\n\nOUTPUT FORMAT TARGET: "' + formatTarget + '" in the document library is the visual standard for '
-                + 'every document you produce. Read it with read_file BEFORE composing, and reproduce its fonts, '
-                + 'masthead, header block, numbered section headings, tables, chart styling, callouts, spacing, and '
-                + 'print rules EXACTLY — replacing the sample content with this turn\'s real content. Branding and '
-                + 'layout come from the format target; sections and data come from the task and skill. The format\'s '
-                + 'web-font stylesheet links are the only permitted external references; keep every font-family '
-                + 'fallback stack so offline rendering degrades gracefully.'
-              : '')
-            + (branding
-              ? '\n\nTARGET DOCUMENT BRANDING (apply to every deliverable, on top of the format): ' + branding
-              : '')
-            + (rawData
-              ? '\n\nRAW DATA EXPORT IS ON: alongside every report, also save the collected tabular data as a '
-                + 'spreadsheet — save_document with format "xlsx", type "raw-data", the same title plus " — Data", '
-                + 'the same properties, and content as JSON {"sheets":[{"name":"…","rows":[[header…],[values…]]}]} '
-                + '(one sheet per dataset; the app renders the Excel file deterministically).'
-              : '')
-            + ((!formatTarget || !branding)
-              ? '\n\nDOCUMENT TARGETS MISSING: '
-                + [!formatTarget ? 'Target Document Format' : '', !branding ? 'Target Document Branding' : ''].filter(Boolean).join(' and ')
-                + ' is not set for this project. Before producing a document, ask the user for the missing target(s) — '
-                + 'they can answer here in chat (state it and it will be recorded to the project) or set it on the '
-                + 'project OVERVIEW page under DOCUMENT TARGETS. Do not silently invent branding or a format.'
-              : '')
-            + (() => { const l = projectId ? projectDocs.listLibrary(projectId) : ''; return l ? '\n\nPROJECT LIBRARY — documents already saved for this project; read them at these exact paths:\n' + l : ''; })()
-        }, ...convo];
+        resolveDocumentTargets();
+        convo = [{ role: 'system', content: documentModeInstructions(sourceReadRoots) }, ...convo];
         emitProgress({ type: 'process', kind: 'documents-mode', outputDir, tools: library.tools.length, formatTarget, branding: !!branding, rawData });
       }
-      if (chatMode === 'code') {
+      function projectBuildEnvironment() {
+        const environment = {};
+        try {
+          for (const line of String(repo.settings.get('build_env', projectId) || '').split('\n')) {
+            const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+            if (match) environment[match[1]] = match[2].trim().replace(/^["']|["']$/g, '');
+          }
+        } catch {}
+        return environment;
+      }
+      function codingModeInstructions(gitAvailable, buildEnv, rulebook) {
+        const filePolicy = gitAvailable ? 'File writes/edits are auto-approved (git provides rollback); shell commands pause for the user to approve. ' : 'Each write, edit, or shell command pauses for the user to approve (no git repo — no rollback). ';
+        const environment = Object.keys(buildEnv).length ? ' Build environment variables set for this project: ' + Object.keys(buildEnv).join(', ') + '.' : '';
+        const check = coding.checkCommand ? `\n\nPROJECT CHECK: the framework runs \`${coding.checkCommand}\` after your changes and it must pass. A failure comes back to you with its output; fix the root cause.` : '';
+        const rules = coding.rulebook ? '\n\nPROJECT RULEBOOK (' + rulebook.relPath + ' — non-negotiable rules for all work in this repository):\n' + String(coding.rulebook).slice(0, 6000) : '';
+        const libraryList = projectId ? projectDocs.listLibrary(projectId) : '';
+        const libraryNote = libraryList ? '\n\nPROJECT LIBRARY — documents and uploaded files already saved for this project. Read them at these exact paths; do not ask the user to locate them:\n' + libraryList : '';
+        return 'CODING MODE: file and shell tools are available. Allowed directories: the project working directory ' + project.working_dir + ' (relative paths resolve here) and the project documents directory ' + outputDir + '. File actions outside those directories are refused. Reads are free. ' + filePolicy + 'If an action is declined, continue without it. Read a file before editing it; edit_file replaces an exact existing string. run_command executes in the working directory and is KILLED when it returns — start long-running processes with start_server and read their output with server_logs. NEVER delete, skip, or weaken a failing test to make it pass — fix the root cause; if a test itself is wrong, say so explicitly when changing it.' + environment + check + rules + libraryNote;
+      }
+      function configureCodingMode() {
+        if (chatMode !== 'code') return;
         if (project && project.working_dir) {
           const gitAvailable = hasGit(project.working_dir);
           // Live re-check: the user can initialize git MID-TURN from the
@@ -1292,13 +1523,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           // Project build environment (Overview → BUILD ENVIRONMENT): KEY=VALUE
           // lines merged into every command and server the model runs, so
           // builds get what they need without inheriting the app's secrets.
-          let buildEnv = {};
-          try {
-            for (const line of String(repo.settings.get('build_env', projectId) || '').split('\n')) {
-              const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-              if (m) buildEnv[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
-            }
-          } catch {}
+          const buildEnv = projectBuildEnvironment();
           coding = buildCodingTools({ root: project.working_dir, docsRoot: outputDir, approveAction, buildEnv, projectId });
           coding.root = project.working_dir;         // for step-commits (O9)
           coding.gitAvailable = gitAvailable;
@@ -1317,42 +1542,29 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           // Web tools join the planning menu in coding mode — docs lookup and
           // error-message searches are part of real development.
           scopedTools = [...scopedTools, ...coding.tools, ...webTools.WEB_TOOLS];
-          convo = [{
-            role: 'system',
-            content: 'CODING MODE: file and shell tools are available. Allowed directories: the project working directory '
-              + project.working_dir + ' (relative paths resolve here) and the project documents directory ' + outputDir + '. '
-              + 'File actions outside those directories are refused. Reads are free. '
-              + (gitAvailable
-                ? 'File writes/edits are auto-approved (git provides rollback); shell commands pause for the user to approve. '
-                : 'Each write, edit, or shell command pauses for the user to approve (no git repo — no rollback). ')
-              + 'If an action is declined, continue without it. Read a file before editing it; edit_file replaces an exact '
-              + 'existing string. run_command executes in the working directory and is KILLED when it '
-              + 'returns — start long-running processes (dev servers, watchers) with start_server, which '
-              + 'keeps them alive across turns; read their output with server_logs. '
-              // O28: test integrity is a standing rule at execution time, not
-              // just plan-shape guidance — the flat loop writes code too.
-              + 'NEVER delete, skip, or weaken a failing test to make it pass — fix the root cause; '
-              + 'if a test itself is wrong, say so explicitly when changing it.'
-              + (Object.keys(buildEnv).length ? ' Build environment variables set for this project: ' + Object.keys(buildEnv).join(', ') + '.' : '')
-              + (coding.checkCommand
-                ? `\n\nPROJECT CHECK: the framework runs \`${coding.checkCommand}\` after your changes and it must pass. A failure comes back to you with its output; fix the root cause.`
-                : '')
-              + (coding.rulebook
-                ? '\n\nPROJECT RULEBOOK (' + rb.relPath + ' — non-negotiable rules for all work in this repository):\n' + String(coding.rulebook).slice(0, 6000)
-                : '')
-              + (() => { const l = projectId ? projectDocs.listLibrary(projectId) : ''; return l ? '\n\nPROJECT LIBRARY — documents and uploaded files already saved for this project. Read them at these exact paths; do not ask the user to locate them:\n' + l : ''; })()
-          }, ...convo];
+          convo = [{ role: 'system', content: codingModeInstructions(gitAvailable, buildEnv, rb) }, ...convo];
           emitProgress({ type: 'process', kind: 'coding-mode', root: project.working_dir, docsRoot: outputDir, tools: coding.tools.length, gitAvailable, rulebook: !!rb, check: !!coding.checkCommand });
         } else {
           console.warn('[coding-mode] chat has coding mode on but the project has no working_dir — tools not offered');
         }
       }
+      configureDocumentsMode();
+      configureCodingMode();
+      return { project, outputDir, docsBase, artifactBaseline, coding, library, formatTarget, branding, rawData };
+      }
+      const { project, outputDir, docsBase, artifactBaseline, coding, library, formatTarget, branding, rawData } = prepareTurnMode();
+
+      // The planner already sees this digest in plannerText. Execution does
+      // not: it receives convo. Without this second injection a resume knows
+      // which delegated step to skip but loses the evidence that step found.
+      convo = withResumeContext(convo, workflowResumeContext);
 
       // ── O26: the check gate's turn-scoped state ─────────────────────────
       // One closure owns every check run this turn — each is a process event,
       // and the LAST verdict is what synthesis, review, and the debt ledger
       // see. Defined here (not inside the execution branch) so the tool
       // wrapper below can trigger the lazy baseline.
+      function prepareCheckRuntime() {
       const checkState = { ran: false, failing: false, output: '', baselineFailing: false };
       const runTurnCheck = async (phase, step) => {
         if (!coding || !coding.checkCommand) return null;
@@ -1380,15 +1592,27 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         checkState.baselineFailing = !c.ok;
         emitProgress({ type: 'process', kind: c.ok ? 'check-pass' : 'check-failed', phase: 'baseline' });
       };
+      return { checkState, runTurnCheck, ensureBaseline };
+      }
+      const { checkState, runTurnCheck, ensureBaseline } = prepareCheckRuntime();
 
       // Orchestrator gets the MCP tools PLUS `delegate`; sub-agents get the MCP
       // tools only (no `delegate`) so the tree stays one level deep. Coding
       // tools (no `__` namespace) route to the pack; everything else to MCP.
       // Sub-agents share this router, so their mutations trigger the baseline
       // too — the third path is not exempt from attribution.
-      const rawCallTool = async (name, args) => {
+      async function prepareTurnToolRuntime() {
+      const turnToolCache = new TurnToolCache(toolset.tools, (name) => {
+        emitProgress({ type: 'process', kind: 'tool-cache-hit', name });
+      });
+      const uncachedCallTool = async (name, args) => {
         if (coding && coding.checkCommand && MUTATING_TOOLS.includes(name)) {
           try { await ensureBaseline(); } catch (e) { console.error('[check baseline]', e && e.message); }
+        }
+        const local = (coding && coding.names.has(name)) || (library && library.names.has(name)) || webTools.names.has(name);
+        if (!local && workflowContract.toolPolicy && workflowContract.toolPolicy.mcp === 'deny') {
+          emitProgress({ type: 'process', kind: 'workflow-tool-blocked', workflow: workflowContract.kind, name });
+          return { text: `Tool ${name} is outside the ${workflowContract.kind} workflow policy. Connected MCP tools are not available for this task.`, isError: true };
         }
         return (coding && coding.names.has(name))
           ? coding.call(name, args)
@@ -1398,6 +1622,11 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
               ? webTools.call(name, args)
               : mcpManager.callTool(name, args, toolset.routes);
       };
+      // This is the shared boundary for orchestrator AND delegated calls. A
+      // first version cached only inside callTool below; runSubagent receives
+      // rawCallTool directly, so delegated report collection bypassed the
+      // snapshot and could still pull a second, contradictory live result.
+      const rawCallTool = (name, args) => turnToolCache.call(name, args, () => uncachedCallTool(name, args));
 
       // Authored per-project agents the orchestrator can delegate to by name.
       let authoredAgents = [];
@@ -1414,61 +1643,69 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // Document placement template (user-configurable; global default).
       // `project`/`outputDir` were resolved above (coding-mode block).
       const placementTemplate = repo.settings.get('placement_template') || docs.DEFAULT_TEMPLATE;
-      const saveDocument = async (args) => {
-        // Canonical dev docs (spec/design/pseudocode/knowledge) have a fixed,
-        // designed home at docs/<NAME>.md — a documentation step's save goes
-        // there and versions, never into the deliverables bin.
-        const canonType = String(args.type || '').toLowerCase();
-        if (projectId && projectDocs.CANONICAL[canonType]) {
-          const w = projectDocs.writeCanonical({ projectId, docsBase, docType: canonType, content: args.content || '', source: 'chat' });
-          emitProgress({ type: 'process', kind: 'doc-update', doc: canonType, version: w.version });
-          emitProgress({ type: 'document-saved', title: projectDocs.CANONICAL[canonType], path: w.absPath, relPath: w.relPath, version: w.version, mime: 'text/markdown' });
-          return { text: `Updated ${w.relPath} (v${w.version}) — the project's canonical ${canonType} document.` };
-        }
-        // Raw-data export: the model authors DATA (JSON sheets); the
-        // framework renders the spreadsheet (spreadsheet.js). Deterministic —
-        // a malformed payload is a clear tool error, never a corrupt file.
-        let saveFormat = args.format;
-        let saveContent = args.content || '';
-        if (/^(xlsx?|spreadsheet|excel)$/i.test(String(args.format || ''))) {
-          try {
-            saveContent = require('./spreadsheet').sheetsToXml(JSON.parse(String(args.content || '')));
-            saveFormat = 'xls';
-          } catch (e) {
-            return { text: `save_document (spreadsheet): content must be JSON {sheets:[{name, rows:[[…]]}]} — ${e.message}`, isError: true };
-          }
-        }
-        // O31: librarian filing BEFORE placement — one fast-model call
-        // normalizes type/entity/period against the project's existing
-        // vocabulary and proposes faceted tags; deterministic validation
-        // (librarian.js) decides what lands. The LLM chooses meaning, the
-        // template still chooses location; a filing failure saves unfiled.
-        const meta = { type: args.type, title: args.title, format: saveFormat, properties: { ...(args.properties || {}) } };
-        let filed = { tags: [] };
-        if (projectId && !isAborted()) {
-          filed = await librarian.fileDocument({
-            connector: { chat: chatAbortable }, model: fastModel,
-            meta: { title: args.title, type: args.type, properties: args.properties || {} },
-            contentHead: String(args.content || '').slice(0, 2000),
-            vocabulary: buildVocabulary(projectId)
-          });
-          if (filed.docType) meta.type = filed.docType;
-          if (filed.entity && !meta.properties.tenant && !meta.properties.company) meta.properties.tenant = filed.entity;
-          if (filed.period && !meta.properties.period && !meta.properties.date) meta.properties.period = filed.period;
-        }
-        const w = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: saveContent });
+      const saveCanonicalDocument = (args, canonicalType) => {
+        if (!projectId || !projectDocs.CANONICAL[canonicalType]) return null;
+        const written = projectDocs.writeCanonical({ projectId, docsBase, docType: canonicalType, content: args.content || '', source: 'chat' });
+        emitProgress({ type: 'process', kind: 'doc-update', doc: canonicalType, version: written.version });
+        emitProgress({ type: 'document-saved', title: projectDocs.CANONICAL[canonicalType], path: written.absPath, relPath: written.relPath, version: written.version, mime: 'text/markdown' });
+        return { text: `Updated ${written.relPath} (v${written.version}) — the project's canonical ${canonicalType} document.` };
+      };
+      const spreadsheetContent = (args) => {
+        if (!/^(xlsx?|spreadsheet|excel)$/i.test(String(args.format || ''))) return { format: args.format, content: args.content || '' };
+        try { return { format: 'xls', content: require('./spreadsheet').sheetsToXml(JSON.parse(String(args.content || ''))) }; }
+        catch (error) { return { error: `save_document (spreadsheet): content must be JSON {sheets:[{name, rows:[[…]]}]} — ${error.message}` }; }
+      };
+      const filedDocumentMetadata = async (args, format) => {
+        const meta = { type: args.type, title: args.title, format, properties: { ...(args.properties || {}) } };
+        if (!projectId || isAborted()) return { meta, filed: { tags: [] } };
+        const filed = await librarian.fileDocument({ connector: { chat: chatAbortable }, model: fastModel, meta: { title: args.title, type: args.type, properties: args.properties || {} }, contentHead: String(args.content || '').slice(0, 2000), vocabulary: buildVocabulary(projectId) });
+        if (filed.docType) meta.type = filed.docType;
+        if (filed.entity && !meta.properties.tenant && !meta.properties.company) meta.properties.tenant = filed.entity;
+        if (filed.period && !meta.properties.period && !meta.properties.date) meta.properties.period = filed.period;
+        return { meta, filed };
+      };
+      const revisionTarget = (meta) => {
+        const path = store && store.get('existing_report_path');
+        const documents = projectId ? repo.documents.listByProject(projectId) : [];
+        const explicit = path ? documents.find((document) => document.path === path) : null;
+        const titled = workflowContract.kind === 'mode-flow' ? documents.filter((document) => String(document.title || '').toLowerCase() === String(meta.title || '').toLowerCase() && (!meta.type || !document.doc_type || String(document.doc_type) === String(meta.type))).sort((a, b) => Number(b.id) - Number(a.id))[0] : null;
+        const revision = explicit || titled || null;
+        if (!revision || (meta.type && revision.doc_type && String(meta.type) !== String(revision.doc_type))) return null;
+        meta.title = revision.title;
+        if (titled && titled.properties_json) { try { meta.properties = JSON.parse(titled.properties_json) || {}; } catch {} }
+        emitProgress({ type: 'process', kind: 'document-revision-target', id: revision.id, path: revision.path });
+        return revision;
+      };
+      const indexGeneratedDocument = (meta, written, revision) => {
         let row = null;
-        try {
-          row = repo.documents.saveGenerated({ projectId, title: args.title || w.relPath, path: w.absPath, mimeType: w.mime, source: 'chat', docType: meta.type || null, version: w.version, properties: Object.keys(meta.properties).length ? meta.properties : null });
-        } catch (e) { console.error('[save_document index]', e && e.message); }
-        if (row && filed.tags.length) {
-          try {
-            for (const t of filed.tags) { const tag = repo.tags.ensure(projectId, t.facet, t.name); if (tag) repo.tags.tagDocument(row.id, tag.id); }
-            emitProgress({ type: 'process', kind: 'librarian-filed', target: 'document', title: args.title, docType: meta.type || null, tags: filed.tags.map((t) => `${t.facet}:${t.name}`) });
-          } catch (e) { console.error('[librarian tags]', e && e.message); }
+        try { row = repo.documents.saveGenerated({ projectId, title: meta.title || written.relPath, path: written.absPath, mimeType: written.mime, source: 'chat', docType: meta.type || null, version: written.version, properties: Object.keys(meta.properties).length ? meta.properties : null }); }
+        catch (error) { console.error('[save_document index]', error && error.message); }
+        if (row && chatId) {
+          try { repo.documents.linkToChat({ chatId, documentId: row.id, relation: revision ? 'edited' : 'created' }); }
+          catch (error) { console.error('[save_document chat link]', error && error.message); }
         }
-        emitProgress({ type: 'document-saved', id: row && row.id, title: args.title, path: w.absPath, relPath: w.relPath, version: w.version, mime: w.mime });
-        return { text: `Saved "${args.title}" → ${w.relPath} (v${w.version}) in the document library. Full path: ${w.absPath}` };
+        return row;
+      };
+      const tagGeneratedDocument = (row, filed, meta) => {
+        if (!row || !filed.tags.length) return;
+        try {
+          tagFiledItem(projectId, row.id, 'document', filed.tags);
+          emitProgress({ type: 'process', kind: 'librarian-filed', target: 'document', title: meta.title, docType: meta.type || null, tags: filed.tags.map((tag) => `${tag.facet}:${tag.name}`) });
+        } catch (error) { console.error('[librarian tags]', error && error.message); }
+      };
+      const saveDocument = async (args) => {
+        const canonicalType = String(args.type || '').toLowerCase();
+        const canonical = saveCanonicalDocument(args, canonicalType);
+        if (canonical) return canonical;
+        const content = spreadsheetContent(args);
+        if (content.error) return { text: content.error, isError: true };
+        const { meta, filed } = await filedDocumentMetadata(args, content.format);
+        const revision = revisionTarget(meta);
+        const written = docs.writeDocument({ outputDir, template: placementTemplate, meta, content: content.content });
+        const row = indexGeneratedDocument(meta, written, revision);
+        tagGeneratedDocument(row, filed, meta);
+        emitProgress({ type: 'document-saved', id: row && row.id, title: meta.title, path: written.absPath, relPath: written.relPath, version: written.version, mime: written.mime });
+        return { text: `Saved "${meta.title}" → ${written.relPath} (v${written.version}) in the document library. Full path: ${written.absPath}` };
       };
 
       // Resolve a delegate target (authored agent by name, else the general one)
@@ -1496,12 +1733,47 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
       // by the callTool wrapper below.
       let store = new VariableStore();
       try { if (chatId) store = VariableStore.fromJSON(repo.chats.getVariables(chatId)); } catch (e) { console.error('[variables load]', e && e.message); }
+      try {
+        const last = workflowCheckpoints[workflowCheckpoints.length - 1];
+        if (last && last.values) store = VariableStore.fromJSON(last.values);
+      } catch (e) { console.error('[workflow values restore]', e && e.message); }
       const varsAtStart = store.size;
 
-      let delegatedCount = 0, delegateAbsorbed = 0; // telemetry: isolation via sub-agents
+      const delegation = { count: 0, absorbedTokens: 0 }; // telemetry: isolation via sub-agents
+      const recordDelegation = (result, label) => {
+        recordDelegatedResult(delegation, taskLog, result, label);
+      };
+      const runDelegateTool = async (args) => {
+        const result = await runOne(args && args.agent, args && args.task);
+        const label = args && args.agent && args.agent !== 'auto' ? args.agent : 'general';
+        recordDelegation(result, label);
+        return { text: result.conclusion || '(sub-agent returned no conclusion)' };
+      };
+      const runAssignTool = async (args) => {
+        const tasks = Array.isArray(args && args.tasks) ? args.tasks.filter((task) => task && task.task) : [];
+        if (!tasks.length) return { text: 'assign: no tasks provided', isError: true };
+        const results = await Promise.all(tasks.map(async (task) => {
+          const result = await runOne(task.agent, task.task);
+          recordDelegation(result, task.agent && task.agent !== 'auto' ? task.agent : String(task.task || '').slice(0, 60));
+          return { agent: resolveDelegate(task.agent).agent.name, task: task.task, conclusion: result.conclusion || '' };
+        }));
+        if (args && args.merge) {
+          const merged = await mergeResults({ connector, model: chosenModel, instruction: args.merge, results, onEvent: emitProgress });
+          return { text: merged || '(merge produced nothing)' };
+        }
+        return { text: results.map((result, index) => `### Result ${index + 1} — ${result.agent}\n${result.conclusion}`).join('\n\n') };
+      };
+      const runCapturedTool = async (name, args) => {
+        try { store.captureFromArgs(args, { source: name }); } catch {}
+        const output = await rawCallTool(name, args);
+        try { if (!output.isError) store.captureFromResult(name, output.text || ''); } catch {}
+        try {
+          for (const key of projectFacts.capture(store, { name, args, text: output.text || '', ok: !output.isError })) emitProgress({ type: 'process', kind: 'var-capture', key, from: 'project' });
+        } catch {}
+        return output;
+      };
       const callTool = async (name, args) => {
         if (name === 'set_variable') {
-          // Explicit working-memory write — never routed to MCP.
           const entry = store.set({ key: args && args.key, value: args && args.value, type: args && args.type }, { confidence: 'derived', source: 'set_variable' });
           return { text: entry ? `Remembered ${entry.key} = ${JSON.stringify(entry.value)}` : 'Ignored (empty key or value).' };
         }
@@ -1509,51 +1781,23 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           try { return await saveDocument(args || {}); }
           catch (e) { console.error('[save_document]', e && e.message); return { text: `save_document failed: ${e.message}`, isError: true }; }
         }
-        if (name === 'delegate') {
-          const r = await runOne(args && args.agent, args && args.task);
-          delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
-          taskLog.push({ kind: 'subagent', label: (args && args.agent && args.agent !== 'auto') ? args.agent : 'general', tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
-          return { text: r.conclusion || '(sub-agent returned no conclusion)' };
-        }
-        if (name === 'assign') {
-          // Assign work in parallel, then merge the results.
-          const tasks = Array.isArray(args && args.tasks) ? args.tasks.filter((t) => t && t.task) : [];
-          if (!tasks.length) return { text: 'assign: no tasks provided', isError: true };
-          const results = await Promise.all(tasks.map(async (t) => {
-            const r = await runOne(t.agent, t.task);
-            delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
-            taskLog.push({ kind: 'subagent', label: (t.agent && t.agent !== 'auto') ? t.agent : String(t.task || '').slice(0, 60), tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
-            return { agent: (resolveDelegate(t.agent).agent.name), task: t.task, conclusion: r.conclusion || '' };
-          }));
-          if (args && args.merge) {
-            const merged = await mergeResults({ connector, model: chosenModel, instruction: args.merge, results, onEvent: emitProgress });
-            return { text: merged || '(merge produced nothing)' };
-          }
-          return { text: results.map((r, i) => `### Result ${i + 1} — ${r.agent}\n${r.conclusion}`).join('\n\n') };
-        }
-        // Auto-capture working memory around real MCP calls (id/locator-shaped
-        // params only; re-observation is a no-op so the planned path's own
-        // captures don't double up).
-        try { store.captureFromArgs(args, { source: name }); } catch {}
-        const out = await rawCallTool(name, args);
-        try { if (!out.isError) store.captureFromResult(name, out.text || ''); } catch {}
-        // Coding-mode common variables (dev server URL/port, build/test/lint
-        // commands, package manager) — the same durable-facts treatment MCP
-        // ids get, so the next turn never re-derives how to run this project.
-        try {
-          for (const key of projectFacts.capture(store, { name, args, text: out.text || '', ok: !out.isError })) {
-            emitProgress({ type: 'process', kind: 'var-capture', key, from: 'project' });
-          }
-        } catch {}
-        return out;
+        if (name === 'delegate') return runDelegateTool(args);
+        if (name === 'assign') return runAssignTool(args);
+        return runCapturedTool(name, args);
       };
+      return { authoredAgents, orchestratorTools, store, varsAtStart, callTool, runOne, delegation };
+      }
+      const { authoredAgents, orchestratorTools, store, varsAtStart, callTool, runOne, delegation } = await prepareTurnToolRuntime();
 
+      async function executeTurnPipeline() {
       // Emit the pre-call context ledger so the INTERNALS tab can show exactly
       // what is occupying the window this turn (occupancy, compaction, prompt).
+      function emitPreCallLedger() {
       try {
         const tokensBefore = estimateTokens(base);
         _e.sender.send('chat:progress', { turnId, ...buildLedger({ convo, tools: orchestratorTools, model: chosenModel, compressed, tokensBefore, skillSelect, toolScope }) });
       } catch (e) { console.error('[internals ledger]', e && e.message); }
+      }
 
       // Interactive continuation: when the loop hits its tool-call budget, ask
       // the renderer (Continue / Stop) via the shared one-shot prompt queue.
@@ -1561,34 +1805,37 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
 
       let result;
       let planInfo = null; // {steps, replans, completed} — planner telemetry (v15)
-      try {
+      async function executeTurnPlan() {
+        if (securityState.block) throw firewallError();
         // ── Plan Pass 2 (plan-derive.js): derive the steps from the loaded
         // skills + tools + known values. Only attempted when real capabilities
         // are in play; any planner failure degrades to {simple:true}, so the
         // flat loop below remains the worst case — planning can never make a
         // turn worse than today's behavior.
-        let plan = null;
         // O15: the canonical project docs (spec/design/pseudocode/knowledge)
         // are the planner's source of truth for objective and purpose —
         // bootstrapped if missing (heals older projects), loaded here,
         // injected into every derive/refine call.
-        let docsBlock = '';
-        try {
-          if (projectId) {
-            projectDocs.ensureCanonicalDocs({ projectId, docsBase });
-            projectDocs.backfillFiles({ projectId, outputDir });
-            docsBlock = projectDocs.load(projectId);
-            // The DOCUMENTS tab lists the library; the model needs the same
-            // list with real paths, or it hunts for files the user can see.
-            const lib = projectDocs.listLibrary(projectId);
-            if (lib) docsBlock += (docsBlock ? '\n\n' : '') + 'PROJECT LIBRARY (files on disk — read them with read_file at these paths; never ask the user where they are):\n' + lib;
-          }
-        } catch (e) { console.error('[project-docs load]', e && e.message); }
+        function loadPlanningDocuments() {
+          if (!projectId) return '';
+          try {
+            projectDocs.ensureCanonicalDocs({ projectId, docsBase }); projectDocs.backfillFiles({ projectId, outputDir });
+            let block = projectDocs.load(projectId); const libraryList = projectDocs.listLibrary(projectId);
+            if (libraryList) block += (block ? '\n\n' : '') + 'PROJECT LIBRARY (files on disk — read them with read_file at these paths; never ask the user where they are):\n' + libraryList;
+            return block;
+          } catch (error) { console.error('[project-docs load]', error && error.message); return ''; }
+        }
 
         // Coding mode plans against REAL files: a depth-2 map of the working
         // dir feeds Pass 2 so steps name actual paths instead of guessing.
-        let repoMap = '';
-        if (coding) { try { repoMap = (await coding.call('list_dir', { depth: 2 })).text || ''; } catch {} }
+        async function loadRepositoryMap() {
+          try {
+            if (coding) return (await coding.call('list_dir', { depth: 2 })).text || '';
+            if (library && project && project.working_dir) return (await library.call('list_dir', { path: project.working_dir, depth: 2 })).text || '';
+          } catch {}
+          return '';
+        }
+        const docsBlock = loadPlanningDocuments(); const repoMap = await loadRepositoryMap();
 
         // O15 doc maintenance — shared by BOTH execution paths; a turn that
         // mutated files must never end unrecorded and undocumented.
@@ -1600,12 +1847,15 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
               goal, stepResults, toolTrace, files: await readChanged(toolTrace),
               known: store.render(), current: projectDocs.readCanonical(projectId, docsBase)
             });
+            let updated = 0;
             for (const t of ['design', 'pseudocode', 'knowledge']) {
               if (!upd[t]) continue;
               const w = projectDocs.writeCanonical({ projectId, docsBase, docType: t, content: upd[t], source: 'pipeline' });
               emitProgress({ type: 'process', kind: 'doc-update', doc: t, version: w.version });
+              updated++;
             }
-          } catch (e) { console.error('[doc-writer]', e && e.message); }
+            return updated;
+          } catch (e) { console.error('[doc-writer]', e && e.message); return 0; }
         };
         const turnMutated = didMutate;   // shared definition (coding-tools.js)
         // The files a trace actually changed, with content — evidence for the
@@ -1631,41 +1881,55 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         // invented end to end. Deterministic: no model call, no judgement,
         // just "you named tools that do not exist here". Partial resolution is
         // allowed; zero is the cliff.
-        const unmetSkills = loadedSkills
-          .map((s) => ({ name: s.name, ...skillPreconditions(s, toolset.tools.map((t) => t.name)) }))
-          .filter((p) => p.unmet);
-        if (unmetSkills.length) {
-          emitProgress({ type: 'process', kind: 'precondition-unmet', skills: unmetSkills.map((s) => ({ skill: s.name, declared: s.declared.length, missing: s.missing })) });
-          // Expressed as an O7 ALIGN outcome rather than a bespoke error: an
-          // unreachable data source IS a decision the user has to make, and
-          // align already ends the turn cleanly, renders a form, and records
-          // nothing. Synthetic — built here without a model call.
-          plan = {
-            simple: true, align: true, goal: '', steps: [], record: [], droppedRecords: [],
-            decisions: unmetSkills.map((s) => ({
-              question: `"${s.name}" needs ${s.declared.length} tool${s.declared.length === 1 ? '' : 's'} that this project cannot reach right now (${s.missing.slice(0, 4).join(', ')}${s.missing.length > 4 ? `, +${s.missing.length - 4} more` : ''}). How should I proceed?`,
-              options: [
-                'Reconnect the connector, then ask me again — the connector is probably disconnected or its authorization expired',
-                'Proceed anyway without live data — any figures would be unsourced'
-              ],
-              recommendation: 'Reconnect first. A report assembled without its sources looks finished and is fiction, which is worse than no report.'
-            }))
-          };
-        } else if (scopedTools.length || loadedSkills.length) {
-          // Visible + bounded: planning on a thinking fast-model can take
-          // minutes — narrate it (the rail/status shows "deriving plan…"
-          // instead of silent bouncing balls), and cap it so a stalled
-          // provider degrades to the flat loop instead of hanging the turn.
+        function unmetSkillPlan() {
+          const unmet = loadedSkills.map((skill) => ({ name: skill.name, ...skillPreconditions(skill, toolset.tools.map((tool) => tool.name)) })).filter((item) => item.unmet);
+          if (!unmet.length) return null;
+          emitProgress({ type: 'process', kind: 'precondition-unmet', skills: unmet.map((skill) => ({ skill: skill.name, declared: skill.declared.length, missing: skill.missing })) });
+          return { simple: true, align: true, goal: '', steps: [], record: [], droppedRecords: [], decisions: unmet.map((skill) => ({ question: `"${skill.name}" needs ${skill.declared.length} tool${skill.declared.length === 1 ? '' : 's'} that this project cannot reach right now (${skill.missing.slice(0, 4).join(', ')}${skill.missing.length > 4 ? `, +${skill.missing.length - 4} more` : ''}). How should I proceed?`, options: ['Reconnect the connector, then ask me again — the connector is probably disconnected or its authorization expired', 'Proceed anyway without live data — any figures would be unsourced'], recommendation: 'Reconnect first. A report assembled without its sources looks finished and is fiction, which is worse than no report.' })) };
+        }
+        async function deriveModelPlan() {
+          if (!scopedTools.length && !loadedSkills.length) return null;
           emitProgress({ type: 'process', kind: 'planning', model: fastModel });
-          const planT0 = Date.now();
-          plan = await Promise.race([
-            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, documentsMode: !!library, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData }),
+          const startedAt = Date.now();
+          const derived = await Promise.race([
+            derivePlan({ connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: [project && project.cheat_sheet, renderContract(workflowContract)].filter(Boolean).join('\n\n'), loadedSkills, tools: scopedTools, store, agents: authoredAgents, codingMode: !!coding, documentsMode: !!library, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData }),
             new Promise((resolve) => setTimeout(() => resolve({ simple: true, goal: '', steps: [], error: 'planning timed out (240s) — fell back to the flat loop' }), 240000))
           ]);
-          if (plan.error) console.warn('[plan-derive]', plan.error);
-          emitProgress({ type: 'process', kind: 'planning-done', durationMs: Date.now() - planT0, steps: plan.simple ? 0 : plan.steps.length, error: plan.error });
-          taskLog.push({ kind: 'select', label: 'derive-plan', tokens: null, durationMs: Date.now() - planT0, ok: !plan.error });
+          if (derived.error) console.warn('[plan-derive]', derived.error);
+          if (securityState.block) throw firewallError();
+          emitProgress({ type: 'process', kind: 'planning-done', durationMs: Date.now() - startedAt, steps: derived.simple ? 0 : derived.steps.length, error: derived.error });
+          taskLog.push({ kind: 'select', label: 'derive-plan', tokens: null, durationMs: Date.now() - startedAt, ok: !derived.error });
+          return derived;
         }
+        async function chooseTurnPlan() {
+          if (workflowResume && workflowResume.plan && Array.isArray(workflowResume.plan.steps)) {
+            emitProgress({ type: 'process', kind: 'planning-replay', runId: workflowResume.id, steps: workflowResume.plan.steps.length });
+            return workflowResume.plan;
+          }
+          const missingScope = scopeAlignment(workflowContract);
+          if (missingScope) { emitProgress({ type: 'process', kind: 'scope-required', issues: workflowContract.scope.issues.map((issue) => issue.key) }); return missingScope; }
+          return unmetSkillPlan() || await deriveModelPlan();
+        }
+        function applyWorkflowResume(plan) {
+          let resumed = constrainPlan(plan, workflowContract);
+          if (!workflowResume || !workflowCheckpoints.length) return resumed;
+          const before = resumed && Array.isArray(resumed.steps) ? resumed.steps.length : 0;
+          const completed = workflowCheckpoints.filter((row) => !(row.result && row.result.incomplete)).length;
+          resumed = resumePlan(resumed, workflowCheckpoints);
+          resumed = focusResumedStockStep(resumed, workflowResume, workflowCheckpoints);
+          emitProgress({ type: 'process', kind: 'workflow-resume-plan', runId: workflowResume.id, completed, partial: workflowCheckpoints.length - completed, remaining: resumed && resumed.steps ? resumed.steps.length : 0, removed: Math.max(0, before - ((resumed && resumed.steps && resumed.steps.length) || 0)) });
+          return resumed;
+        }
+        function startWorkflowRun(plan) {
+          if (!plan || (workflowContract.kind === 'generic' && (plan.simple || !plan.steps || !plan.steps.length))) return;
+          try {
+            workflowRun = workflowResume || repo.workflowRuns.start({ turnId, projectId: projectId || null, chatId, kind: workflowContract.kind, contract: { ...workflowContract, budgetExceeded: plan.budgetExceeded || null }, plan, state: store.toJSON() });
+            if (workflowResume) repo.workflowRuns.updateStatus(workflowRun.id, 'running', { state: store.toJSON() });
+            emitProgress({ type: 'process', kind: workflowResume ? 'workflow-resumed' : 'workflow-start', runId: workflowRun.id, workflow: workflowContract.kind });
+          } catch (error) { console.error('[workflow start]', error && error.message); }
+        }
+        let plan = applyWorkflowResume(await chooseTurnPlan());
+        startWorkflowRun(plan);
 
         // O8: decisions the user stated persist at `user` confidence — they
         // outrank model guesses and survive turns/restarts with the store.
@@ -1677,6 +1941,24 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
         // that never ran was indistinguishable from one working perfectly.
         // This fires whenever the planner offered anything, so no event now
         // means exactly one thing: it offered nothing.
+        function applyDocumentTargetRecord(record) {
+          if (!projectId) return;
+          if (record.key === 'document_branding') {
+            repo.settings.set('output_branding', record.value, projectId);
+            emitProgress({ type: 'process', kind: 'doc-target-set', target: 'branding' });
+          } else if (record.key === 'document_format') {
+            const fsx = require('node:fs'); const px = require('node:path');
+            const directory = px.join(outputDir, 'formats');
+            const formats = fsx.existsSync(directory) ? fsx.readdirSync(directory).filter((file) => file.toLowerCase().endsWith('.html')) : [];
+            const wanted = String(record.value).toLowerCase();
+            const match = formats.find((file) => file.toLowerCase().includes(wanted)) || (formats.length === 1 ? formats[0] : null);
+            if (match) { repo.settings.set('output_format', px.join('formats', match), projectId); emitProgress({ type: 'process', kind: 'doc-target-set', target: 'format', value: match }); }
+          } else if (record.key === 'document_rawdata') {
+            repo.settings.set('output_rawdata', /^(1|true|yes|on)$/i.test(String(record.value)) ? '1' : '0', projectId);
+            emitProgress({ type: 'process', kind: 'doc-target-set', target: 'rawdata' });
+          }
+        }
+        function recordPlanDirections(plan) {
         const kept = (plan && Array.isArray(plan.record)) ? plan.record.length : 0;
         const dropped = (plan && Array.isArray(plan.droppedRecords)) ? plan.droppedRecords : [];
         if (kept + dropped.length > 0) {
@@ -1701,24 +1983,7 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             // Chat ↔ Overview parity: DOCUMENT TARGETS stated in chat land in
             // the SAME per-project settings the Overview form shows. Format
             // values resolve against the library's formats/ files by name.
-            try {
-              if (projectId && rec.key === 'document_branding') {
-                repo.settings.set('output_branding', rec.value, projectId);
-                emitProgress({ type: 'process', kind: 'doc-target-set', target: 'branding' });
-              } else if (projectId && rec.key === 'document_format') {
-                const fsx = require('node:fs'); const px = require('node:path');
-                const want = String(rec.value).toLowerCase();
-                const fl = fsx.readdirSync(px.join(outputDir, 'formats')).filter((f) => f.toLowerCase().endsWith('.html'));
-                const hit = fl.find((f) => f.toLowerCase().includes(want)) || (fl.length === 1 ? fl[0] : null);
-                if (hit) {
-                  repo.settings.set('output_format', px.join('formats', hit), projectId);
-                  emitProgress({ type: 'process', kind: 'doc-target-set', target: 'format', value: hit });
-                }
-              } else if (projectId && rec.key === 'document_rawdata') {
-                repo.settings.set('output_rawdata', /^(1|true|yes|on)$/i.test(String(rec.value)) ? '1' : '0', projectId);
-                emitProgress({ type: 'process', kind: 'doc-target-set', target: 'rawdata' });
-              }
-            } catch (e) { console.error('[doc-target-set]', e && e.message); }
+            try { applyDocumentTargetRecord(rec); } catch (e) { console.error('[doc-target-set]', e && e.message); }
           }
           if (projectId) {
             try {
@@ -1727,8 +1992,10 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             } catch (e) { console.error('[project-docs spec]', e && e.message); }
           }
         }
+        }
+        recordPlanDirections(plan);
 
-        if (plan && plan.align && plan.decisions && plan.decisions.length) {
+        function finishAlignmentTurn(plan) {
           // ── O7 alignment gate: direction decisions end the turn ───────────
           // No steps run, no synthesis call — the open decisions ARE the
           // reply, and the user's answers arrive as the next turn. The
@@ -1744,94 +2011,54 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             planned: false, aligned: true
           };
           planInfo = { steps: 0, replans: 0, completed: true };
-        } else if (plan && !plan.simple && plan.steps.length > 1) {
+        }
+        async function executePlannedTurn(plan) {
           // ── Plan-and-execute path ─────────────────────────────────────────
           emitProgress({ type: 'process', kind: 'plan', goal: plan.goal, merge: plan.merge || '', orchestrator: plan.orchestrator || null, steps: plan.steps.map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: s.parallel, group: s.group || '' })) });
-          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: project && project.cheat_sheet, loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData };
+          const planDeps = { connector: { chat: chatAbortable }, model: fastModel, userText: plannerText, cheatSheet: [project && project.cheat_sheet, renderContract(workflowContract)].filter(Boolean).join('\n\n'), loadedSkills, tools: scopedTools, agents: authoredAgents, projectDocs: docsBlock, repoMap, rulebook: coding ? coding.rulebook : '', formatTarget, branding, rawData };
 
-          // Stuck escalation (decision #1): after the re-plan budget is spent,
-          // explain what's stuck via the shared one-shot prompt queue.
           const onStuck = async ({ goal, stuckStep, values, replans }) =>
             ({ continue: (await askUser({ type: 'stuck', goal, step: stuckStep && stuckStep.task, values, replans })) > 0 });
-
-          const exec = await executePlan({
-            chat: chatAbortable,
-            callTool,
-            model: chosenModel,
-            plan,
-            isAborted,
-            // executeStep adds set_variable itself; don't offer it twice.
-            tools: orchestratorTools.filter((t) => t.name !== 'set_variable'),
-            store,
-            history: convo,
-            refinePlan: (i) => refinePlan({ ...planDeps, ...i }),
-            onStuck,
-            // O9: the plan is the git history — a completed step that mutated
-            // the tree commits with its `produces` as the message. Framework
-            // bookkeeping (no approval); best-effort; parallel steps pass an
-            // empty trace so sub-agent work is never mis-attributed.
-            onStepComplete: async (step, stepResult, trace) => {
-              if (!coding || !coding.gitAvailable) return;
-              if (!didMutate(trace)) return;
-              const msg = `step ${step.id}: ${String(step.produces || step.task || '').slice(0, 150)}`;
-              const out = await commitStep(coding.root, msg);
-              if (out.committed) emitProgress({ type: 'process', kind: 'step-commit', step: step.id, message: msg });
-            },
-            // O26: the framework check gate — runs after every mutating
-            // sequential step (execute.js inserts one bounded fix step on
-            // failure; fix steps only re-check, so it cannot spiral).
-            checkStep: (coding && coding.checkCommand) ? (step) => runTurnCheck('step', step) : undefined,
-            checkCommand: coding ? coding.checkCommand : '',
-            // Between-steps compaction that structurally protects the KNOWN
-            // VALUES digest (P3) — discovered parameters survive verbatim.
-            compact: async (h) => {
-              const out = await maybeCompress({
-                messages: h,
-                contextWindow: contextWindowFor(chosenModel),
-                protect: store.render() || undefined,
-                summarize: async (older) => {
-                  const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
-                  return r.text || '';
-                }
-              });
-              if (out.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: out.tokensBefore });
-              return out.messages;
-            },
-            // Parallel steps hand off to the decompose-and-merge sibling.
-            // A sub-agent gets NO shared history — without the KNOWN VALUES
-            // block it cannot resolve parameters the plan names symbolically
-            // (seen live: a delegated step told to call describe_fingerprint
-            // (fingerprint_hash) had no fingerprint_hash and returned thin
-            // text with 0 tool calls). Prepend working memory + the step's
-            // produces contract to the task.
-            // O16: the group merge — ONE bounded fast-model call honoring the
-            // plan's orchestrator contract. The executor falls back to
-            // concatenation if this throws or returns nothing.
-            mergeGroup: async ({ group, results }) => {
-              const o = (plan && plan.orchestrator) || {};
-              const instruction = [
-                o.merge || `Combine the results of the "${group}" tasks into one coherent digest. Preserve every named value (ids, paths, numbers) verbatim; dedupe repeated facts; keep it complete but tight.`,
-                o.on_conflict ? `On conflicting findings: ${o.on_conflict}` : ''
-              ].filter(Boolean).join('\n');
-              emitProgress({ type: 'process', kind: 'group-merge', group, members: results.length, model: fastModel });
-              return await mergeResults({
-                connector: { chat: chatAbortable }, model: fastModel, instruction,
-                results: results.map((r) => ({ agent: 'group', task: r.task, conclusion: r.conclusion })),
-                onEvent: emitProgress
-              });
-            },
-            runParallel: async (step) => {
-              const known = store.render();
-              const task = (known ? known + '\n\n' : '')
-                + step.task
-                + (step.produces ? `\n\nTHIS TASK MUST PRODUCE: ${step.produces}` : '');
-              const r = await runOne(step.agent, task);
-              delegatedCount += 1; delegateAbsorbed += r.inputTokens || 0;
-              taskLog.push({ kind: 'subagent', label: (step.agent && step.agent !== 'auto') ? step.agent : String(step.task || '').slice(0, 60), tokens: r.inputTokens || r.conclusionTokens || 0, durationMs: r.durationMs, ok: true });
-              return { conclusion: r.conclusion || '' };
-            },
-            onEvent: emitProgress
-          });
+          async function checkpointCompletedStep(step, stepResult, trace) {
+            if (workflowRun) {
+              try { repo.workflowRuns.checkpoint(workflowRun.id, { stepKey: step.id, step, result: stepResult, values: store.toJSON(), toolTrace: trace || [] }); emitProgress({ type: 'process', kind: 'checkpoint', runId: workflowRun.id, step: step.id }); }
+              catch (error) { console.error('[workflow checkpoint]', error && error.message); }
+            }
+            if (!coding || !coding.gitAvailable || !didMutate(trace)) return;
+            const message = `step ${step.id}: ${String(step.produces || step.task || '').slice(0, 150)}`;
+            const committed = await commitStep(coding.root, message);
+            if (committed.committed) emitProgress({ type: 'process', kind: 'step-commit', step: step.id, message });
+          }
+          async function compactPlannedHistory(history) {
+            const output = await maybeCompress({ messages: history, contextWindow: contextWindowFor(chosenModel), protect: store.render() || undefined, summarize: async (older) => {
+              const response = await chatAbortable({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
+              return response.text || '';
+            } });
+            if (output.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: output.tokensBefore });
+            return output.messages;
+          }
+          async function mergePlannedGroup({ group, results }) {
+            const orchestrator = (plan && plan.orchestrator) || {};
+            const instruction = [orchestrator.merge || `Combine the results of the "${group}" tasks into one coherent digest. Preserve every named value verbatim; dedupe repeated facts; keep it complete but tight.`, orchestrator.on_conflict ? `On conflicting findings: ${orchestrator.on_conflict}` : ''].filter(Boolean).join('\n');
+            emitProgress({ type: 'process', kind: 'group-merge', group, members: results.length, model: fastModel });
+            return mergeResults({ connector: { chat: chatAbortable }, model: fastModel, instruction, results: results.map((item) => ({ agent: 'group', task: item.task, conclusion: item.conclusion })), onEvent: emitProgress });
+          }
+          async function runParallelPlanStep(step, parallelContext = {}) {
+            const evidence = (Array.isArray(parallelContext.history) ? parallelContext.history : []).filter((message) => message && (message.role === 'assistant' || message.role === 'tool') && message.content).map((message) => `${String(message.role).toUpperCase()}${message.name ? ` (${message.name})` : ''}:\n${String(message.content)}`).join('\n\n').slice(-12000);
+            const executableTask = expandParallelStepTask(step, plan.steps);
+            const task = (store.render() ? store.render() + '\n\n' : '') + (evidence ? `SHARED PRIOR EVIDENCE (read-only; do not repeat its completed retrieval):\n${evidence}\n\n` : '') + executableTask + modeFlowSourceContext(workflowContract, repoMap) + (step.produces ? `\n\nTHIS TASK MUST PRODUCE: ${step.produces}` : '');
+            const response = await runOne(step.agent, task);
+            recordDelegatedResult(delegation, taskLog, response, step.agent && step.agent !== 'auto' ? step.agent : String(step.task || '').slice(0, 60));
+            return { conclusion: response.conclusion || '', toolTrace: response.toolTrace || [] };
+          }
+          async function runDerivedPlan() {
+            const refine = async (input) => {
+              const refined = await refinePlan({ ...planDeps, ...input });
+              return constrainPlan({ simple: false, steps: refined.steps || [] }, workflowContract, { remainingFrom: input.stuckStep && input.stuckStep.id });
+            };
+            return executePlan({ chat: workflowStepChat, callTool, model: chosenModel, plan, isAborted, tools: toolsForPlannedStep(orchestratorTools), store, history: convo, stepBudget: workflowContract.budgets.stepIterations, maxStepOutputTokens: effectiveStepOutputTokenBudget(workflowContract), maxStepDurationMs: effectiveStepDurationBudget(workflowContract), replanBudget: workflowContract.budgets.maxReplans, refinePlan: refine, onStuck, onStepComplete: checkpointCompletedStep, checkStep: (coding && coding.checkCommand) ? (step) => runTurnCheck('step', step) : undefined, checkCommand: coding ? coding.checkCommand : '', compact: compactPlannedHistory, mergeGroup: mergePlannedGroup, runParallel: runParallelPlanStep, onEvent: emitProgress });
+          }
+          const exec = await runDerivedPlan();
 
           // O26 third path: delegated/fan-out steps CAN mutate (sub-agents get
           // the coding tools) but their traces stay isolated, so the per-step
@@ -1848,79 +2075,113 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           // committed; review can never spiral or break a turn.
           // O27: whatever this cycle cannot verify as fixed lands in the DEBT
           // ledger afterwards — nothing evaporates.
-          let turnFindings = [];
-          if (coding && !exec.aborted && exec.completed && turnMutated(exec.toolTrace)) {
-            try {
-              const files = await readChanged(exec.toolTrace);
-              if (files.length) {
-                emitProgress({ type: 'process', kind: 'review', files: files.length });
-                const rev = await reviewChanges({ connector: { chat: chatAbortable }, model: fastModel, files, goal: plan.goal });
-                // O26: a failing check at review time is the review's FIRST
-                // finding — deterministic, ahead of every model lens.
-                if (checkState.ran && checkState.failing) {
-                  rev.findings.unshift({ lens: 'check', severity: 'high', file: '(project)', issue: `the project check command (${coding.checkCommand}) is failing`, fix: 'make it pass by fixing the root cause — never by weakening tests' });
-                }
-                if (rev.findings.length && !isAborted()) {
-                  emitProgress({ type: 'process', kind: 'review-findings', count: rev.findings.length });
-                  const fixStep = {
-                    id: exec.stepResults.length + 1,
-                    task: 'Code review found problems in the files you just changed. Fix each one, then re-run the project tests to confirm nothing broke:\n'
-                      + rev.findings.map((f) => `- [${f.lens}/${f.severity}] ${f.file}: ${f.issue}${f.fix ? ` — fix: ${f.fix}` : ''}`).join('\n'),
-                    produces: 'review findings fixed, tests passing'
-                  };
-                  const fr = await executeStep({ chat: chatAbortable, callTool, model: chosenModel, step: fixStep, tools: orchestratorTools.filter((t) => t.name !== 'set_variable'), history: exec.history, store, onEvent: emitProgress, isAborted });
-                  exec.stepResults.push(fr.result);
-                  exec.toolTrace.push(...(fr.toolTrace || []));
-                  if (fr.usage && fr.usage.calls) {
-                    exec.usage.measured = exec.usage.measured || fr.usage.measured; exec.usage.calls += fr.usage.calls;
-                    exec.usage.inputTokens += fr.usage.inputTokens; exec.usage.outputTokens += fr.usage.outputTokens;
-                    exec.usage.cachedTokens += fr.usage.cachedTokens; exec.usage.cacheCreationTokens += fr.usage.cacheCreationTokens;
-                  }
-                  try {
-                    const c = await commitStep(project.working_dir, 'review: fix quality/security findings');
-                    if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'review' });
-                  } catch {}
-                  // O26: the fix step's claim is verified by the check, not
-                  // taken on faith — this is the turn's final verdict.
-                  await runTurnCheck('post-fix');
-                  emitProgress({ type: 'process', kind: 'review-fixed', count: rev.findings.length });
-                  turnFindings = rev.findings.map((f) => ({ ...f, status: 'fix attempted — unverified' }));
-                } else if (!rev.findings.length) {
-                  emitProgress({ type: 'process', kind: 'review-clean' });
-                }
-              }
-            } catch (e) { console.error('[review]', e && e.message); }
+          function mergeExecutionUsage(extra) {
+            if (!extra || !extra.calls) return;
+            exec.usage.measured = exec.usage.measured || extra.measured; exec.usage.calls += extra.calls;
+            exec.usage.inputTokens += extra.inputTokens; exec.usage.outputTokens += extra.outputTokens;
+            exec.usage.cachedTokens += extra.cachedTokens; exec.usage.cacheCreationTokens += extra.cacheCreationTokens;
           }
+          async function fixReviewFindings(findings) {
+            const fixStep = { id: exec.stepResults.length + 1, task: 'Code review found problems in the files you just changed. Fix each one, then re-run the project tests to confirm nothing broke:\n' + findings.map((finding) => `- [${finding.lens}/${finding.severity}] ${finding.file}: ${finding.issue}${finding.fix ? ` — fix: ${finding.fix}` : ''}`).join('\n'), produces: 'review findings fixed, tests passing' };
+            const fix = await executeStep({ chat: workflowStepChat, callTool, model: chosenModel, step: fixStep, tools: toolsForPlannedStep(orchestratorTools), history: exec.history, store, onEvent: emitProgress, isAborted });
+            exec.stepResults.push(fix.result); exec.toolTrace.push(...(fix.toolTrace || [])); mergeExecutionUsage(fix.usage);
+            try {
+              const commit = await commitStep(project.working_dir, 'review: fix quality/security findings');
+              if (commit && commit.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'review' });
+            } catch {}
+            await runTurnCheck('post-fix');
+            const verified = reviewRepairVerified(fix.result, !!coding.checkCommand, checkState);
+            emitProgress({ type: 'process', kind: verified ? 'review-fixed' : 'review-partial', count: findings.length });
+            return findings.map((finding) => ({ ...finding, status: verified ? 'fixed' : 'fix attempted — unverified' }));
+          }
+          async function reviewPlannedExecution() {
+            if (!coding || exec.aborted || !exec.completed || !turnMutated(exec.toolTrace)) return [];
+            try {
+              const files = await readChanged(exec.toolTrace); if (!files.length) return [];
+              emitProgress({ type: 'process', kind: 'review', files: files.length });
+              const review = await reviewChanges({ connector: { chat: chatAbortable }, model: fastModel, files, goal: plan.goal });
+              if (checkState.ran && checkState.failing) review.findings.unshift({ lens: 'check', severity: 'high', file: '(project)', issue: `the project check command (${coding.checkCommand}) is failing`, fix: 'make it pass by fixing the root cause — never by weakening tests' });
+              if (review.findings.length && !isAborted()) { emitProgress({ type: 'process', kind: 'review-findings', count: review.findings.length }); return fixReviewFindings(review.findings); }
+              emitProgress({ type: 'process', kind: 'review-clean' }); return [];
+            } catch (error) { console.error('[review]', error && error.message); return []; }
+          }
+          let turnFindings = await reviewPlannedExecution();
+
+          async function verifyStockFramework() {
+            if (workflowContract.kind !== 'stock-analysis' || !coding || !projectId || exec.aborted) return { primarySourceVerification: null, frameworkHostStatus: null };
+            emitProgress({ type: 'process', kind: 'framework-verification-start' });
+            const [primarySourceVerification, frameworkHostStatus] = await Promise.all([
+              verifyPrimarySources({ root: coding.root }).catch((error) => ({ ok: false, valid: [], checked: [], detail: `primary-source verification failed: ${error.message}` })),
+              ensureStockHost({ projectId, root: coding.root }).catch((error) => ({ running: false, verified: false, frameworkOwned: true, verifiedPaths: [], error: error.message }))
+            ]);
+            emitProgress({ type: 'process', kind: 'framework-verification-done', primarySources: primarySourceVerification.valid.length, hosted: !!frameworkHostStatus.verified });
+            return { primarySourceVerification, frameworkHostStatus };
+          }
+          const { primarySourceVerification, frameworkHostStatus } = await verifyStockFramework();
 
           // Plan attrition reaches the reply. A re-plan may legitimately drop
           // steps, but the user should never be told a 4-step plan succeeded
           // when 2 of its steps never ran — that is how a turn that produced
           // nothing reported success.
-          if (exec.skipped && exec.skipped.length && !exec.aborted) {
-            exec.stepResults.push({
-              step: 'plan', task: 'planned steps that never ran',
-              conclusion: `Steps ${exec.skipped.join(', ')} were in the original plan and did not run (the plan was revised mid-turn). Say plainly what was not done.`,
-              incomplete: true
+          exec.stepResults.push(...planStatusResults(exec));
+
+          // Runtime acceptance gate: inspect what actually ran and what was
+          // actually saved. Prompt instructions can be ignored; these checks
+          // cannot. One bounded repair is allowed, then any remaining failure
+          // is carried into synthesis as an incomplete result.
+          const acceptanceContext = () => {
+            const linked = chatId ? repo.documents.listByChat(chatId) : [];
+            const changedDocs = linked.filter((d) => {
+              const before = artifactBaseline.get(d.id);
+              return !before || Number(before.version) !== Number(d.version) || before.updated_at !== d.updated_at;
             });
+            const changedPaths = [...new Set((exec.toolTrace || [])
+              .filter((t) => t && t.ok !== false && WRITING_TOOLS.includes(t.name) && t.args && t.args.path)
+              .map((t) => String(t.args.path)))];
+            return {
+              stepResults: exec.stepResults,
+              caseIds: Array.from({ length: Number(workflowContract.scope && workflowContract.scope.count) || 5 }, (_unused, index) => store.get(`top_case_${index + 1}_id`)).filter(Boolean),
+              artifacts: [...changedDocs, ...changedPaths.map((p) => ({ path: path.isAbsolute(p) ? p : (coding ? path.join(coding.root, p) : p), title: path.basename(p) }))],
+              toolTrace: [...(exec.toolTrace || []), ...(exec.delegatedToolTrace || [])],
+              check: { ran: checkState.ran, ok: !checkState.failing },
+              checkRequired: !!(coding && coding.checkCommand),
+              workingDir: coding ? coding.root : null,
+              primarySourceVerification,
+              serverStatus: frameworkHostStatus || (coding && projectId ? devServer.status(projectId) : null)
+            };
+          };
+          async function repairAcceptanceFailures(acceptanceContext) {
+            const repairStep = { id: 'acceptance-repair', task: 'The deterministic acceptance gate found these exact gaps:\n' + workflowAcceptance.failures.map((failure) => `- ${failure.id}: ${failure.detail}`).join('\n') + '\nCorrect only these gaps, reuse evidence already collected, and verify the result. Do not broaden scope.', produces: 'all failed acceptance checks corrected' };
+            emitProgress({ type: 'process', kind: 'acceptance-repair', failures: workflowAcceptance.failures.map((failure) => failure.id) });
+            const repair = await executeStep({ chat: workflowStepChat, callTool, model: chosenModel, step: repairStep, tools: toolsForPlannedStep(orchestratorTools), history: exec.history, store, maxTokens: effectiveStepOutputTokenBudget(workflowContract), onEvent: emitProgress, isAborted });
+            exec.stepResults.push(repair.result); exec.toolTrace.push(...(repair.toolTrace || [])); mergeExecutionUsage(repair.usage);
+            if (workflowRun) { try { repo.workflowRuns.checkpoint(workflowRun.id, { stepKey: repairStep.id, step: repairStep, result: repair.result, values: store.toJSON(), toolTrace: repair.toolTrace || [] }); } catch {} }
+            if (coding && coding.checkCommand && didMutate(repair.toolTrace || [])) await runTurnCheck('acceptance-repair');
+            workflowAcceptance = validateWorkflow({ ...workflowContract, budgetExceeded: plan.budgetExceeded || null }, acceptanceContext());
+            emitProgress({ type: 'process', kind: workflowAcceptance.ok ? 'acceptance-pass' : 'acceptance-failed', repaired: true, checks: workflowAcceptance.checks });
           }
+          async function validateExecutionAcceptance(acceptanceContext) {
+            if (exec.aborted) return;
+            workflowAcceptance = validateWorkflow({ ...workflowContract, budgetExceeded: plan.budgetExceeded || null }, acceptanceContext());
+            emitProgress({ type: 'process', kind: workflowAcceptance.ok ? 'acceptance-pass' : 'acceptance-failed', checks: workflowAcceptance.checks });
+            if (shouldRepairAcceptance(exec, workflowContract, workflowAcceptance) && !isAborted()) await repairAcceptanceFailures(acceptanceContext);
+            if (!workflowAcceptance.ok) exec.stepResults.push({ step: 'acceptance', task: 'workflow acceptance checks', incomplete: true, conclusion: 'The workflow is partial. Remaining gaps:\n' + workflowAcceptance.failures.map((failure) => `- ${failure.id}: ${failure.detail}`).join('\n') });
+          }
+          await validateExecutionAcceptance(acceptanceContext);
 
           // O26: a check still failing after everything is an honest,
           // visible outcome — it reaches synthesis as an incomplete step
           // result, so the reply says what remains instead of claiming done.
-          if (checkState.ran && checkState.failing && !exec.aborted) {
-            exec.stepResults.push({ step: 'check', task: `project check (${coding.checkCommand})`, conclusion: 'FAILING at turn end:\n' + checkState.output, incomplete: true });
-            if (!turnFindings.some((f) => f.lens === 'check')) {
-              turnFindings.push({ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' });
+          function recordEndOfTurnFindings() {
+            if (checkState.ran && checkState.failing && !exec.aborted) {
+              exec.stepResults.push({ step: 'check', task: `project check (${coding.checkCommand})`, conclusion: 'FAILING at turn end:\n' + checkState.output, incomplete: true });
+              if (!turnFindings.some((finding) => finding.lens === 'check')) turnFindings.push({ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' });
             }
-          }
-          // O27: the debt ledger — review findings and unresolved check
-          // failures are recorded durably; a repeat is flagged as a
-          // promote-to-gate candidate. Best-effort, never breaks the turn.
-          if (turnFindings.length && projectId) {
+            if (!turnFindings.length || !projectId) return;
             try {
-              const d = projectDocs.appendDebt({ projectId, docsBase, findings: turnFindings });
-              if (d.added) emitProgress({ type: 'process', kind: 'debt', added: d.added, repeats: d.repeats, version: d.version });
-            } catch (e) { console.error('[debt]', e && e.message); }
+              const debt = projectDocs.appendDebt({ projectId, docsBase, findings: turnFindings });
+              if (debt.added) emitProgress({ type: 'process', kind: 'debt', added: debt.added, repeats: debt.repeats, version: debt.version });
+            } catch (error) { console.error('[debt]', error && error.message); }
           }
 
           // The bubble has been streaming per-step text; the synthesis is the
@@ -1928,35 +2189,81 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
           // final message isn't a concatenation of every step's conclusion.
           // On a user STOP there is no synthesis call: assemble the save-work
           // reply from what the steps concluded, with zero further model time.
-          let syn;
-          if (exec.aborted) {
-            const digest = exec.stepResults.map((r) => `### Step ${r.step}: ${r.task}${r.incomplete ? ' (incomplete)' : ''}\n${r.conclusion || '(no result)'}`).join('\n\n');
+          async function synthesizePlannedExecution() {
             emitProgress({ type: 'stream-reset' });
-            syn = { reply: '⏹ Stopped at your request — work so far was saved (values remembered, completed steps below).\n\n' + (digest || '(stopped before any step completed)'), usage: null };
-          } else {
-            emitProgress({ type: 'stream-reset' });
-            syn = await synthesize({ chat: chatAbortable, model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
+            if (exec.aborted) {
+              const digest = exec.stepResults.map((step) => `### Step ${step.step}: ${step.task}${step.incomplete ? ' (incomplete)' : ''}\n${step.conclusion || '(no result)'}`).join('\n\n');
+              return { reply: '⏹ Stopped at your request — work so far was saved (values remembered, completed steps below).\n\n' + (digest || '(stopped before any step completed)'), usage: null };
+            }
+            if (['provider-timeout', 'provider-budget-exhausted'].includes(exec.terminalReason)) {
+            emitProgress({ type: 'process', kind: 'synthesis-skipped', reason: 'provider-timeout' });
+              return { reply: renderProviderPausedReply(exec.stepResults), usage: null };
+            }
+            return synthesize({ chat: chatAbortable, model: chosenModel, plan, stepResults: exec.stepResults, store, history: exec.history, onEvent: emitProgress });
           }
+          function mergeSynthesisUsage(synthesis) {
           const u = exec.usage || { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
-          if (syn.usage) {
+            if (synthesis.usage) {
             u.measured = true; u.calls += 1;
-            u.inputTokens += syn.usage.inputTokens || 0; u.outputTokens += syn.usage.outputTokens || 0;
-            u.cachedTokens += syn.usage.cachedTokens || 0; u.cacheCreationTokens += syn.usage.cacheCreationTokens || 0;
+              u.inputTokens += synthesis.usage.inputTokens || 0; u.outputTokens += synthesis.usage.outputTokens || 0;
+              u.cachedTokens += synthesis.usage.cachedTokens || 0; u.cacheCreationTokens += synthesis.usage.cacheCreationTokens || 0;
+            }
+            return u;
           }
+          async function maintainPlannedDocumentation() {
+            if (!coding || exec.aborted || !projectId || !turnMutated(exec.toolTrace)) return;
+            const updated = await maintainDocs({ goal: plan.goal, stepResults: exec.stepResults, toolTrace: exec.toolTrace });
+            if (updated && coding.gitAvailable) {
+              const commit = await commitStep(coding.root, 'docs: maintain project documentation');
+              if (commit && commit.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'docs' });
+            }
+          }
+          recordEndOfTurnFindings();
+          const syn = await synthesizePlannedExecution(); const u = mergeSynthesisUsage(syn);
           emitProgress({ type: 'done' });
-          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed, aborted: exec.aborted, truncated: !!(exec.truncated || syn.truncated), checkFailing: !!(checkState.ran && checkState.failing && !exec.aborted), checkCommand: coding ? coding.checkCommand : '' };
-          planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed };
+          result = { reply: syn.reply, toolTrace: exec.toolTrace, iterations: exec.stepResults.length, usage: u, planned: true, cappedTurn: !exec.completed || !!(workflowAcceptance && !workflowAcceptance.ok), aborted: exec.aborted, truncated: !!(exec.truncated || syn.truncated), checkFailing: !!(checkState.ran && checkState.failing && !exec.aborted), checkCommand: coding ? coding.checkCommand : '', acceptance: workflowAcceptance };
+          planInfo = { steps: plan.steps.length, replans: exec.replans, completed: exec.completed && (!workflowAcceptance || workflowAcceptance.ok) };
 
           // O15: documentation is maintained AUTOMATICALLY after execution —
           // a dedicated technical-writer pass (doc-writer.js), deterministic
           // like step-commits and decision records. Plan-step documentation
           // produced untouched skeletons and narrative sludge; this doesn't.
-          if (coding && !exec.aborted && projectId && turnMutated(exec.toolTrace)) {
-            await maintainDocs({ goal: plan.goal, stepResults: exec.stepResults, toolTrace: exec.toolTrace });
+          await maintainPlannedDocumentation();
+        }
+        async function executeFlatTurn() {
+          async function compactFlatHistory(history) {
+            const output = await maybeCompress({ messages: history, contextWindow: contextWindowFor(chosenModel), protect: store.render() || undefined, summarize: async (older) => {
+              const response = await chatAbortable({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
+              return response.text || '';
+            } });
+            if (output.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: output.tokensBefore });
+            return output.messages;
           }
-        } else {
-          // ── Flat path (unchanged behavior) — with working memory in front of
-          // the model so values discovered in earlier turns stay usable.
+          async function repairFlatCheck() {
+            const check = await runTurnCheck('turn');
+            if (!check || check.ok || isAborted()) return;
+            const fixStep = { id: 1, task: 'The project check command FAILED after your changes:\n' + check.output + '\nFix the ROOT CAUSE so the check passes. NEVER delete, skip, or weaken a failing test to reach green; if a test itself is wrong, say so explicitly.', produces: 'the project check command passing' };
+            const fix = await executeStep({ chat: chatAbortable, callTool, model: chosenModel, step: fixStep, tools: toolsForPlannedStep(orchestratorTools), history: convo, store, onEvent: emitProgress, isAborted });
+            result.toolTrace.push(...(fix.toolTrace || [])); await runTurnCheck('post-fix');
+            if (!checkState.failing) return;
+            try {
+              const debt = projectDocs.appendDebt({ projectId, docsBase, findings: [{ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' }] });
+              if (debt.added) emitProgress({ type: 'process', kind: 'debt', added: debt.added, repeats: debt.repeats, version: debt.version });
+            } catch (error) { console.error('[debt]', error && error.message); }
+          }
+          async function recordFlatCodingWork() {
+            try { await repairFlatCheck(); } catch (error) { console.error('[flat check]', error && error.message); }
+            if (checkState.ran && checkState.failing) { result.checkFailing = true; result.checkCommand = coding.checkCommand; }
+            try {
+              const commit = await commitStep(project.working_dir, `turn: ${String(text).slice(0, 150)}`);
+              if (commit && commit.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'turn' });
+            } catch (error) { console.error('[flat commit]', error && error.message); }
+            const updated = await maintainDocs({ goal: text, stepResults: [], toolTrace: result.toolTrace });
+            if (updated && coding.gitAvailable) {
+              const commit = await commitStep(coding.root, 'docs: maintain project documentation');
+              if (commit && commit.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'docs' });
+            }
+          }
           const knownBlock = store.render();
           result = await runChatLoop({
             chat: chatAbortable,
@@ -1969,181 +2276,170 @@ function registerIpc() { // (documentPathAllowed exported below for smoke covera
             isAborted,
             // In-loop ledger for the flat path — tool results accrete inside
             // the loop; the pre-turn compress alone can't defend the window.
-            compact: async (h) => {
-              const out = await maybeCompress({
-                messages: h,
-                contextWindow: contextWindowFor(chosenModel),
-                protect: store.render() || undefined,
-                summarize: async (older) => {
-                  const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 700 });
-                  return r.text || '';
-                }
-              });
-              if (out.compressed) emitProgress({ type: 'process', kind: 'mid-turn-compact', tokensBefore: out.tokensBefore });
-              return out.messages;
-            }
+            compact: compactFlatHistory
           });
           if (result.aborted && !result.reply) result.reply = '⏹ Stopped at your request — the work above was kept.';
-
-          // A coding turn that fell to the flat loop still gets full
-          // bookkeeping: one commit for its mutations + the doc-writer pass.
-          // A wandering turn must never be an unrecorded, undocumented turn —
-          // and plan_steps=0 in turn_metrics makes the wandering measurable.
-          if (coding && !result.aborted && projectId && turnMutated(result.toolTrace)) {
-            // O26 on the flat path: a wandering turn faces the same gate —
-            // check, ONE bounded fix step on failure, and an honest record.
-            try {
-              const c0 = await runTurnCheck('turn');
-              if (c0 && !c0.ok && !isAborted()) {
-                const fixStep = {
-                  id: 1, task: 'The project check command FAILED after your changes:\n' + c0.output
-                    + '\nFix the ROOT CAUSE so the check passes. NEVER delete, skip, or weaken a failing test to reach green; if a test itself is wrong, say so explicitly.',
-                  produces: 'the project check command passing'
-                };
-                const fr = await executeStep({ chat: chatAbortable, callTool, model: chosenModel, step: fixStep, tools: orchestratorTools.filter((t) => t.name !== 'set_variable'), history: convo, store, onEvent: emitProgress, isAborted });
-                result.toolTrace.push(...(fr.toolTrace || []));
-                await runTurnCheck('post-fix');
-                if (checkState.failing) {
-                  try {
-                    const d = projectDocs.appendDebt({ projectId, docsBase, findings: [{ lens: 'check', severity: 'high', file: '(project)', issue: `check command (${coding.checkCommand}) failing at turn end`, fix: 'fix the root cause', status: 'unresolved' }] });
-                    if (d.added) emitProgress({ type: 'process', kind: 'debt', added: d.added, repeats: d.repeats, version: d.version });
-                  } catch (e) { console.error('[debt]', e && e.message); }
-                }
-              }
-              // The flat path's reply is the STREAMED text, not result.reply —
-              // an appended string would never reach the bubble or the saved
-              // message. The marker rides a flag the renderer applies, exactly
-              // like `truncated`.
-              if (checkState.ran && checkState.failing) {
-                result.checkFailing = true; result.checkCommand = coding.checkCommand;
-              }
-            } catch (e) { console.error('[flat check]', e && e.message); }
-            try {
-              const c = await commitStep(project.working_dir, `turn: ${String(text).slice(0, 150)}`);
-              if (c && c.committed) emitProgress({ type: 'process', kind: 'step-commit', step: 'turn' });
-            } catch (e) { console.error('[flat commit]', e && e.message); }
-            await maintainDocs({ goal: text, stepResults: [], toolTrace: result.toolTrace });
-          }
+          if (coding && !result.aborted && projectId && turnMutated(result.toolTrace)) await recordFlatCodingWork();
         }
-      } catch (e) {
-        console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, e && e.message);
-        throw e;
+        if (plan && plan.align && plan.decisions && plan.decisions.length) finishAlignmentTurn(plan);
+        else if (plan && !plan.simple && plan.steps.length > 1) await executePlannedTurn(plan);
+        else await executeFlatTurn();
+      }
+      function recordFirewallFailure(error) {
+          emitProgress({ type: 'security', ...securityState.block });
+          emitProgress({ type: 'done' });
+          // Keep the work the turn had already done. A blocked investigation
+          // that made eleven MCP calls before the guard fired still has eleven
+          // tool results worth of evidence, and the audit/metrics rows are the
+          // only place that survives — reporting toolTrace:[] and iterations:0
+          // made every block look like it happened on the first call.
+          const partial = (error.partial && typeof error.partial === 'object') ? error.partial : {};
+          result = {
+            reply: securityState.block.message,
+            toolTrace: partial.toolTrace || [],
+            iterations: partial.iterations || 0,
+            // The AGGREGATE, plus the refused call. `firewallUsage` alone is
+            // just the blocked response — a handful of tokens — so reporting it
+            // for a turn that had already spent eleven model calls billed the
+            // user's telemetry for a fraction of what the turn actually cost.
+            usage: mergeBlockedUsage(partial.usage, securityState.usage),
+            planned: false, firewallBlocked: true, security: securityState.block
+          };
+          planInfo = { steps: 0, replans: 0, completed: false };
+      }
+      function rethrowProviderFailure(error) {
+          console.error(`[chat] ${provider.type}/${chosenModel} error (${orchestratorTools.length} tools):`, error && error.message);
+          // The normal status finalizer below is unreachable when the handler
+          // rethrows. Persist the failure here so a crashed provider/tool turn
+          // never leaves a workflow permanently marked "running" after the
+          // app has already returned an error to the caller.
+          if (workflowRun) {
+            try {
+              repo.workflowRuns.updateStatus(workflowRun.id, 'partial', { state: store.toJSON(), error: String((error && error.message) || 'turn failed').slice(0, 1000) });
+              emitProgress({ type: 'process', kind: 'workflow-status', runId: workflowRun.id, status: 'partial' });
+            } catch (statusError) { console.error('[workflow failure status]', statusError && statusError.message); }
+          }
+          throw error;
+      }
+      function handleTurnFailure(error) {
+        if (error && error.code === 'LLM_GUARD_BLOCKED' && securityState.block) recordFirewallFailure(error);
+        else rethrowProviderFailure(error);
+      }
+      emitPreCallLedger();
+      try {
+        await executeTurnPlan();
+      } catch (error) {
+        handleTurnFailure(error);
       } finally {
         ipcMain.removeListener('chat:continue', promptListener);
         ipcMain.removeListener('chat:abort', abortListener);
       }
-
-      // Persist working memory for the next turn (and across restarts).
-      try { if (chatId) repo.chats.setVariables(chatId, store.size ? JSON.stringify(store.toJSON()) : null); } catch (e) { console.error('[variables save]', e && e.message); }
-
-      // Post-call: report each tool result's size — the raw material for Phase 1
-      // (tool-result trimming) and immediately useful to see what's bloating context.
-      try {
-        const trace = (result.toolTrace || []).map((t) => {
-          const raw = Math.ceil((t.resultChars || 0) / 4);
-          const filtered = Math.ceil((t.filteredChars != null ? t.filteredChars : t.resultChars || 0) / 4);
-          return { name: t.name, rawTokens: raw, resultTokens: filtered, saved: Math.max(0, raw - filtered), rules: t.rules || [], truncated: !!t.truncated, isError: t.ok === false };
+      return { result, planInfo };
+      }
+      const { result, planInfo } = await executeTurnPipeline();
+      function finalizeWorkflowStatus() {
+        if (!workflowRun) return;
+        const accepted = workflowAcceptance ? workflowAcceptance.ok : !!(planInfo && planInfo.completed && result && !result.aligned && !result.aborted && !result.firewallBlocked);
+        const status = accepted ? 'completed' : 'partial';
+        const error = status === 'partial' && workflowAcceptance && workflowAcceptance.failures.length ? workflowAcceptance.failures.map((failure) => `${failure.id}: ${failure.detail}`).join('; ') : undefined;
+        repo.workflowRuns.updateStatus(workflowRun.id, status, { state: store.toJSON(), error });
+        emitProgress({ type: 'process', kind: 'workflow-status', runId: workflowRun.id, status });
+      }
+      function persistTurnVariables() {
+        if (chatId) repo.chats.setVariables(chatId, store.size ? JSON.stringify(store.toJSON()) : null);
+      }
+      function emitInternalsToolTrace() {
+        const trace = (result.toolTrace || []).map((tool) => {
+          const rawTokens = Math.ceil((tool.resultChars || 0) / 4);
+          const resultTokens = Math.ceil((tool.filteredChars != null ? tool.filteredChars : tool.resultChars || 0) / 4);
+          return { name: tool.name, rawTokens, resultTokens, saved: Math.max(0, rawTokens - resultTokens), rules: tool.rules || [], truncated: !!tool.truncated, isError: tool.ok === false };
         });
         if (trace.length) _e.sender.send('chat:progress', { turnId, type: 'internals-tools', trace });
-      } catch (e) { console.error('[internals tools]', e && e.message); }
-
-      // Telemetry (objective 0): record real usage + reductions for this turn.
-      let metricRow = null;
-      try {
+      }
+      function buildTurnMetricRow() {
         const est = estimateTokens(convo);
-        const filterSaved = (result.toolTrace || []).reduce((n, t) => {
-          const raw = t.resultChars || 0; const after = t.filteredChars != null ? t.filteredChars : raw;
-          return n + Math.max(0, raw - after) / 4;
+        const filterSaved = (result.toolTrace || []).reduce((saved, tool) => {
+          const raw = tool.resultChars || 0; const after = tool.filteredChars != null ? tool.filteredChars : raw;
+          return saved + Math.max(0, raw - after) / 4;
         }, 0);
         const compactionSaved = compressed ? Math.max(0, estimateTokens(base) - est) : 0;
-        const u = result.usage || {};
-        metricRow = {
+        const usage = result.usage || {};
+        return {
           projectId: projectId || null, chatId: payload?.chatId || null, model: chosenModel,
-          measured: !!u.measured,
-          inputTokens: u.inputTokens || 0, outputTokens: u.outputTokens || 0, cachedTokens: u.cachedTokens || 0, cacheCreationTokens: u.cacheCreationTokens || 0,
+          measured: !!usage.measured, inputTokens: usage.inputTokens || 0,
+          outputTokens: usage.outputTokens || 0, cachedTokens: usage.cachedTokens || 0,
+          cacheCreationTokens: usage.cacheCreationTokens || 0,
           estInputTokens: est, window: contextWindowFor(chosenModel),
-          skillsAvailable: skillSelect ? skillSelect.available : 0,
-          skillsLoaded: skillSelect ? (skillSelect.selected || []).length : 0,
-          skillSavedTokens: skillSelect ? (skillSelect.savedTokens || 0) : 0,
-          skillsUsed: skillSelect ? (skillSelect.selected || []) : [],
-          filterSavedTokens: Math.round(filterSaved),
-          compactionSavedTokens: compactionSaved,
-          delegated: delegatedCount, delegateAbsorbedTokens: delegateAbsorbed,
-          durationMs: Date.now() - turnStart,
+          skillsAvailable: skillSelect ? skillSelect.available : 0, skillsLoaded: skillSelect ? (skillSelect.selected || []).length : 0,
+          skillSavedTokens: skillSelect ? (skillSelect.savedTokens || 0) : 0, skillsUsed: skillSelect ? (skillSelect.selected || []) : [],
+          filterSavedTokens: Math.round(filterSaved), compactionSavedTokens: compactionSaved,
+          delegated: delegation.count, delegateAbsorbedTokens: delegation.absorbedTokens, durationMs: Date.now() - turnStart,
           // Makes the planner's fallback rate queryable across turns instead
           // of only visible one turn at a time in the INTERNALS tab.
-          planningFailed: !!(skillSelect && skillSelect.error),
-          toolFellBack: !!(toolScope && toolScope.fellBack),
+          planningFailed: !!(skillSelect && skillSelect.error), toolFellBack: !!(toolScope && toolScope.fellBack),
           // v15: measure the planner itself.
-          planSteps: planInfo ? planInfo.steps : 0,
-          planRefines: planInfo ? planInfo.replans : 0,
+          planSteps: planInfo ? planInfo.steps : 0, planRefines: planInfo ? planInfo.replans : 0,
           varsCaptured: Math.max(0, store.size - varsAtStart)
         };
-        // Cost outlier (O14): plan_refines and input tokens were both recorded
-        // and neither was ever WATCHED — a 3-step plan that grew to 8 steps and
-        // burned 1.07M input tokens passed without comment. Compared against
-        // this project's own recent median, so there is no magic constant
-        // beyond the multiple; needs a real history before it can speak.
+      }
+      function emitCostOutlier(metricRow) {
         try {
-          const prior = repo.metrics.listByProject(projectId, 20).filter((m) => m.measured && m.input_tokens > 0);
-          const median = medianOf(prior.map((m) => m.input_tokens));
+          const prior = repo.metrics.listByProject(projectId, 20).filter((metric) => metric.measured && metric.input_tokens > 0);
+          const median = medianOf(prior.map((metric) => metric.input_tokens));
           if (median && metricRow.inputTokens > median * COST_OUTLIER_FACTOR) {
-            emitProgress({
-              type: 'process', kind: 'cost-outlier',
-              inputTokens: metricRow.inputTokens, median, factor: +(metricRow.inputTokens / median).toFixed(1),
-              replans: metricRow.planRefines, steps: metricRow.planSteps
-            });
+            emitProgress({ type: 'process', kind: 'cost-outlier', inputTokens: metricRow.inputTokens, median, factor: +(metricRow.inputTokens / median).toFixed(1), replans: metricRow.planRefines, steps: metricRow.planSteps });
           }
-        } catch (e) { console.error('[cost outlier]', e && e.message); }
+        } catch (error) { console.error('[cost outlier]', error && error.message); }
+      }
+      function recordTurnMetrics() {
+        const metricRow = buildTurnMetricRow(); emitCostOutlier(metricRow);
         repo.metrics.record(metricRow);
-        // Per-task rows: sub-agents (collected during the loop) + each tool call.
-        for (const t of (result.toolTrace || [])) {
-          taskLog.push({ kind: 'tool', label: t.name, tokens: Math.ceil((t.filteredChars != null ? t.filteredChars : t.resultChars || 0) / 4), durationMs: t.durationMs, ok: t.ok !== false });
+        for (const tool of (result.toolTrace || [])) {
+          taskLog.push({ kind: 'tool', label: tool.name, tokens: Math.ceil((tool.filteredChars != null ? tool.filteredChars : tool.resultChars || 0) / 4), durationMs: tool.durationMs, ok: tool.ok !== false });
         }
-        try { repo.metrics.recordTasks(taskLog.map((t) => ({ ...t, projectId: projectId || null, chatId: payload?.chatId || null }))); } catch (e) { console.error('[task metrics]', e && e.message); }
+        try { repo.metrics.recordTasks(taskLog.map((task) => ({ ...task, projectId: projectId || null, chatId: payload?.chatId || null }))); } catch (error) { console.error('[task metrics]', error && error.message); }
         const cachePct = metricRow.inputTokens ? Math.round((metricRow.cachedTokens / metricRow.inputTokens) * 100) : 0;
         console.log('[metrics]', JSON.stringify({ measured: metricRow.measured, model: metricRow.model, input: metricRow.inputTokens, output: metricRow.outputTokens, cached: metricRow.cachedTokens, cachePct, est: metricRow.estInputTokens, filterSaved: metricRow.filterSavedTokens, skillSaved: metricRow.skillSavedTokens, delegated: metricRow.delegated, durationMs: metricRow.durationMs, tasks: taskLog.length, planningFailed: metricRow.planningFailed, toolFellBack: metricRow.toolFellBack }));
         _e.sender.send('chat:progress', { turnId, type: 'metrics', ...metricRow, tasks: taskLog });
-      } catch (e) { console.error('[metrics]', e && e.message); }
-
-      // O31: file the session — title (when untitled), one-line summary, and
-      // faceted tags — AFTER the reply returns, non-blocking (one fast-model
-      // call must never add latency to the turn). Completion announces itself
-      // on librarian:update so the sidebar refreshes whenever it lands.
-      if (chatId && projectId && !result.aborted) {
-        const sender = _e.sender;
-        (async () => {
-          try {
-            const chatRow = repo.chats.get(chatId);
-            // The reply may not be persisted yet (the renderer saves it after
-            // this handler returns) — include this turn's text directly.
-            const msgs = [...repo.messages.listByChat(chatId), { role: 'assistant', content: String(result.reply || '').slice(0, 2000) }];
-            const filed = await librarian.fileSession({
-              connector, model: fastModel, messages: msgs,
-              currentTitle: (chatRow && chatRow.title) || '',
-              vocabulary: buildVocabulary(projectId)
-            });
-            if (filed.summary) repo.chats.setSummary(chatId, filed.summary);
-            if (filed.title && !(chatRow && chatRow.title)) repo.chats.rename(chatId, filed.title);
-            for (const t of (filed.tags || [])) {
-              const tag = repo.tags.ensure(projectId, t.facet, t.name);
-              if (tag) repo.tags.tagChat(chatId, tag.id);
-            }
-            try { sender.send('librarian:update', { chatId, projectId, titled: !!(filed.title && !(chatRow && chatRow.title)), summarized: !!filed.summary, tags: (filed.tags || []).length }); } catch {}
-          } catch (e) { console.error('[librarian:session]', e && e.message); }
-        })();
       }
+      async function fileCompletedSession() {
+        const chat = repo.chats.get(chatId);
+        const messages = [...repo.messages.listByChat(chatId), { role: 'assistant', content: String(result.reply || '').slice(0, 2000) }];
+        const filed = await librarian.fileSession({ connector, model: fastModel, messages, currentTitle: (chat && chat.title) || '', vocabulary: buildVocabulary(projectId) });
+        if (filed.summary) repo.chats.setSummary(chatId, filed.summary);
+        if (filed.title && !(chat && chat.title)) repo.chats.rename(chatId, filed.title);
+        tagFiledItem(projectId, chatId, 'chat', filed.tags || []);
+        try { _e.sender.send('librarian:update', { chatId, projectId, titled: !!(filed.title && !(chat && chat.title)), summarized: !!filed.summary, tags: (filed.tags || []).length }); } catch {}
+      }
+      try { finalizeWorkflowStatus(); } catch (error) { console.error('[workflow status]', error && error.message); }
+      try { persistTurnVariables(); } catch (error) { console.error('[variables save]', error && error.message); }
+      try { emitInternalsToolTrace(); } catch (error) { console.error('[internals tools]', error && error.message); }
+      try { recordTurnMetrics(); } catch (error) { console.error('[metrics]', error && error.message); }
+      if (chatId && projectId && !result.aborted && !result.firewallBlocked) fileCompletedSession().catch((error) => console.error('[librarian:session]', error && error.message));
 
-      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted, truncated: !!result.truncated };
+      return { model: chosenModel, reply: result.reply, provider: provider.type, toolTrace: result.toolTrace, compressed, usage: result.usage || null, planned: !!result.planned, aborted: !!result.aborted, truncated: !!result.truncated, firewallBlocked: !!result.firewallBlocked, security: result.security || null, acceptance: result.acceptance || null };
     }
 
-    // The renderer should never let a send reach here without a provider (see
-    // missingPrereqs() in renderer.js) — no silent stub echo pretending to be a reply.
-    throw new Error('No model selected for this chat. Choose a model before sending.');
+    if (!providerId) throw new Error('No model selected for this chat. Choose a model before sending.');
+    return runProviderTurn();
   });
+}
+
+function registerIpc() {
+  registerProjectHandlers();
+  registerDocumentFileHandlers();
+  registerAgentMetricSettingsHandlers();
+  registerChatMessageHandlers();
+  registerDocumentLibraryHandlers();
+  registerLibrarianHandlers();
+  registerSkillHandlers();
+  registerProviderHandlers();
+  registerGuardHandlers();
+  registerMcpHandlers();
+  registerChatExecutionHandler();
 }
 
 // medianOf gates the cost-outlier signal and had no coverage — it silently
 // returns 0 below MIN_COST_HISTORY, which is exactly why the signal never
 // fired during testing (every drive created a fresh project with no history).
-module.exports = { registerIpc, documentPathAllowed, medianOf, COST_OUTLIER_FACTOR, MIN_COST_HISTORY };
+module.exports = { registerIpc, documentPathAllowed, medianOf, toolsForPlannedStep, reviewRepairVerified, recordDelegatedResult, expandParallelStepTask, modeFlowSourceContext, COST_OUTLIER_FACTOR, MIN_COST_HISTORY };

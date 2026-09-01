@@ -146,8 +146,14 @@ authored-agent lenses are the v2 extensions.
 
 **O12. Every loop bounded, every failure lands somewhere safer.** Planner
 failure → flat loop; budget exhaustion → forced wrap-up; stuck → refine ≤3 →
-escalate; STOP → save work; no git → ask. **Status: SHIPPED** (pre-dates the
-harness; preserved by it).
+escalate; STOP → save work; no git → ask. A refinement is a continuation, not
+a restart: completed step IDs are removed from every refined tail, repeated
+attempt traces join the same step checkpoint, and an explicit resume filters
+persisted checkpoints out of the executable plan. Unrun steps are classified
+as either actually removed by a refinement or still pending after execution
+stopped; partial replies never conflate those states. **Status: SHIPPED**
+(`execute.js` refinement reconciliation + `workflow-contracts.js` resumePlan;
+smoke-covered).
 
 **O13. Rollback is executable, not aspirational.** Auto-checkpoint before a
 bypassed turn's first mutation; one-click revert-turn. O9's step-commits are
@@ -156,8 +162,13 @@ the foundation. **Status: PLANNED.**
 **O14. Everything measured, glass box kept.** Approvals, commits, plan
 shape, refinement cycles land in metrics/process events like everything
 else. No invisible context engineering — the differentiator over every
-harness studied. **Status: PARTIAL** (process events shipped; approval rows
-in task_metrics planned).
+harness studied. Tool-history reduction reports inspected/compacted counts,
+retained rounds, and saved characters through `tool-history-compact`; replan
+continuation reports proposed, dropped-completed, and remaining step counts;
+workflow tool policy reports inspected/allowed/blocked MCP and skill counts
+before selection, plus any execution-boundary refusal.
+**Status: PARTIAL** (process events shipped; approval rows in task_metrics
+planned).
 
 **O15. Documentation is the source of truth, maintained by the pipeline.**
 The project documents library holds a canonical doc set — SPEC (objectives,
@@ -347,7 +358,11 @@ published document carries its source manifest in properties. A claim
 without a source is a review finding, not a style preference.
 Accept: a published report's properties name the sources each section
 drew from; the verify pass flags unsourced claims.
-**Status: PLANNED** (design: the internal design record §5).
+**Status: PARTIAL** — stock-analysis acceptance independently verifies that at
+least one declared primary source is on an issuer/SEC domain, carries an
+explicit publication date, and is reachable. General document source
+manifests and claim-level provenance remain planned (design: the internal
+design record §5).
 
 **O22. Document lifecycle.** The plan shape for documents mode: align
 (audience, format, type — the O7 gate extended to documents) → collect in

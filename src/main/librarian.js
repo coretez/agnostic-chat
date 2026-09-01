@@ -114,34 +114,36 @@ async function callForced(connector, model, content, tool) {
  * @returns {Promise<{docType?, entity?, period?, tags: Array<{facet,name}>}>}
  *   {} -shaped no-op on any failure — filing never breaks a save.
  */
+function documentFilingPrompt(meta, contentHead, vocabulary) {
+  return `You are the librarian of a project's document library. File the document below so the library stays organized: normalize its metadata and assign faceted tags.\n\n`
+    + renderVocabulary(vocabulary) + '\n\n'
+    + `DOCUMENT\ntitle: ${clip(meta.title, 200)}\ndeclared type: ${clip(meta.type, 80) || '(none)'}\n`
+    + `declared properties: ${clip(JSON.stringify(meta.properties || {}), 300)}\n`
+    + `content head:\n${clip(contentHead, 1500)}\n\nCall file_document now.`;
+}
+
+function normalizedDocumentFiling(args, vocabulary) {
+  const filing = { tags: validateTags(args.tags, vocabulary.tags || []) };
+  if (args.doc_type && slug(args.doc_type)) {
+    const typeSlug = slug(args.doc_type);
+    filing.docType = vocabulary.docTypes?.find((type) => slug(type) === typeSlug) || typeSlug;
+  }
+  if (args.entity && String(args.entity).trim()) {
+    const entitySlug = slug(args.entity);
+    filing.entity = vocabulary.entities?.find((entity) => slug(entity) === entitySlug)
+      || String(args.entity).trim().slice(0, 80);
+  }
+  if (args.period && String(args.period).trim()) filing.period = String(args.period).trim().slice(0, 40);
+  return filing;
+}
+
 async function fileDocument({ connector, model, meta = {}, contentHead = '', vocabulary = {} }) {
   try {
-    const prompt =
-      `You are the librarian of a project's document library. File the document below so the library stays organized: normalize its metadata and assign faceted tags.\n\n`
-      + renderVocabulary(vocabulary) + '\n\n'
-      + `DOCUMENT\ntitle: ${clip(meta.title, 200)}\ndeclared type: ${clip(meta.type, 80) || '(none)'}\n`
-      + `declared properties: ${clip(JSON.stringify(meta.properties || {}), 300)}\n`
-      + `content head:\n${clip(contentHead, 1500)}\n\nCall file_document now.`;
+    const prompt = documentFilingPrompt(meta, contentHead, vocabulary);
     const args = await callForced(connector, model, prompt, FILE_DOCUMENT_TOOL);
-    if (!args) return { tags: [] };
-    const existing = vocabulary.tags || [];
-    const out = { tags: validateTags(args.tags, existing) };
-    // Normalized metadata only when it slugs to something real; existing
-    // doc-type spellings win over fresh coinage (same rule as tags).
-    if (args.doc_type && slug(args.doc_type)) {
-      const s = slug(args.doc_type);
-      const known = (vocabulary.docTypes || []).find((d) => slug(d) === s);
-      out.docType = known || s;
-    }
-    if (args.entity && String(args.entity).trim()) {
-      const s = slug(args.entity);
-      const known = (vocabulary.entities || []).find((e) => slug(e) === s);
-      out.entity = known || String(args.entity).trim().slice(0, 80);
-    }
-    if (args.period && String(args.period).trim()) out.period = String(args.period).trim().slice(0, 40);
-    return out;
-  } catch (e) {
-    console.error('[librarian:document]', e && e.message);
+    return args ? normalizedDocumentFiling(args, vocabulary) : { tags: [] };
+  } catch (error) {
+    console.error('[librarian:document]', error?.message);
     return { tags: [] };
   }
 }

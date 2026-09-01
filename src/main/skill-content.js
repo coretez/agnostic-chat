@@ -15,38 +15,47 @@
 
 // Minimal frontmatter reader (same subset as ipc.js's parseFrontmatter: plain
 // scalars, folded/literal block scalars, simple lists).
-function parseFrontmatter(md) {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md || '');
-  if (!m) return { meta: {}, body: md || '' };
-  const lines = m[1].split(/\r?\n/);
-  const meta = {};
-  for (let i = 0; i < lines.length; i++) {
-    const kv = /^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/.exec(lines[i]);
-    if (!kv) continue;
-    const key = kv[1];
-    const rest = kv[2];
-    if (rest === '>-' || rest === '>' || rest === '|-' || rest === '|') {
-      const folded = rest[0] === '>';
-      const block = [];
-      let j = i + 1;
-      while (j < lines.length && /^\s+\S/.test(lines[j])) { block.push(lines[j].replace(/^\s{2}/, '')); j++; }
-      meta[key] = folded ? block.join(' ').trim() : block.join('\n').trim();
-      i = j - 1;
-    } else if (rest === '') {
-      const items = [];
-      let j = i + 1;
-      while (j < lines.length) {
-        const li = /^\s*-\s+(.*)$/.exec(lines[j]);
-        if (!li) break;
-        items.push(li[1].trim());
-        j++;
-      }
-      if (items.length) { meta[key] = items; i = j - 1; }
-    } else {
-      meta[key] = rest.trim().replace(/^["']|["']$/g, '');
-    }
+function readIndentedBlock(lines, start, folded) {
+  const block = [];
+  let cursor = start;
+  while (cursor < lines.length && /^\s+\S/.test(lines[cursor])) {
+    block.push(lines[cursor].replace(/^\s{2}/, ''));
+    cursor += 1;
   }
-  return { meta, body: m[2] };
+  return { value: (folded ? block.join(' ') : block.join('\n')).trim(), cursor };
+}
+
+function readListBlock(lines, start) {
+  const items = [];
+  let cursor = start;
+  while (cursor < lines.length) {
+    const item = /^\s*-\s+(.*)$/.exec(lines[cursor]);
+    if (!item) break;
+    items.push(item[1].trim());
+    cursor += 1;
+  }
+  return { value: items, cursor };
+}
+
+function readFrontmatterValue(lines, index, rest) {
+  if (['>-', '>', '|-', '|'].includes(rest)) return readIndentedBlock(lines, index + 1, rest[0] === '>');
+  if (rest === '') return readListBlock(lines, index + 1);
+  return { value: rest.trim().replace(/^["']|["']$/g, ''), cursor: index + 1 };
+}
+
+function parseFrontmatter(md) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md || '');
+  if (!match) return { meta: {}, body: md || '' };
+  const lines = match[1].split(/\r?\n/);
+  const meta = {};
+  for (let index = 0; index < lines.length;) {
+    const pair = /^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/.exec(lines[index]);
+    if (!pair) { index += 1; continue; }
+    const parsed = readFrontmatterValue(lines, index, pair[2]);
+    if (parsed.value !== undefined && (!Array.isArray(parsed.value) || parsed.value.length)) meta[pair[1]] = parsed.value;
+    index = parsed.cursor;
+  }
+  return { meta, body: match[2] };
 }
 
 /**

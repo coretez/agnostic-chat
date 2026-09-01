@@ -5,6 +5,7 @@
 // `chat` and `callTool` are injected so this is unit-testable without a live model.
 
 const { filterToolResult } = require('./filter');
+const { compactToolHistory } = require('./tool-history');
 
 /**
  * @param {object}   o
@@ -16,112 +17,134 @@ const { filterToolResult } = require('./filter');
  * @param {number}  [o.maxIters=10]
  * @returns {Promise<{reply:string, toolTrace:Array, iterations:number}>}
  */
-async function runChatLoop({ chat, callTool, model, messages, tools = [], maxIters = 10, onEvent, onLimit, isAborted, compact }) {
-  const stopped = typeof isAborted === 'function' ? isAborted : () => false;
-  const emit = typeof onEvent === 'function' ? onEvent : () => {};
-  let history = [...messages];
-  const toolTrace = [];
-  // Aggregate real provider token usage across every model call this turn.
-  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false };
-  const addUsage = (u) => {
-    if (!u) return;
-    usage.measured = true; usage.calls += 1;
-    usage.inputTokens += u.inputTokens || 0;
-    usage.outputTokens += u.outputTokens || 0;
-    usage.cachedTokens += u.cachedTokens || 0;
-    usage.cacheCreationTokens += u.cacheCreationTokens || 0;
-  };
-
-  let limit = maxIters;
-  let i = 0;
-  let truncated = false; // any model call this turn cut off by the output-token limit
-  const noteTruncation = (r) => {
-    if (r && r.truncated) { truncated = true; emit({ type: 'process', kind: 'truncated', reason: r.finishReason || 'max_tokens' }); }
-  };
-  for (;;) {
-    // Hit the current tool-call budget. If a handler is wired (the interactive
-    // chat), ask whether to keep going with a fresh budget; otherwise fall
-    // through to the forced wrap-up below. Sub-agents pass no onLimit, so they
-    // simply cap-and-summarize without prompting anyone.
-    if (i >= limit) {
-      let more = 0;
-      if (typeof onLimit === 'function') { try { more = Number(await onLimit({ iterations: i })) || 0; } catch { more = 0; } }
-      if (more > 0) { limit += more; } else { break; }
-    }
-    // User hit STOP: end the loop without another model call. Work done so
-    // far (tool trace, streamed text) is preserved; the caller persists it.
-    if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
-    // In-loop ledger: tool results accrete INSIDE the loop (up to 24k chars
-    // each), so the context defense has to run here too, not only between
-    // turns. The hook is threshold-gated (maybeCompress) — cheap when under.
-    if (typeof compact === 'function') { try { history = await compact(history); } catch {} }
-    i++;
-    emit({ type: 'model', model });
-    let res;
-    try {
-      res = await chat({ model, messages: history, tools, onDelta: (d) => emit({ type: 'token', text: d.text }) });
-    } catch (e) {
-      // The abort signal kills the in-flight HTTP call — surface that as a
-      // clean stop, not an error.
-      if (stopped()) { emit({ type: 'done' }); return { reply: '', toolTrace, iterations: i, usage, aborted: true }; }
-      throw e;
-    }
-    addUsage(res.usage);
-    noteTruncation(res);
-    const calls = res.toolCalls || [];
-
-    if (calls.length === 0) {
-      emit({ type: 'done' });
-      return { reply: res.text || '', toolTrace, iterations: i, usage, truncated };
-    }
-
-    history.push({ role: 'assistant', content: res.text || '', toolCalls: calls, assistantRaw: res.assistantRaw });
-    for (const call of calls) {
-      if (stopped()) { emit({ type: 'done' }); return { reply: res.text || '', toolTrace, iterations: i, usage, aborted: true }; }
-      emit({ type: 'tool-start', name: call.name });
-      const t0 = Date.now();
-      let out;
-      try { out = await callTool(call.name, call.args); }
-      catch (e) { out = { text: `ERROR: ${e.message}`, isError: true }; }
-      const durationMs = Date.now() - t0;
-      // Noise filter: strip low-signal bulk before the result re-enters context
-      // (RTK-inspired). middle-elide is the backstop for anything still huge.
-      const rawLen = (out.text || '').length;
-      const filt = filterToolResult(call.name, out.text || '', { cap: 24000 });
-      const content = filt.text;
-      const truncated = filt.rules.includes('middle-elide');
-      emit({ type: 'tool-end', name: call.name, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated, durationMs });
-      history.push({ role: 'tool', toolCallId: call.id, name: call.name, content });
-      toolTrace.push({ name: call.name, args: call.args, ok: !out.isError, resultChars: rawLen, filteredChars: filt.after, rules: filt.rules, truncated, durationMs });
-    }
-  }
-
-  // Ran out of tool-call iterations without a final answer. Rather than leave the
-  // user with a dangling preamble ("Let me investigate…" and nothing more), force
-  // ONE last tool-less call so the model must write a conclusion from what it has
-  // already gathered. This guarantees every turn ends with a real answer.
-  emit({ type: 'model', model });
-  let wrap;
-  try {
-    wrap = await chat({
-      model,
-      messages: [...history, { role: 'user', content: 'You have reached the tool-call limit — do NOT call any more tools. Using everything you have already gathered above, write your complete final answer now.' }],
-      tools: [],
-      onDelta: (d) => emit({ type: 'token', text: d.text })
-    });
-    addUsage(wrap.usage);
-    noteTruncation(wrap);
-  } catch (e) {
-    // Deliberate degradation (a capped turn must still land), but never a
-    // silent one — the glass box shows why the wrap-up came back empty.
-    emit({ type: 'process', kind: 'wrapup-failed', error: (e && e.message) || 'model call failed' });
-    wrap = { text: '' };
-  }
-  emit({ type: 'done' });
+function createLoopState({ messages, maxIters, onEvent, isAborted }) {
   return {
-    reply: wrap.text || '(stopped after reaching the tool-call limit before a final answer could be produced)',
-    toolTrace, iterations: i, usage, cappedTurn: true, truncated
+    stopped: typeof isAborted === 'function' ? isAborted : () => false,
+    emit: typeof onEvent === 'function' ? onEvent : () => {},
+    history: [...messages], toolTrace: [], limit: maxIters, iterations: 0, truncated: false,
+    usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, calls: 0, measured: false }
   };
+}
+
+function recordUsage(state, usage) {
+  if (!usage) return;
+  state.usage.measured = true;
+  state.usage.calls += 1;
+  state.usage.inputTokens += usage.inputTokens || 0;
+  state.usage.outputTokens += usage.outputTokens || 0;
+  state.usage.cachedTokens += usage.cachedTokens || 0;
+  state.usage.cacheCreationTokens += usage.cacheCreationTokens || 0;
+}
+
+function recordTruncation(state, response) {
+  if (!response?.truncated) return;
+  state.truncated = true;
+  state.emit({ type: 'process', kind: 'truncated', reason: response.finishReason || 'max_tokens' });
+}
+
+function stoppedResult(state, reply = '') {
+  state.emit({ type: 'done' });
+  return { reply, toolTrace: state.toolTrace, iterations: state.iterations, usage: state.usage, aborted: true };
+}
+
+async function hasIterationBudget(state, onLimit) {
+  if (state.iterations < state.limit) return true;
+  let additional = 0;
+  if (typeof onLimit === 'function') {
+    try { additional = Number(await onLimit({ iterations: state.iterations })) || 0; } catch {}
+  }
+  if (additional <= 0) return false;
+  state.limit += additional;
+  return true;
+}
+
+async function compactLoopHistory(state, compact) {
+  const pruned = compactToolHistory(state.history);
+  state.history = pruned.messages;
+  if (pruned.stats.compacted) state.emit({ type: 'process', kind: 'tool-history-compact', ...pruned.stats });
+  if (typeof compact === 'function') {
+    try { state.history = await compact(state.history); } catch {}
+  }
+}
+
+async function requestLoopResponse(state, chat, model, tools) {
+  state.iterations += 1;
+  state.emit({ type: 'model', model });
+  try {
+    const response = await chat({
+      model, messages: state.history, tools,
+      onDelta: (delta) => state.emit({ type: 'token', text: delta.text })
+    });
+    recordUsage(state, response.usage);
+    recordTruncation(state, response);
+    return response;
+  } catch (error) {
+    if (state.stopped()) return null;
+    error.partial = { toolTrace: state.toolTrace, iterations: state.iterations, usage: state.usage };
+    throw error;
+  }
+}
+
+async function callAndRecordTool(state, callTool, call) {
+  state.emit({ type: 'tool-start', name: call.name });
+  const started = Date.now();
+  let output;
+  try { output = await callTool(call.name, call.args); }
+  catch (error) { output = { text: `ERROR: ${error.message}`, isError: true }; }
+  const durationMs = Date.now() - started;
+  const rawLength = (output.text || '').length;
+  const filtered = filterToolResult(call.name, output.text || '', { cap: 24000 });
+  const truncated = filtered.rules.includes('middle-elide');
+  const trace = { name: call.name, args: call.args, ok: !output.isError, resultChars: rawLength, filteredChars: filtered.after, rules: filtered.rules, truncated, durationMs };
+  state.emit({ type: 'tool-end', ...trace });
+  state.history.push({ role: 'tool', toolCallId: call.id, name: call.name, content: filtered.text });
+  state.toolTrace.push(trace);
+}
+
+async function executeRequestedTools(state, callTool, response) {
+  const calls = response.toolCalls || [];
+  state.history.push({ role: 'assistant', content: response.text || '', toolCalls: calls, assistantRaw: response.assistantRaw });
+  for (const call of calls) {
+    if (state.stopped()) return false;
+    await callAndRecordTool(state, callTool, call);
+  }
+  return true;
+}
+
+async function wrapUpCappedLoop(state, chat, model) {
+  state.emit({ type: 'model', model });
+  let response;
+  try {
+    response = await chat({
+      model, tools: [],
+      messages: [...state.history, { role: 'user', content: 'You have reached the tool-call limit — do NOT call any more tools. Using everything you have already gathered above, write your complete final answer now.' }],
+      onDelta: (delta) => state.emit({ type: 'token', text: delta.text })
+    });
+    recordUsage(state, response.usage);
+    recordTruncation(state, response);
+  } catch (error) {
+    state.emit({ type: 'process', kind: 'wrapup-failed', error: error?.message || 'model call failed' });
+    response = { text: '' };
+  }
+  state.emit({ type: 'done' });
+  return { reply: response.text || '(stopped after reaching the tool-call limit before a final answer could be produced)', toolTrace: state.toolTrace, iterations: state.iterations, usage: state.usage, cappedTurn: true, truncated: state.truncated };
+}
+
+async function runChatLoop(options) {
+  const { chat, callTool, model, tools = [], maxIters = 10, onLimit, compact } = options;
+  const state = createLoopState({ ...options, maxIters });
+  while (await hasIterationBudget(state, onLimit)) {
+    if (state.stopped()) return stoppedResult(state);
+    await compactLoopHistory(state, compact);
+    const response = await requestLoopResponse(state, chat, model, tools);
+    if (!response) return stoppedResult(state);
+    if (!(response.toolCalls || []).length) {
+      state.emit({ type: 'done' });
+      return { reply: response.text || '', toolTrace: state.toolTrace, iterations: state.iterations, usage: state.usage, truncated: state.truncated };
+    }
+    if (!(await executeRequestedTools(state, callTool, response))) return stoppedResult(state, response.text || '');
+  }
+  return wrapUpCappedLoop(state, chat, model);
 }
 
 module.exports = { runChatLoop };

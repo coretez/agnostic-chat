@@ -165,6 +165,86 @@ const settings = {
   }
 };
 
+// ── Durable workflow contracts + step checkpoints ──────────────────────────
+function parseJson(value, fallback = null) {
+  if (!value) return fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function shapeWorkflowRun(row) {
+  return row ? {
+    ...row,
+    contract: parseJson(row.contract_json, {}),
+    plan: parseJson(row.plan_json, null),
+    state: parseJson(row.state_json, null)
+  } : null;
+}
+
+function shapeCheckpoint(row) {
+  return row ? {
+    ...row,
+    step: parseJson(row.step_json, null),
+    result: parseJson(row.result_json, null),
+    values: parseJson(row.values_json, null),
+    toolTrace: parseJson(row.tool_trace_json, [])
+  } : null;
+}
+
+const workflowRuns = {
+  start({ turnId, projectId = null, chatId = null, kind = 'generic', contract = {}, plan = null, state = null }) {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO workflow_runs (turn_id, project_id, chat_id, kind, contract_json, plan_json, state_json, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'running')
+      ON CONFLICT(turn_id) DO UPDATE SET
+        project_id=excluded.project_id, chat_id=excluded.chat_id, kind=excluded.kind,
+        contract_json=excluded.contract_json, plan_json=excluded.plan_json,
+        state_json=excluded.state_json, status='running', error=NULL,
+        completed_at=NULL, updated_at=datetime('now')
+    `).run(turnId, projectId, chatId, kind, JSON.stringify(contract), plan ? JSON.stringify(plan) : null, state ? JSON.stringify(state) : null);
+    return workflowRuns.byTurn(turnId);
+  },
+  byTurn(turnId) {
+    return shapeWorkflowRun(getDb().prepare('SELECT * FROM workflow_runs WHERE turn_id = ?').get(turnId));
+  },
+  get(id) {
+    return shapeWorkflowRun(getDb().prepare('SELECT * FROM workflow_runs WHERE id = ?').get(id));
+  },
+  checkpoint(runId, { stepKey, step = null, result = null, values = null, toolTrace = [] }) {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO workflow_checkpoints (run_id, step_key, step_json, result_json, values_json, tool_trace_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id, step_key) DO UPDATE SET
+        step_json=excluded.step_json, result_json=excluded.result_json,
+        values_json=excluded.values_json, tool_trace_json=excluded.tool_trace_json,
+        created_at=datetime('now')
+    `).run(runId, String(stepKey), step ? JSON.stringify(step) : null, result ? JSON.stringify(result) : null, values ? JSON.stringify(values) : null, JSON.stringify(toolTrace || []));
+    db.prepare("UPDATE workflow_runs SET current_step=?, state_json=?, updated_at=datetime('now') WHERE id=?")
+      .run(String(stepKey), values ? JSON.stringify(values) : null, runId);
+    return db.prepare('SELECT * FROM workflow_checkpoints WHERE run_id = ? AND step_key = ?').get(runId, String(stepKey));
+  },
+  checkpoints(runId) {
+    return getDb().prepare('SELECT * FROM workflow_checkpoints WHERE run_id = ? ORDER BY id ASC').all(runId).map(shapeCheckpoint);
+  },
+  latestIncomplete(chatId) {
+    return shapeWorkflowRun(getDb().prepare(
+      "SELECT * FROM workflow_runs WHERE chat_id = ? AND status IN ('running','partial','failed') ORDER BY id DESC LIMIT 1"
+    ).get(chatId));
+  },
+  recoverInterrupted() {
+    const result = getDb().prepare("UPDATE workflow_runs SET status='partial', error=COALESCE(error, 'App restarted before workflow completed'), updated_at=datetime('now') WHERE status='running'").run();
+    return Number(result.changes) || 0;
+  },
+  updateStatus(id, status, { state = undefined, error = undefined } = {}) {
+    const done = status === 'completed';
+    getDb().prepare(`UPDATE workflow_runs SET status=?, state_json=COALESCE(?, state_json), error=?,
+      completed_at=${done ? "datetime('now')" : 'NULL'}, updated_at=datetime('now') WHERE id=?`)
+      .run(status, state === undefined ? null : JSON.stringify(state), error === undefined ? null : error, id);
+    return workflowRuns.get(id);
+  }
+};
+
 // ── Agents: authored per-project sub-agent definitions ──────────────────────
 const agents = {
   listByProject(projectId) {
@@ -593,6 +673,69 @@ const providers = {
   }
 };
 
+// ── Downstream LLM guards (encrypted token + metadata-only audit) ─────────
+const GUARD_COLS =
+  'id, kind, label, base_url, auth_mode, enabled, status, status_detail, last_checked_at, created_at, updated_at, (secret_ciphertext IS NOT NULL) AS has_secret';
+
+function shapeGuard(row) {
+  return row ? { ...row, enabled: !!row.enabled, has_secret: !!row.has_secret } : row;
+}
+
+const guards = {
+  list() {
+    return getDb().prepare(`SELECT ${GUARD_COLS} FROM llm_guards ORDER BY created_at ASC`).all().map(shapeGuard);
+  },
+  get(id) {
+    return shapeGuard(getDb().prepare(`SELECT ${GUARD_COLS} FROM llm_guards WHERE id = ?`).get(id));
+  },
+  active() {
+    return shapeGuard(getDb().prepare(`SELECT ${GUARD_COLS} FROM llm_guards WHERE enabled = 1 ORDER BY updated_at DESC, id DESC LIMIT 1`).get());
+  },
+  add({ kind = 'openai_proxy', label = null, baseUrl, authMode = 'passthrough', secret = null, enabled = false }) {
+    const db = getDb();
+    if (!baseUrl) throw new Error('Guard base URL is required');
+    if (enabled) db.prepare("UPDATE llm_guards SET enabled = 0, updated_at = datetime('now') WHERE enabled = 1").run();
+    const ciphertext = secret ? secrets.encrypt(secret) : null;
+    const info = db.prepare(
+      'INSERT INTO llm_guards (kind, label, base_url, auth_mode, secret_ciphertext, enabled) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(kind, label, baseUrl, authMode, ciphertext, enabled ? 1 : 0);
+    return guards.get(info.lastInsertRowid);
+  },
+  update(id, patch = {}) {
+    const db = getDb();
+    if (patch.enabled === true) db.prepare("UPDATE llm_guards SET enabled = 0, updated_at = datetime('now') WHERE enabled = 1 AND id != ?").run(id);
+    const sets = []; const vals = [];
+    const map = { kind: 'kind', label: 'label', baseUrl: 'base_url', authMode: 'auth_mode', status: 'status', statusDetail: 'status_detail' };
+    for (const [key, col] of Object.entries(map)) {
+      if (patch[key] !== undefined) { sets.push(`${col} = ?`); vals.push(patch[key]); }
+    }
+    if (patch.enabled !== undefined) { sets.push('enabled = ?'); vals.push(patch.enabled ? 1 : 0); }
+    if (patch.secret !== undefined && patch.secret) { sets.push('secret_ciphertext = ?'); vals.push(secrets.encrypt(patch.secret)); }
+    if (patch.markChecked) sets.push("last_checked_at = datetime('now')");
+    sets.push("updated_at = datetime('now')"); vals.push(id);
+    db.prepare(`UPDATE llm_guards SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    return guards.get(id);
+  },
+  remove(id) { getDb().prepare('DELETE FROM llm_guards WHERE id = ?').run(id); },
+  reveal(id) {
+    const row = getDb().prepare('SELECT secret_ciphertext FROM llm_guards WHERE id = ?').get(id);
+    return row && row.secret_ciphertext ? secrets.decrypt(row.secret_ciphertext) : null;
+  },
+  recordEvent({ guardId, providerId = null, chatId = null, turnId = null, model = null, operation = 'chat', decision, durationMs = null, detail = null }) {
+    return Number(getDb().prepare(
+      'INSERT INTO llm_guard_events (guard_id, provider_id, chat_id, turn_id, model, operation, decision, duration_ms, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(guardId || null, providerId, chatId, turnId, model, operation, decision, durationMs, detail ? String(detail).slice(0, 500) : null).lastInsertRowid);
+  },
+  events(limit = 100) {
+    const n = Math.max(1, Math.min(500, Number(limit) || 100));
+    return getDb().prepare(
+      `SELECT e.*, COALESCE(g.label, 'Removed guard') AS guard_label, p.label AS provider_label
+       FROM llm_guard_events e LEFT JOIN llm_guards g ON g.id = e.guard_id LEFT JOIN providers p ON p.id = e.provider_id
+       ORDER BY e.id DESC LIMIT ?`
+    ).all(n);
+  }
+};
+
 // ── MCP servers (encrypted env/token at rest) ──────────────────────────────
 const MCP_COLS =
   'id, name, transport, command, args_json, url, enabled, tools_json, status, status_detail, last_checked_at, created_at, updated_at, (secret_ciphertext IS NOT NULL) AS has_secret';
@@ -675,4 +818,4 @@ const mcp = {
   }
 };
 
-module.exports = { projects, chats, messages, documents, skills, credentials, providers, mcp, settings, agents, metrics, tags, slugify };
+module.exports = { projects, chats, messages, documents, skills, credentials, providers, guards, mcp, settings, agents, metrics, tags, workflowRuns, slugify };

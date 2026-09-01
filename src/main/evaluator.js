@@ -61,37 +61,40 @@ function extractJson(text) {
  * @param {object} o.digest    compact turn digest (from the renderer)
  * @returns {Promise<{assessment, findings}|{error}>}
  */
-async function runEvaluator({ connector, model, digest }) {
-  const content = EVAL_PROMPT + '\n\nDIGEST:\n' + JSON.stringify(digest, null, 2);
-  // Thinking models (kimi-k2.x, etc.) burn the budget on reasoning before emitting
-  // JSON, and often return the answer in a separate `reasoning_content` field with
-  // `content` empty. Give a large ceiling and look in both places.
-  const r = await connector.chat({ model, messages: [{ role: 'user', content }], maxTokens: 8000 });
-  const msg = r.raw && r.raw.choices && r.raw.choices[0] ? r.raw.choices[0].message || {} : {};
-  const finish = r.raw && r.raw.choices && r.raw.choices[0] ? r.raw.choices[0].finish_reason : undefined;
-  const text = r.text || '';
-  const reasoning = msg.reasoning_content || msg.reasoning || '';
-  console.error('[evaluator]', model, 'finish=', finish, 'contentLen=', text.length, 'reasoningLen=', reasoning.length);
+function evaluatorResponse(response) {
+  const choice = response.raw?.choices?.[0] || {};
+  const message = choice.message || {};
+  return { finish: choice.finish_reason, text: response.text || '', reasoning: message.reasoning_content || message.reasoning || '' };
+}
 
-  // Prefer JSON from content; fall back to the reasoning field.
-  const raw = extractJson(text) || extractJson(reasoning);
-  if (!raw) {
-    const dump = (text || reasoning || '').slice(0, 800);
-    console.error('[evaluator] no parseable JSON from', model, '— dump:', JSON.stringify(dump.slice(0, 400)));
-    let hint;
-    if (finish === 'length') hint = 'reply was cut off at the token limit before valid JSON (thinking model used the budget on reasoning — raise the limit or use a non-thinking evaluator)';
-    else if (!text.trim() && !reasoning.trim()) hint = 'model returned an empty reply (its token budget may have been consumed by hidden reasoning) — try a non-thinking model as the evaluator';
-    else hint = 'model replied but not as JSON — try a non-thinking model as the evaluator';
-    return { error: hint, raw: dump, findings: [] };
-  }
-  let parsed;
-  try { parsed = JSON.parse(raw); }
-  catch (e) {
+function missingJsonError(finish, text, reasoning) {
+  const dump = (text || reasoning || '').slice(0, 800);
+  console.error('[evaluator] no parseable JSON — dump:', JSON.stringify(dump.slice(0, 400)));
+  if (finish === 'length') return { error: 'reply was cut off at the token limit before valid JSON (thinking model used the budget on reasoning — raise the limit or use a non-thinking evaluator)', raw: dump, findings: [] };
+  const empty = !text.trim() && !reasoning.trim();
+  const error = empty ? 'model returned an empty reply (its token budget may have been consumed by hidden reasoning) — try a non-thinking model as the evaluator'
+    : 'model replied but not as JSON — try a non-thinking model as the evaluator';
+  return { error, raw: dump, findings: [] };
+}
+
+function parseEvaluation(raw, model) {
+  try {
+    const parsed = JSON.parse(raw);
+    const findings = Array.isArray(parsed.findings) ? parsed.findings.slice(0, 6) : [];
+    return { assessment: parsed.assessment || '', findings };
+  } catch {
     console.error('[evaluator] JSON parse failed from', model, '— raw:', JSON.stringify(raw.slice(0, 400)));
     return { error: 'JSON parse failed (possibly truncated)', raw: raw.slice(0, 800), findings: [] };
   }
-  const findings = Array.isArray(parsed.findings) ? parsed.findings.slice(0, 6) : [];
-  return { assessment: parsed.assessment || '', findings };
+}
+
+async function runEvaluator({ connector, model, digest }) {
+  const content = EVAL_PROMPT + '\n\nDIGEST:\n' + JSON.stringify(digest, null, 2);
+  const response = await connector.chat({ model, messages: [{ role: 'user', content }], maxTokens: 8000 });
+  const { finish, text, reasoning } = evaluatorResponse(response);
+  console.error('[evaluator]', model, 'finish=', finish, 'contentLen=', text.length, 'reasoningLen=', reasoning.length);
+  const raw = extractJson(text) || extractJson(reasoning);
+  return raw ? parseEvaluation(raw, model) : missingJsonError(finish, text, reasoning);
 }
 
 module.exports = { runEvaluator, extractJson, EVAL_PROMPT };

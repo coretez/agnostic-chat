@@ -48,6 +48,57 @@ function isRememberableScalar(v) {
   return false;
 }
 
+function updateExistingEntry(store, entry, key, value, type, meta, confidence) {
+  const sameValue = entry.value === value;
+  const newRank = CONFIDENCE_RANK[confidence];
+  const oldRank = CONFIDENCE_RANK[entry.confidence];
+  if (sameValue && newRank <= oldRank) return entry;
+  if (!sameValue && newRank < oldRank) {
+    entry.history.push({ value, source: meta.source || null, seq: store.seq++, rejected: true });
+    return entry;
+  }
+  if (!sameValue) {
+    entry.history.push({ value: entry.value, source: entry.source, seq: entry.ts });
+    entry.value = value; entry.ts = store.seq++;
+  }
+  entry.type = type || inferType(key, value);
+  entry.source = meta.source || entry.source;
+  if (meta.step != null) entry.step = meta.step;
+  entry.confidence = confidence;
+  return entry;
+}
+
+function createEntry(store, key, value, type, meta, confidence) {
+  const entry = {
+    key, value, type: type || inferType(key, value), source: meta.source || null,
+    step: meta.step != null ? meta.step : null, confidence, ts: store.seq++, history: []
+  };
+  store.entries.set(key, entry);
+  store._evict();
+  return entry;
+}
+
+function parseResultJson(text) {
+  const source = String(text);
+  try { return JSON.parse(source); } catch {}
+  const fences = [...source.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)];
+  for (let index = fences.length - 1; index >= 0; index -= 1) {
+    try { return JSON.parse(fences[index][1]); } catch {}
+  }
+  return undefined;
+}
+
+function scanCapturableValues(value, found = [], depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 2 || found.length >= MAX_RESULT_CAPTURES) return found;
+  if (Array.isArray(value)) return value.length ? scanCapturableValues(value[0], found, depth + 1) : found;
+  for (const [key, child] of Object.entries(value)) {
+    if (found.length >= MAX_RESULT_CAPTURES) break;
+    if (isRememberableScalar(child) && isCapturableKey(key)) found.push([key, child]);
+    else if (child && typeof child === 'object') scanCapturableValues(child, found, depth + 1);
+  }
+  return found;
+}
+
 class VariableStore {
   constructor() {
     this.entries = new Map();  // key -> entry
@@ -62,43 +113,13 @@ class VariableStore {
    */
   set({ key, value, type } = {}, meta = {}) {
     if (key == null || value == null) return null;
-    const k = String(key).trim();
-    if (!k || !isRememberableScalar(value)) return null;
+    const normalizedKey = String(key).trim();
+    if (!normalizedKey || !isRememberableScalar(value)) return null;
     const confidence = meta.confidence || 'observed';
-
-    const existing = this.entries.get(k);
-    if (existing) {
-      const sameValue = existing.value === value;
-      const newRank = CONFIDENCE_RANK[confidence];
-      const oldRank = CONFIDENCE_RANK[existing.confidence];
-      // Re-observing the same value at equal-or-lower confidence: no-op, so the
-      // store keeps stable capture order and doesn't churn on repeated tool use.
-      if (sameValue && newRank <= oldRank) return existing;
-      // Lower-confidence contradiction of a higher-confidence value: reject it,
-      // but note the attempt in provenance (never silently overwrite a user
-      // value with something merely observed in tool traffic).
-      if (!sameValue && newRank < oldRank) {
-        existing.history.push({ value, source: meta.source || null, seq: this.seq++, rejected: true });
-        return existing;
-      }
-      // Real update (new value, or a confidence upgrade). Only a changed value
-      // advances ts — a pure confidence upgrade shouldn't reorder the store.
-      if (!sameValue) { existing.history.push({ value: existing.value, source: existing.source, seq: existing.ts }); existing.value = value; existing.ts = this.seq++; }
-      existing.type = type || inferType(k, value);
-      existing.source = meta.source || existing.source;
-      if (meta.step != null) existing.step = meta.step;
-      existing.confidence = confidence;
-      return existing;
-    }
-
-    const entry = {
-      key: k, value, type: type || inferType(k, value),
-      source: meta.source || null, step: meta.step != null ? meta.step : null,
-      confidence, ts: this.seq++, history: []
-    };
-    this.entries.set(k, entry);
-    this._evict();
-    return entry;
+    const existing = this.entries.get(normalizedKey);
+    return existing
+      ? updateExistingEntry(this, existing, normalizedKey, value, type, meta, confidence)
+      : createEntry(this, normalizedKey, value, type, meta, confidence);
   }
 
   /** Drop the least-valuable entries (lowest confidence, then oldest) past the cap. */
@@ -144,37 +165,15 @@ class VariableStore {
    * for identifier-shaped keys, capped so a big list can't flood the store.
    */
   captureFromResult(toolName, text, meta = {}) {
-    let data;
-    const s = String(text);
-    try { data = JSON.parse(s); } catch {
-      // Prose results (merge digests, sub-agent conclusions) carry their
-      // harvestable values in a trailing fenced JSON block — the O16 contract.
-      // Without this fallback the group/sub-agent harvest never fired: merges
-      // are prose, so whole-text parse always failed. Last fence wins.
-      const fences = [...s.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)];
-      for (let i = fences.length - 1; i >= 0; i--) {
-        try { data = JSON.parse(fences[i][1]); break; } catch { /* try earlier fence */ }
-      }
-      if (data === undefined) return [];
-    }
-    const found = [];
-    const scan = (obj, depth) => {
-      if (!obj || typeof obj !== 'object' || depth > 2 || found.length >= MAX_RESULT_CAPTURES) return;
-      if (Array.isArray(obj)) { if (obj.length) scan(obj[0], depth + 1); return; }
-      for (const [k, v] of Object.entries(obj)) {
-        if (found.length >= MAX_RESULT_CAPTURES) return;
-        if (isRememberableScalar(v) && isCapturableKey(k)) found.push([k, v]);
-        else if (v && typeof v === 'object') scan(v, depth + 1);
-      }
-    };
-    scan(data, 0);
+    const data = parseResultJson(text);
+    if (data === undefined) return [];
     const out = [];
-    for (const [k, v] of found) {
-      const e = this.set({ key: k, value: v }, {
+    for (const [key, value] of scanCapturableValues(data)) {
+      const entry = this.set({ key, value }, {
         confidence: 'observed', step: meta.step,
         source: toolName ? `${toolName}#result` : 'result'
       });
-      if (e) out.push(e);
+      if (entry) out.push(entry);
     }
     return out;
   }
@@ -229,13 +228,13 @@ class VariableStore {
 // executor; intercepted before it reaches the MCP router.
 const SET_VARIABLE_TOOL = {
   name: 'set_variable',
-  description: 'Record a value in working memory so later steps and tool calls can reuse it. Use for identifiers, paths, or derived values you will need again (e.g. a tenant id, a case id, a report file path).',
+  description: 'Record ONE short scalar in working memory so later tool calls can reuse it. Use only for identifiers, paths, numbers, or short strings (e.g. tenant id, case id, report path). Never use this for objects, arrays, evidence bundles, drafts, plans, or prose; step conclusions are passed automatically.',
   inputSchema: {
     type: 'object',
     properties: {
       key: { type: 'string', description: 'Short, stable name for the value, e.g. tenant_id, case_id, report_path.' },
       value: { type: 'string', description: 'The value to remember.' },
-      type: { type: 'string', enum: ['string', 'number', 'id', 'path', 'json'], description: 'Optional kind of value.' }
+      type: { type: 'string', enum: ['string', 'number', 'id', 'path'], description: 'Optional scalar kind.' }
     },
     required: ['key', 'value']
   }

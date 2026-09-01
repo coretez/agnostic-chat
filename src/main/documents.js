@@ -52,9 +52,35 @@ function extFor(format, mime) {
 }
 function mimeFor(ext) {
   return {
-    html: 'text/html', md: 'text/markdown', json: 'application/json', txt: 'text/plain',
-    xls: 'application/vnd.ms-excel', csv: 'text/csv', pdf: 'application/pdf'
+    html: 'text/html', htm: 'text/html', md: 'text/markdown', markdown: 'text/markdown',
+    json: 'application/json', txt: 'text/plain', csv: 'text/csv',
+    xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pdf: 'application/pdf', svg: 'image/svg+xml',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp'
   }[ext] || 'text/plain';
+}
+
+/**
+ * The mime a file should be READ as.
+ *
+ * A stored mime is only trusted when it is actually a mime type. Uploads were
+ * indexed with a hardcoded label — older rows say "text", newer ones say
+ * "text/plain" — regardless of what was uploaded, so an HTML file opened as
+ * source text instead of rendering. The extension is the more reliable signal
+ * whenever the stored value is missing or malformed, and using it here repairs
+ * the rows already on disk without a migration.
+ */
+function mimeForPath(filePath, storedMime = null) {
+  const stored = String(storedMime || '').trim().toLowerCase();
+  const ext = path.extname(String(filePath || '')).replace(/^\./, '').toLowerCase();
+  const derived = ext ? mimeFor(ext) : null;
+  // "text" is not a mime type; neither is "". Anything without a slash is a
+  // label somebody typed, not a declaration worth honouring over the extension.
+  if (!stored.includes('/')) return derived || 'text/plain';
+  // A generic stored mime loses to a specific extension: every upload claims
+  // text/plain, and .html is a stronger statement than that.
+  if ((stored === 'text/plain' || stored === 'application/octet-stream') && derived) return derived;
+  return stored;
 }
 
 // Fill a template into a relative path. Placeholders: {type} {tenant} {period} {title} {ext}.
@@ -121,4 +147,4 @@ function writeDocument({ outputDir, template, meta = {}, content }) {
   return { absPath: w.absPath, relPath, version: w.version, mime: mimeFor(ext), ext };
 }
 
-module.exports = { DEFAULT_TEMPLATE, defaultBase, resolveOutputDir, placementPath, writeDocument, writeFileVersioned, slugSeg, extFor, mimeFor };
+module.exports = { DEFAULT_TEMPLATE, defaultBase, resolveOutputDir, placementPath, writeDocument, writeFileVersioned, slugSeg, extFor, mimeFor, mimeForPath };

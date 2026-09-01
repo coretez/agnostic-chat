@@ -18,11 +18,15 @@ const path = require('node:path');
  */
 const LOAD_TIMEOUT_MS = 30000;
 
-async function htmlToPdf(htmlPath) {
-  const abs = path.resolve(htmlPath);
-  if (!fs.existsSync(abs)) throw new Error(`no such file: ${htmlPath}`);
-  if (path.extname(abs).toLowerCase() !== '.html') throw new Error('htmlToPdf converts .html documents only');
-  const win = new BrowserWindow({
+function validateHtmlPath(htmlPath) {
+  const absolutePath = path.resolve(htmlPath);
+  if (!fs.existsSync(absolutePath)) throw new Error(`no such file: ${htmlPath}`);
+  if (path.extname(absolutePath).toLowerCase() !== '.html') throw new Error('htmlToPdf converts .html documents only');
+  return absolutePath;
+}
+
+function createPdfWindow() {
+  return new BrowserWindow({
     show: false,
     webPreferences: {
       sandbox: true,
@@ -34,29 +38,44 @@ async function htmlToPdf(htmlPath) {
       partition: 'render-pdf'
     }
   });
+}
+
+function blockRemoteResources(window) {
+  window.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+    const allowed = /^(file:|data:|chrome-extension:|devtools:)/i.test(details.url);
+    callback({ cancel: !allowed });
+  });
+}
+
+function loadWithTimeout(window, absolutePath) {
+  const timeout = new Promise((_, reject) => setTimeout(
+    () => reject(new Error(`render timed out after ${LOAD_TIMEOUT_MS / 1000}s`)), LOAD_TIMEOUT_MS
+  ));
+  return Promise.race([window.loadFile(absolutePath), timeout]);
+}
+
+async function renderPdfBuffer(window) {
+  return window.webContents.printToPDF({
+    printBackground: true, pageSize: 'Letter',
+    margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
+  });
+}
+
+async function htmlToPdf(htmlPath) {
+  const absolutePath = validateHtmlPath(htmlPath);
+  const window = createPdfWindow();
   try {
     // ENFORCE the self-contained contract (O25) instead of trusting it: only
     // file:// and data: subresources load. A document with a remote <img> —
     // an exfiltration beacon and a determinism hole — renders without it.
-    win.webContents.session.webRequest.onBeforeRequest((details, cb) => {
-      const ok = /^(file:|data:|chrome-extension:|devtools:)/i.test(details.url);
-      cb({ cancel: !ok });
-    });
-    // A hanging load must not wedge the conversion path.
-    await Promise.race([
-      win.loadFile(abs),
-      new Promise((_, rej) => setTimeout(() => rej(new Error(`render timed out after ${LOAD_TIMEOUT_MS / 1000}s`)), LOAD_TIMEOUT_MS))
-    ]);
-    const buf = await win.webContents.printToPDF({
-      printBackground: true,
-      pageSize: 'Letter',
-      margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
-    });
-    const pdfPath = abs.slice(0, -'.html'.length) + '.pdf';
-    fs.writeFileSync(pdfPath, buf);
-    return { pdfPath, bytes: buf.length };
+    blockRemoteResources(window);
+    await loadWithTimeout(window, absolutePath);
+    const buffer = await renderPdfBuffer(window);
+    const pdfPath = absolutePath.slice(0, -'.html'.length) + '.pdf';
+    fs.writeFileSync(pdfPath, buffer);
+    return { pdfPath, bytes: buffer.length };
   } finally {
-    win.destroy();
+    window.destroy();
   }
 }
 

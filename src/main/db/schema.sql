@@ -238,6 +238,71 @@ CREATE TABLE IF NOT EXISTS providers (
   updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ── Downstream LLM firewall/guard connections + metadata-only audit ────────
+CREATE TABLE IF NOT EXISTS llm_guards (
+  id                INTEGER PRIMARY KEY,
+  kind              TEXT NOT NULL DEFAULT 'openai_proxy',
+  label             TEXT,
+  base_url          TEXT NOT NULL,
+  auth_mode         TEXT NOT NULL DEFAULT 'passthrough',
+  secret_ciphertext BLOB,
+  enabled           INTEGER NOT NULL DEFAULT 0,
+  status            TEXT,
+  status_detail     TEXT,
+  last_checked_at   TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS llm_guard_events (
+  id          INTEGER PRIMARY KEY,
+  guard_id    INTEGER REFERENCES llm_guards(id) ON DELETE SET NULL,
+  provider_id INTEGER REFERENCES providers(id) ON DELETE SET NULL,
+  chat_id     INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+  turn_id     TEXT,
+  model       TEXT,
+  operation   TEXT NOT NULL DEFAULT 'chat',
+  decision    TEXT NOT NULL,
+  duration_ms INTEGER,
+  detail      TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_guard_events_created ON llm_guard_events(id DESC);
+CREATE INDEX IF NOT EXISTS idx_guard_events_chat ON llm_guard_events(chat_id, id DESC);
+
+-- ── Durable workflow contracts and checkpoints ─────────────────────────────
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id           INTEGER PRIMARY KEY,
+  turn_id      TEXT NOT NULL UNIQUE,
+  project_id   INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  chat_id      INTEGER REFERENCES chats(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL DEFAULT 'generic',
+  contract_json TEXT NOT NULL,
+  plan_json    TEXT,
+  status       TEXT NOT NULL DEFAULT 'running',
+  current_step TEXT,
+  state_json   TEXT,
+  error        TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_chat ON workflow_runs(chat_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status, id DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  step_key        TEXT NOT NULL,
+  step_json       TEXT,
+  result_json     TEXT,
+  values_json     TEXT,
+  tool_trace_json TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (run_id, step_key)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_run ON workflow_checkpoints(run_id, id ASC);
+
 -- ── MCP servers: Model Context Protocol tool servers ───────────────────────
 -- App-global. stdio (command/args/env) or http (url/token). Any secret material
 -- (env vars, bearer token) is encrypted at rest exactly like provider keys.

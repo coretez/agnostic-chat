@@ -39,25 +39,7 @@ class McpConnection {
     if (this.cfg.transport === 'http') {
       if (!this.cfg.url) throw new Error('no URL');
     } else {
-      if (!this.cfg.command) throw new Error('no command');
-      this.child = spawn(this.cfg.command, Array.isArray(this.cfg.args) ? this.cfg.args : [], {
-        env: { ...process.env, ...(this.cfg.env || {}) },
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      this.child.on('error', (e) => this._fail(e));
-      this.child.on('exit', (code) => { this.open = false; this._fail(new Error(`server exited (code ${code})${this.stderr ? ' · ' + this.stderr.slice(0, 200) : ''}`)); });
-      this.child.stderr.on('data', (d) => { this.stderr += d.toString(); });
-      this.child.stdout.on('data', (d) => {
-        this.buf += d.toString();
-        let i;
-        while ((i = this.buf.indexOf('\n')) >= 0) {
-          const line = this.buf.slice(0, i).trim();
-          this.buf = this.buf.slice(i + 1);
-          if (!line) continue;
-          let msg; try { msg = JSON.parse(line); } catch { continue; }
-          if (msg.id !== undefined && this.pending.has(msg.id)) { const p = this.pending.get(msg.id); this.pending.delete(msg.id); p.resolve(msg); }
-        }
-      });
+      this._openStdioTransport();
     }
 
     const init = await this._request('initialize', { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT_INFO });
@@ -66,6 +48,42 @@ class McpConnection {
     await this._notify('notifications/initialized');
     this.open = true;
     return this.serverInfo;
+  }
+
+  _openStdioTransport() {
+    if (!this.cfg.command) throw new Error('no command');
+    this.child = spawn(this.cfg.command, Array.isArray(this.cfg.args) ? this.cfg.args : [], {
+      env: { ...process.env, ...(this.cfg.env || {}) }, stdio: ['pipe', 'pipe', 'pipe']
+    });
+    this.child.on('error', (error) => this._fail(error));
+    this.child.on('exit', (code) => this._handleChildExit(code));
+    this.child.stderr.on('data', (data) => { this.stderr += data.toString(); });
+    this.child.stdout.on('data', (data) => this._handleStdout(data));
+  }
+
+  _handleChildExit(code) {
+    this.open = false;
+    const detail = this.stderr ? ` · ${this.stderr.slice(0, 200)}` : '';
+    this._fail(new Error(`server exited (code ${code})${detail}`));
+  }
+
+  _handleStdout(data) {
+    this.buf += data.toString();
+    let newlineIndex;
+    while ((newlineIndex = this.buf.indexOf('\n')) >= 0) {
+      const line = this.buf.slice(0, newlineIndex).trim();
+      this.buf = this.buf.slice(newlineIndex + 1);
+      if (line) this._resolveResponseLine(line);
+    }
+  }
+
+  _resolveResponseLine(line) {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (message.id === undefined || !this.pending.has(message.id)) return;
+    const pendingRequest = this.pending.get(message.id);
+    this.pending.delete(message.id);
+    pendingRequest.resolve(message);
   }
 
   async listTools() {
@@ -122,35 +140,57 @@ class McpConnection {
   }
 
   async _httpRequest(method, params, notify) {
-    const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
-    if (this.cfg.token) headers.Authorization = `Bearer ${this.cfg.token}`;
-    if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
+    const headers = this._httpHeaders();
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), this.timeoutMs);
     try {
-      const body = { jsonrpc: '2.0', method };
-      if (params) body.params = params;
-      if (!notify) body.id = ++this.idc;
+      const body = this._httpBody(method, params, notify);
       const res = await fetch(this.cfg.url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
-      const sid = res.headers.get('mcp-session-id'); if (sid) this.sessionId = sid;
+      this._captureSession(res);
       if (notify) return null;
-      const text = await res.text();
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('text/event-stream')) {
-        for (const line of text.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          try { const j = JSON.parse(line.slice(5).trim()); if (j && (j.result || j.error)) return j; } catch {}
-        }
-        throw new Error('no JSON-RPC payload in SSE response');
-      }
-      return JSON.parse(text);
+      return await this._parseHttpResponse(res);
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error(`timed out after ${this.timeoutMs / 1000}s`);
-      // Node's fetch throws an opaque "fetch failed"; surface the real cause.
-      const cause = e.cause && (e.cause.code || e.cause.message);
-      throw new Error(cause ? `${e.message} (${cause})` : e.message);
+      throw this._describeHttpError(e);
     } finally { clearTimeout(t); }
+  }
+
+  _httpHeaders() {
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+    if (this.cfg.token) headers.Authorization = `Bearer ${this.cfg.token}`;
+    if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
+    return headers;
+  }
+
+  _httpBody(method, params, notify) {
+    const body = { jsonrpc: '2.0', method };
+    if (params) body.params = params;
+    if (!notify) body.id = ++this.idc;
+    return body;
+  }
+
+  _captureSession(response) {
+    const sessionId = response.headers.get('mcp-session-id');
+    if (sessionId) this.sessionId = sessionId;
+  }
+
+  async _parseHttpResponse(response) {
+    const text = await response.text();
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
+    if (!(response.headers.get('content-type') || '').includes('text/event-stream')) return JSON.parse(text);
+    for (const line of text.split('\n')) {
+      if (!line.startsWith('data:')) continue;
+      try {
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload?.result || payload?.error) return payload;
+      } catch {}
+    }
+    throw new Error('no JSON-RPC payload in SSE response');
+  }
+
+  _describeHttpError(error) {
+    if (error.name === 'AbortError') return new Error(`timed out after ${this.timeoutMs / 1000}s`);
+    const cause = error.cause && (error.cause.code || error.cause.message);
+    return new Error(cause ? `${error.message} (${cause})` : error.message);
   }
 }
 

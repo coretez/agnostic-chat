@@ -8,52 +8,20 @@ const { CODES, providerError } = require('./errors');
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
-const { withRetry, httpError } = require('./retry');
+const { withRetry } = require('./retry');
+const { requestJson, createStreamDeadline, connectStream } = require('./http-transport');
+const STREAM_TOTAL_TIMEOUT_MS = 180000;
+const CHAT_REQUEST_RETRIES = 0;
 
 function trimSlash(u) { return String(u || '').replace(/\/+$/, ''); }
 
 // Chain an external abort signal (the user's STOP) onto a request's internal
 // timeout controller, so a stop kills the in-flight HTTP call immediately.
-function linkSignal(ctrl, signal) {
-  if (!signal) return;
-  if (signal.aborted) { ctrl.abort(); return; }
-  signal.addEventListener('abort', () => ctrl.abort(), { once: true });
-}
-
 async function req(url, { key, method = 'GET', body, timeoutMs = 30000, signal }) {
-  const ctrl = new AbortController();
-  linkSignal(ctrl, signal);
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'x-api-key': key,
-        'anthropic-version': ANTHROPIC_VERSION,
-        'Content-Type': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl.signal
-    });
-    const text = await res.text();
-    let json;
-    try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-    if (!res.ok) {
-      const detail = json?.error?.message || json?.message || (text ? text.slice(0, 400) : '');
-      throw httpError(res.status, detail, res.headers.get('retry-after'));
-    }
-    return json;
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      // The cause is known HERE — carry it as a code, not a sentence.
-      throw signal && signal.aborted
-        ? providerError(CODES.USER_ABORT, 'stopped by user')
-        : providerError(CODES.PROVIDER_TIMEOUT, `Request timed out after ${timeoutMs / 1000}s`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(t);
-  }
+  return requestJson(url, {
+    headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json' },
+    method, body, timeoutMs, signal
+  });
 }
 
 // Neutral history → Anthropic turns. Tool results must ride in a user turn as
@@ -80,87 +48,91 @@ function toAnthropicTurns(messages) {
   return out;
 }
 
-// Streaming (SSE) for the Messages API. Idle-timeout based — 300s, matching
-// openai-compat: thinking models can reason silently before the first delta.
-async function streamAnthropic(base, key, body, onDelta, signal, onRetry) {
-  const ctrl = new AbortController();
-  linkSignal(ctrl, signal);
-  const IDLE = 300000;
-  let idle = setTimeout(() => ctrl.abort(), IDLE);
-  const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), IDLE); };
-  let res;
-  try {
-    // Connect phase is retryable — nothing has streamed yet.
-    res = await withRetry(async () => {
-      let r;
-      try {
-        r = await fetch(`${base}/v1/messages`, {
-          method: 'POST',
-          headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-          body: JSON.stringify({ ...body, stream: true }),
-          signal: ctrl.signal
-        });
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          throw signal && signal.aborted
-            ? providerError(CODES.USER_ABORT, 'stopped by user')
-            : providerError(CODES.STREAM_STALLED, 'stream stalled (no data)');
-        }
-        const err = new Error(`stream connect failed: ${e.message}`);
-        err.retryable = true;
-        throw err;
-      }
-      if (!r.ok) { const t = await r.text(); throw httpError(r.status, t.slice(0, 400), r.headers.get('retry-after')); }
-      return r;
-    }, { retries: 3, signal: ctrl.signal, onRetry });
-  } catch (e) { clearTimeout(idle); throw e; }
+// Streaming (SSE) for the Messages API. Idle detection tolerates long initial
+// reasoning, while the total deadline keeps a workflow checkpoint finite.
+function processAnthropicEvent(state, event, onDelta) {
+  if (event.type === 'error') throw new Error(`stream error: ${event.error?.message || JSON.stringify(event.error || {}).slice(0, 200)}`);
+  if (event.type === 'message_start' && event.message?.usage) state.usage = { ...event.message.usage };
+  if (event.type === 'message_delta') {
+    if (event.usage) state.usage = { ...(state.usage || {}), ...event.usage };
+    if (event.delta?.stop_reason) state.stopReason = event.delta.stop_reason;
+  }
+  if (event.type === 'content_block_start') {
+    const block = event.content_block || {};
+    state.blocks[event.index] = { type: block.type, id: block.id, name: block.name, text: '', jsonbuf: '' };
+  }
+  if (event.type === 'content_block_delta') processAnthropicBlockDelta(state, event, onDelta);
+}
 
-  const reader = res.body.getReader();
+function processAnthropicBlockDelta(state, event, onDelta) {
+  const delta = event.delta || {};
+  const block = state.blocks[event.index] || (state.blocks[event.index] = { type: 'text', text: '', jsonbuf: '' });
+  if (delta.type === 'text_delta') {
+    block.text += delta.text;
+    state.text += delta.text;
+    onDelta({ text: delta.text });
+  } else if (delta.type === 'input_json_delta') block.jsonbuf += delta.partial_json;
+}
+
+function processAnthropicLines(state, onDelta) {
+  let newlineIndex;
+  while ((newlineIndex = state.buffer.indexOf('\n')) >= 0) {
+    const line = state.buffer.slice(0, newlineIndex).trim();
+    state.buffer = state.buffer.slice(newlineIndex + 1);
+    if (!line.startsWith('data:')) continue;
+    const data = line.slice(5).trim();
+    if (!data) continue;
+    try { processAnthropicEvent(state, JSON.parse(data), onDelta); }
+    catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+  }
+}
+
+async function readAnthropicStream(response, onDelta, deadline) {
+  const state = { buffer: '', text: '', usage: null, stopReason: null, blocks: [] };
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buf = '';
-  let text = '';
-  let usage = null;
-  let stopReason = null;
-  const blocks = [];
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bump();
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (!data) continue;
-        let j; try { j = JSON.parse(data); } catch { continue; }
-        // A mid-stream error event means the response FAILED — dropping it
-        // presented partial text as a complete answer.
-        if (j.type === 'error') throw new Error(`stream error: ${(j.error && j.error.message) || JSON.stringify(j.error || {}).slice(0, 200)}`);
-        if (j.type === 'message_start' && j.message && j.message.usage) usage = { ...j.message.usage };
-        else if (j.type === 'message_delta') {
-          if (j.usage) usage = { ...(usage || {}), ...j.usage };
-          if (j.delta && j.delta.stop_reason) stopReason = j.delta.stop_reason;
-        }
-        if (j.type === 'content_block_start') { const b = j.content_block || {}; blocks[j.index] = { type: b.type, id: b.id, name: b.name, text: '', jsonbuf: '' }; }
-        else if (j.type === 'content_block_delta') {
-          const d = j.delta || {}; const b = blocks[j.index] || (blocks[j.index] = { type: 'text', text: '', jsonbuf: '' });
-          if (d.type === 'text_delta') { b.text += d.text; text += d.text; onDelta({ text: d.text }); }
-          else if (d.type === 'input_json_delta') { b.jsonbuf += d.partial_json; }
-        }
-      }
-    }
-  } finally { clearTimeout(idle); }
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    deadline.bump();
+    state.buffer += decoder.decode(value, { stream: true });
+    processAnthropicLines(state, onDelta);
+  }
+  return state;
+}
 
-  const content = []; const toolCalls = [];
-  for (const b of blocks) {
+function anthropicStreamResult(state) {
+  const content = [];
+  const toolCalls = [];
+  let malformedToolCalls = 0;
+  for (const b of state.blocks) {
     if (!b) continue;
     if (b.type === 'text') content.push({ type: 'text', text: b.text || '' });
-    else if (b.type === 'tool_use') { let input = {}; try { input = JSON.parse(b.jsonbuf || '{}'); } catch {} content.push({ type: 'tool_use', id: b.id, name: b.name, input }); toolCalls.push({ id: b.id, name: b.name, args: input }); }
+    else if (b.type === 'tool_use') {
+      let input; let valid = true;
+      try { input = JSON.parse(b.jsonbuf || '{}'); }
+      catch { malformedToolCalls += 1; valid = false; input = {}; }
+      content.push({ type: 'tool_use', id: b.id, name: b.name, input });
+      if (valid) toolCalls.push({ id: b.id, name: b.name, args: input });
+    }
   }
-  return { text, toolCalls, assistantRaw: content, usage: normalizeUsage(usage), finishReason: stopReason, truncated: stopReason === 'max_tokens' };
+  const truncated = state.stopReason === 'max_tokens';
+  return { text: state.text, toolCalls: truncated ? [] : toolCalls, assistantRaw: content, usage: normalizeUsage(state.usage), finishReason: state.stopReason, truncated, malformedToolCalls, discardedToolCalls: truncated ? toolCalls.length + malformedToolCalls : malformedToolCalls };
+}
+
+async function streamAnthropic(base, key, body, onDelta, signal, onRetry, timeoutMs = STREAM_TOTAL_TIMEOUT_MS) {
+  const deadline = createStreamDeadline(signal, timeoutMs);
+  try {
+    const response = await connectStream({
+      url: `${base}/v1/messages`,
+      headers: { 'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: { ...body, stream: true }, signal, onRetry, deadline
+    });
+    return anthropicStreamResult(await readAnthropicStream(response, onDelta, deadline));
+  } catch (error) {
+    if (error?.name === 'AbortError') throw signal?.aborted ? providerError(CODES.USER_ABORT, 'stopped by user') : deadline.timeoutError();
+    throw error;
+  } finally { deadline.clear(); }
 }
 
 // Normalize an Anthropic usage object to our shape (best-effort; null if absent).
@@ -181,11 +153,12 @@ function anthropic({ baseUrl, key }) {
   const base = trimSlash(baseUrl);
   return {
     async listModels() {
-      const json = await req(`${base}/v1/models`, { key, timeoutMs: 15000 });
+      const { json } = await req(`${base}/v1/models`, { key, timeoutMs: 15000 });
       const data = Array.isArray(json?.data) ? json.data : [];
       return data.map((m) => m.id).filter(Boolean).sort();
     },
-    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal, onRetry }) {
+    async chat({ model, messages, tools, maxTokens, onDelta, forceTool, signal, onRetry, timeoutMs = STREAM_TOTAL_TIMEOUT_MS }) {
+      timeoutMs = Math.max(30000, Math.min(600000, Number(timeoutMs) || STREAM_TOTAL_TIMEOUT_MS));
       const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || undefined;
       // 8192 default: every current Claude model supports it, and 4096 was
       // silently truncating long reports (now at least visible via truncated).
@@ -196,14 +169,16 @@ function anthropic({ baseUrl, key }) {
         // structured-output call instead of leaving it to the model.
         if (forceTool && tools.length === 1) body.tool_choice = { type: 'tool', name: tools[0].name };
       }
-      if (onDelta) return streamAnthropic(base, key, body, onDelta, signal, onRetry);
-      const json = await withRetry(() => req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs: 300000, signal }), { retries: 3, signal, onRetry });
-      const content = Array.isArray(json?.content) ? json.content : [];
+      if (onDelta) return streamAnthropic(base, key, body, onDelta, signal, onRetry, timeoutMs);
+      const { json, responseMeta } = await withRetry(() => req(`${base}/v1/messages`, { key, method: 'POST', body, timeoutMs, signal }), { retries: CHAT_REQUEST_RETRIES, signal, onRetry });
+      const blockedText = responseMeta.blocked ? (json?.error?.message || responseMeta.message || 'Blocked by the LLM guard') : '';
+      const content = Array.isArray(json?.content) ? json.content : (blockedText ? [{ type: 'text', text: blockedText }] : []);
       const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('');
-      const toolCalls = content.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: b.input || {} }));
-      return { text, toolCalls, assistantRaw: content, raw: json, usage: normalizeUsage(json.usage), finishReason: json.stop_reason || null, truncated: json.stop_reason === 'max_tokens' };
+      const parsedToolCalls = content.filter((b) => b.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: b.input || {} }));
+      const truncated = json.stop_reason === 'max_tokens';
+      return { text, toolCalls: truncated ? [] : parsedToolCalls, assistantRaw: content, raw: json, usage: normalizeUsage(json.usage), finishReason: responseMeta.blocked ? 'content_filter' : (json.stop_reason || null), truncated, discardedToolCalls: truncated ? parsedToolCalls.length : 0, guardMeta: responseMeta };
     }
   };
 }
 
-module.exports = { anthropic };
+module.exports = { anthropic, STREAM_TOTAL_TIMEOUT_MS, CHAT_REQUEST_RETRIES };

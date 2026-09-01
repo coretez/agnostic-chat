@@ -75,6 +75,32 @@ const SELECT_CONTEXT_TOOL = {
   }
 };
 
+const FALLBACK_STOP = new Set(['about', 'after', 'again', 'against', 'also', 'and', 'from', 'have', 'into', 'only', 'produce', 'project', 'report', 'request', 'should', 'that', 'the', 'their', 'then', 'this', 'tool', 'tools', 'use', 'user', 'with']);
+function words(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter((w) => w.length >= 3 && !FALLBACK_STOP.has(w));
+}
+
+// A selector failure must not automatically dump the full MCP catalog into the
+// expensive model. Exact skill/tool names in the request are high-confidence
+// deterministic signals; description overlap is a weaker backstop. If there is
+// no useful lexical signal we still return failure and preserve the old safe
+// full-catalog fallback.
+function deterministicFallback(skills, tools, userText, error) {
+  const normalized = String(userText || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  const requestWords = new Set(words(userText));
+  const score = (item) => {
+    const name = String(item.name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (name && normalized.includes(name)) return 100;
+    const nameHits = words(item.name).filter((w) => requestWords.has(w)).length;
+    const descHits = words(item.description).filter((w) => requestWords.has(w)).length;
+    return (nameHits * 3) + Math.min(descHits, 4);
+  };
+  const chosenSkills = skills.map((item) => ({ item, score: score(item) })).filter((x) => x.score >= 4).sort((a, b) => b.score - a.score).slice(0, 4).map((x) => x.item.name);
+  const chosenTools = tools.map((item) => ({ item, score: score(item) })).filter((x) => x.score >= 6).sort((a, b) => b.score - a.score).slice(0, 24).map((x) => x.item.name);
+  const succeeded = chosenSkills.length > 0 || chosenTools.length > 0;
+  return { skillNames: chosenSkills, toolNames: chosenTools, error, deterministicFallback: succeeded, selectionSucceeded: succeeded };
+}
+
 /**
  * One call that plans both halves of a turn's context: which skills to load
  * in full, which tools to expose. Skips the call entirely if there is
@@ -82,8 +108,46 @@ const SELECT_CONTEXT_TOOL = {
  * degenerate no-op.
  * @returns {Promise<{skillNames:string[], toolNames:string[], error?:string}>}
  */
+async function requestContextSelection(connector, model, messages) {
+  try {
+    return await connector.chat({ model, messages, tools: [SELECT_CONTEXT_TOOL], forceTool: true, maxTokens: 8000 });
+  } catch {
+    return connector.chat({ model, messages, tools: [SELECT_CONTEXT_TOOL], maxTokens: 8000 });
+  }
+}
+
+function parseContextSelection(response) {
+  const call = (response.toolCalls || [])[0];
+  if (call?.args && typeof call.args === 'object') return call.args;
+  const message = response.raw?.choices?.[0]?.message || {};
+  const raw = extractJson(response.text || '') || extractJson(message.reasoning_content || message.reasoning || '');
+  if (!raw) throw new Error('context selector returned no tool call and no parseable JSON');
+  try { return JSON.parse(raw); }
+  catch { throw new Error('context selector JSON parse failed'); }
+}
+
+function matchSelectedNames(parsed, skills, tools) {
+  const requestedSkills = new Set((parsed.skills || []).map((name) => String(name).toLowerCase()));
+  const requestedTools = new Set((parsed.tools || []).map((name) => String(name).toLowerCase()));
+  return {
+    skillNames: skills.filter((skill) => requestedSkills.has(skill.name.toLowerCase())).map((skill) => skill.name),
+    toolNames: tools.filter((tool) => requestedTools.has(tool.name.toLowerCase())).map((tool) => tool.name)
+  };
+}
+
+function selectionMismatches(parsed, matched) {
+  const rawSkillNames = (parsed.skills || []).map(String);
+  const rawToolNames = (parsed.tools || []).map(String);
+  return {
+    skillMismatch: rawSkillNames.length && !matched.skillNames.length
+      ? `named skills ${JSON.stringify(rawSkillNames)} but none matched a known skill name` : undefined,
+    toolMismatch: rawToolNames.length && !matched.toolNames.length
+      ? `named tools ${JSON.stringify(rawToolNames)} but none matched a known tool name` : undefined
+  };
+}
+
 async function selectContext({ connector, model, skills = [], tools = [], userText }) {
-  if (!skills.length && !tools.length) return { skillNames: [], toolNames: [] };
+  if (!skills.length && !tools.length) return { skillNames: [], toolNames: [], selectionSucceeded: true };
   const skillMenu = skills.map(skillLine).join('\n');
   const toolMenu = tools.map(toolLine).join('\n');
   const content = SELECT_PROMPT(skillMenu, toolMenu, userText || '');
@@ -92,52 +156,15 @@ async function selectContext({ connector, model, skills = [], tools = [], userTe
   // either of the two calls this replaced), and a thinking fast-model burns
   // tokens reasoning before it ever emits its answer.
   const messages = [{ role: 'user', content }];
-  let r;
   try {
-    r = await connector.chat({ model, messages, tools: [SELECT_CONTEXT_TOOL], forceTool: true, maxTokens: 8000 });
-  } catch (e) {
-    // Some thinking/reasoning models reject a FORCED tool choice outright
-    // (seen in production: HTTP 400 "tool_choice 'specified' is incompatible
-    // with thinking enabled") — forcing requires disabling their own
-    // reasoning step, which some providers simply won't do. Retry once with
-    // the tool merely OFFERED (tool_choice left to the model) instead of
-    // forced — thinking-compatible, and the model still has every reason to
-    // call the one tool it's given plus the prompt's explicit instruction to.
-    try {
-      r = await connector.chat({ model, messages, tools: [SELECT_CONTEXT_TOOL], maxTokens: 8000 });
-    } catch (e2) {
-      return { skillNames: [], toolNames: [], error: `context selector failed: ${e2.message}` };
-    }
+    const response = await requestContextSelection(connector, model, messages);
+    const parsed = parseContextSelection(response);
+    const matched = matchSelectedNames(parsed, skills, tools);
+    const mismatches = selectionMismatches(parsed, matched);
+    return { ...matched, ...mismatches, selectionSucceeded: !mismatches.skillMismatch && !mismatches.toolMismatch };
+  } catch (error) {
+    return deterministicFallback(skills, tools, userText, `context selector failed: ${error.message}`);
   }
-  const call = (r.toolCalls || [])[0];
-  let parsed = (call && call.args && typeof call.args === 'object') ? call.args : null;
-  if (!parsed) {
-    // Fallback for a connector/provider that didn't honor forced tool-calling
-    // and answered in prose anyway.
-    const msg = r.raw && r.raw.choices && r.raw.choices[0] ? r.raw.choices[0].message || {} : {};
-    const raw = extractJson(r.text || '') || extractJson(msg.reasoning_content || msg.reasoning || '');
-    if (!raw) return { skillNames: [], toolNames: [], error: 'context selector returned no tool call and no parseable JSON' };
-    try { parsed = JSON.parse(raw); } catch { return { skillNames: [], toolNames: [], error: 'context selector JSON parse failed' }; }
-  }
-  const wantSkills = new Set((parsed.skills || []).map((n) => String(n).toLowerCase()));
-  const wantTools = new Set((parsed.tools || []).map((n) => String(n).toLowerCase()));
-  const skillNames = skills.filter((s) => wantSkills.has(s.name.toLowerCase())).map((s) => s.name);
-  const toolNames = tools.filter((t) => wantTools.has(t.name.toLowerCase())).map((t) => t.name);
-
-  // A successful call that named something matching NOTHING we know (typo'd,
-  // paraphrased, wrong id) looks identical from the outside to "the model
-  // deliberately picked none" — both end up 0 loaded — but they have very
-  // different causes. Tracked independently (not one shared field) so a
-  // skill-side mismatch surfaces even when the tool side worked fine, and
-  // vice versa.
-  const rawSkillNames = (parsed.skills || []).map(String);
-  const rawToolNames = (parsed.tools || []).map(String);
-  const skillMismatch = (rawSkillNames.length && !skillNames.length)
-    ? `named skills ${JSON.stringify(rawSkillNames)} but none matched a known skill name` : undefined;
-  const toolMismatch = (rawToolNames.length && !toolNames.length)
-    ? `named tools ${JSON.stringify(rawToolNames)} but none matched a known tool name` : undefined;
-
-  return { skillNames, toolNames, skillMismatch, toolMismatch };
 }
 
 /**
@@ -159,7 +186,7 @@ async function selectContext({ connector, model, skills = [], tools = [], userTe
  *   total-planning-failure path, where correctness should win over economy.
  * @returns {{tools:Array, bySkills:string[]|null, fellBack:boolean}}
  */
-function applyToolCeiling({ loadedSkills = [], toolNames = [], allTools = [], fallbackCap = Infinity }) {
+function applyToolCeiling({ loadedSkills = [], toolNames = [], allTools = [], fallbackCap = Infinity, selectionSucceeded = false }) {
   const wantTools = new Set(toolNames.map((n) => String(n).toLowerCase()));
   let picked = allTools.filter((t) => wantTools.has(t.name.toLowerCase()));
 
@@ -184,7 +211,7 @@ function applyToolCeiling({ loadedSkills = [], toolNames = [], allTools = [], fa
   }
 
   let fellBack = false;
-  if (!picked.length && !bySkills) {
+  if (!picked.length && !bySkills && !selectionSucceeded) {
     // No ceiling to fall back on and nothing picked (call failed / returned
     // nothing parseable / hallucinated names) — no signal to narrow on at all.
     picked = allTools.slice(0, fallbackCap);
@@ -194,4 +221,4 @@ function applyToolCeiling({ loadedSkills = [], toolNames = [], allTools = [], fa
   return { tools: picked, bySkills, fellBack };
 }
 
-module.exports = { selectContext, applyToolCeiling, SELECT_PROMPT, SELECT_CONTEXT_TOOL, truncateForMenu };
+module.exports = { selectContext, applyToolCeiling, SELECT_PROMPT, SELECT_CONTEXT_TOOL, truncateForMenu, deterministicFallback };

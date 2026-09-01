@@ -19,6 +19,8 @@
 //   { name, description, source?, variants: {label: promptText},
 //     predicates: {label: (text) => boolean}, replicates? }
 
+const { liveDbPath } = require('./_app-identity'); // MUST come first — see the file for why
+
 const { app } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
@@ -29,7 +31,7 @@ const DEFAULT_REPLICATES = 3;
 
 /** The provider the app itself is configured with, against a throwaway DB copy. */
 function openConnector(tmp) {
-  const live = path.join(os.homedir(), 'Library/Application Support/agnostic-chat/agnostic-chat.db');
+  const live = liveDbPath();
   fs.copyFileSync(live, path.join(tmp, 'eval.db'));
   require('../src/main/db').openDatabase(path.join(tmp, 'eval.db'));
   const repo = require('../src/main/db/repo');

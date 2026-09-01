@@ -135,46 +135,49 @@ function writeCanonical({ projectId, docsBase, docType, content, source = 'pipel
  * Heals projects created before this structure existed.
  * @returns {string[]} docTypes created this call
  */
+function migrateCanonicalFile(row, absPath, docType) {
+  if (!row?.path || row.path === absPath) return;
+  try {
+    if (fs.existsSync(row.path)) {
+      const oldText = fs.readFileSync(row.path, 'utf8');
+      const canonicalText = fs.existsSync(absPath) ? fs.readFileSync(absPath, 'utf8') : '';
+      if (!canonicalText.trim() || canonicalText === SKELETONS[docType]) {
+        fs.mkdirSync(path.dirname(absPath), { recursive: true });
+        fs.writeFileSync(absPath, oldText, 'utf8');
+      }
+      fs.rmSync(row.path, { force: true });
+    }
+    repo.documents.repath(row.id, absPath);
+  } catch (error) { console.error('[project-docs migrate]', error?.message); }
+}
+
+function createCanonicalFile(absPath, docType) {
+  if (fs.existsSync(absPath)) return false;
+  fs.mkdirSync(path.dirname(absPath), { recursive: true });
+  fs.writeFileSync(absPath, SKELETONS[docType], 'utf8');
+  return true;
+}
+
+function indexCanonicalFile(projectId, row, absPath, docType) {
+  if (row) return;
+  try {
+    repo.documents.saveGenerated({
+      projectId, title: CANONICAL[docType], path: absPath, mimeType: 'text/markdown',
+      source: 'pipeline', docType, version: 1
+    });
+  } catch (error) { console.error('[project-docs ensure]', error?.message); }
+}
+
 function ensureCanonicalDocs({ projectId, docsBase }) {
   const created = [];
   let rows = [];
   try { rows = repo.documents.listByProject(projectId); } catch {}
   for (const docType of Object.keys(CANONICAL)) {
     const absPath = canonicalPath(docsBase, docType);
-    const row = rows.find((r) => r.doc_type === docType);
-
-    // Migration: a canonical row still pointing into the old placement bin —
-    // move its content to the designed location and re-point the index.
-    if (row && row.path && row.path !== absPath) {
-      try {
-        if (fs.existsSync(row.path)) {
-          const oldText = fs.readFileSync(row.path, 'utf8');
-          const canonText = fs.existsSync(absPath) ? fs.readFileSync(absPath, 'utf8') : '';
-          // The old file wins unless the canonical file already has real
-          // content beyond its skeleton.
-          if (!canonText.trim() || canonText === SKELETONS[docType]) {
-            fs.mkdirSync(path.dirname(absPath), { recursive: true });
-            fs.writeFileSync(absPath, oldText, 'utf8');
-          }
-          fs.rmSync(row.path, { force: true });
-        }
-        repo.documents.repath(row.id, absPath);
-      } catch (e) { console.error('[project-docs migrate]', e && e.message); }
-    }
-
-    if (!fs.existsSync(absPath)) {
-      fs.mkdirSync(path.dirname(absPath), { recursive: true });
-      fs.writeFileSync(absPath, SKELETONS[docType], 'utf8');
-      created.push(docType);
-    }
-    if (!row) {
-      try {
-        repo.documents.saveGenerated({
-          projectId, title: CANONICAL[docType], path: absPath, mimeType: 'text/markdown',
-          source: 'pipeline', docType, version: 1
-        });
-      } catch (e) { console.error('[project-docs ensure]', e && e.message); }
-    }
+    const row = rows.find((candidate) => candidate.doc_type === docType);
+    migrateCanonicalFile(row, absPath, docType);
+    if (createCanonicalFile(absPath, docType)) created.push(docType);
+    indexCanonicalFile(projectId, row, absPath, docType);
   }
   return created;
 }

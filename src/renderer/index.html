@@ -70,6 +70,7 @@
           <button class="tab" data-page="documents" type="button">DOCUMENTS</button>
           <button class="tab" data-page="skills" type="button">SKILLS</button>
           <button class="tab" data-page="agents" type="button">AGENTS</button>
+          <button class="tab" data-page="guards" type="button">GUARDS</button>
           <button class="tab" data-page="internals" type="button">INTERNALS</button>
           <div class="spacer"></div>
           <div class="tabbar__note" id="toolbar-note"></div>
@@ -498,6 +499,53 @@
                 <div class="field"><label>Model <span class="opt">optional — defaults to the chat model</span></label><input id="a-model" placeholder="leave blank to inherit the chat model" /></div>
                 <div class="field"><label>Allowed tools <span class="opt">optional — comma-separated tool names; blank = all</span></label><input id="a-tools" placeholder="e.g. fluency__run_report, fluency__list_cases" /></div>
                 <div class="editor__actions"><div class="spacer"></div><button class="btn btn--ghost btn--sm" id="agent-cancel" type="button">CANCEL</button><button class="btn btn--brand btn--sm" id="agent-save" type="button">SAVE</button></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- LLM firewall guards (app-global) -->
+          <section class="page page--scroll" data-page="guards" hidden>
+            <div class="mscreen">
+              <div class="mscreen__head">
+                <div>
+                  <div class="mscreen__title">LLM FIREWALL GUARDS</div>
+                  <div class="mscreen__sub">Optionally route model calls through one trusted guard. Trylon supports Shamrock's OpenAI and Claude connections; unsupported providers fail closed. Audit records contain decisions and timing, never raw prompts or model-response bodies.</div>
+                </div>
+                <div class="spacer"></div>
+                <button class="btn btn--brand btn--sm" id="guard-add" type="button">+ ADD GUARD</button>
+              </div>
+
+              <ul class="connlist" id="guard-list"></ul>
+              <div class="mscreen__empty" id="guard-empty" hidden>No guards configured. Add the local Trylon endpoint to begin.</div>
+
+              <div class="editor" id="guard-editor" hidden>
+                <div class="editor__title" id="guard-editor-title">ADD GUARD</div>
+                <div class="field"><label>Name</label><input id="g-label" placeholder="e.g. Local Trylon" /></div>
+                <div class="field">
+                  <label>Guard type</label>
+                  <select id="g-kind"><option value="trylon">Trylon Gateway</option><option value="openai_proxy">Generic OpenAI-compatible proxy</option></select>
+                </div>
+                <div class="field"><label>OpenAI-compatible base URL</label><input id="g-baseurl" placeholder="http://127.0.0.1:8000/v1" /><div class="field__hint">Shamrock sends /chat/completions beneath this URL. Trylon's local default is http://127.0.0.1:8000/v1.</div></div>
+                <div class="field">
+                  <label>Authentication</label>
+                  <select id="g-auth"><option value="passthrough">Pass the provider API key through</option><option value="bearer">Use a separate guard bearer token</option></select>
+                  <div class="field__hint">Trylon requires passthrough. A generic OpenAI-compatible guard may instead use its own bearer token and upstream credentials.</div>
+                </div>
+                <div class="field" id="g-token-field" hidden><label>Guard bearer token</label><input id="g-token" type="password" placeholder="paste token" /><div class="field__hint" id="g-token-hint">Encrypted in the macOS Keychain and never shown again.</div></div>
+                <div class="editor__actions">
+                  <button class="btn btn--ghost btn--sm" id="guard-test" type="button">TEST CONNECTION</button>
+                  <span class="test-result" id="guard-result"></span>
+                  <div class="spacer"></div>
+                  <button class="btn btn--ghost btn--sm" id="guard-cancel" type="button">CANCEL</button>
+                  <button class="btn btn--brand btn--sm" id="guard-save" type="button">SAVE</button>
+                </div>
+              </div>
+
+              <div class="guard-audit">
+                <div class="guard-audit__head"><span>AUDIT ACTIVITY</span><span class="spacer"></span><button class="conn__btn" id="guard-refresh" type="button">REFRESH</button></div>
+                <div class="guard-stats" id="guard-stats"></div>
+                <ul class="guard-events" id="guard-events"></ul>
+                <div class="mscreen__empty" id="guard-events-empty" hidden>No guarded model calls recorded yet.</div>
               </div>
             </div>
           </section>

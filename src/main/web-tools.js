@@ -138,32 +138,41 @@ async function assertPublicUrl(u) {
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
+async function readCappedBody(response, controller) {
+  const reader = response.body?.getReader?.();
+  if (!reader) return response.text();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(Buffer.from(value));
+    size += value.length;
+    if (size >= MAX_BODY) { controller.abort(); break; }
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function fetchOneHop(url) {
+  await assertPublicUrl(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, redirect: 'manual', signal: controller.signal
+    });
+    return { response, body: REDIRECT_STATUS.has(response.status) ? '' : await readCappedBody(response, controller) };
+  } finally { clearTimeout(timeout); }
+}
+
 async function fetchCapped(url, { maxRedirects = 5 } = {}) {
-  let current = url;
-  for (let hop = 0; ; hop++) {
-    await assertPublicUrl(current);           // every hop re-checked
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    try {
-      const res = await fetch(current, { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, redirect: 'manual', signal: ctrl.signal });
-      if (REDIRECT_STATUS.has(res.status)) {
-        const loc = res.headers.get('location');
-        if (!loc || hop >= maxRedirects) return { status: res.status, body: '' };
-        current = new URL(loc, current).toString();
-        continue;
-      }
-      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
-      if (!reader) return { status: res.status, body: await res.text() };
-      const chunks = [];
-      let size = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value); size += value.length;
-        if (size >= MAX_BODY) { try { ctrl.abort(); } catch {} break; }
-      }
-      return { status: res.status, body: Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8') };
-    } finally { clearTimeout(to); }
+  let currentUrl = url;
+  for (let hop = 0; ; hop += 1) {
+    const { response, body } = await fetchOneHop(currentUrl);
+    if (!REDIRECT_STATUS.has(response.status)) return { status: response.status, body };
+    const location = response.headers.get('location');
+    if (!location || hop >= maxRedirects) return { status: response.status, body: '' };
+    currentUrl = new URL(location, currentUrl).toString();
   }
 }
 

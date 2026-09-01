@@ -85,32 +85,33 @@ async function runLens({ connector, model, lens, goal, files }) {
  *   validated (known files, high/med only), deduped, capped at 6.
  *   Any failure returns {findings: []} — review can never break a turn.
  */
+function acceptedFinding(finding, known) {
+  const severity = String(finding?.severity || 'med').toLowerCase();
+  return !!finding && typeof finding.issue === 'string' && finding.issue.trim()
+    && known.has(finding.file) && ['high', 'med'].includes(severity);
+}
+
+function uniqueFindings(results, known) {
+  const seen = new Set();
+  const findings = [];
+  for (const finding of results.flat()) {
+    if (!acceptedFinding(finding, known)) continue;
+    const key = `${finding.file}|${finding.issue.trim().slice(0, 40).toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    findings.push({ lens: finding.lens, severity: String(finding.severity || 'med').toLowerCase(), file: finding.file, issue: finding.issue.trim(), fix: clip(String(finding.fix || '').trim(), 300) });
+    if (findings.length >= 6) break;
+  }
+  return findings.sort((left, right) => left.severity === right.severity ? 0 : left.severity === 'high' ? -1 : 1);
+}
+
 async function reviewChanges({ connector, model, files = [], goal = '' }) {
   try {
     if (!files.length) return { findings: [] };
-    const known = new Set(files.map((f) => f.path));
-    const results = await Promise.all(
-      Object.keys(LENSES).map((lens) =>
-        runLens({ connector, model, lens, goal, files }).catch(() => []))
-    );
-    const seen = new Set();
-    const findings = [];
-    for (const f of results.flat()) {
-      if (!f || typeof f.issue !== 'string' || !f.issue.trim()) continue;
-      if (!known.has(f.file)) continue;                       // no speculation about unseen files
-      const sev = String(f.severity || 'med').toLowerCase();
-      if (sev !== 'high' && sev !== 'med') continue;          // nits don't earn a fix cycle
-      const key = f.file + '|' + f.issue.trim().slice(0, 40).toLowerCase();
-      if (seen.has(key)) continue;                             // both lenses may spot the same thing
-      seen.add(key);
-      findings.push({ lens: f.lens, severity: sev, file: f.file, issue: f.issue.trim(), fix: clip(String(f.fix || '').trim(), 300) });
-      if (findings.length >= 6) break;
-    }
-    // high before med — if the fix step runs out of budget, it fixes the worst first.
-    findings.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'high' ? -1 : 1));
-    return { findings };
-  } catch (e) {
-    console.error('[review]', e && e.message);
+    const results = await Promise.all(Object.keys(LENSES).map((lens) => runLens({ connector, model, lens, goal, files }).catch(() => [])));
+    return { findings: uniqueFindings(results, new Set(files.map((file) => file.path))) };
+  } catch (error) {
+    console.error('[review]', error && error.message);
     return { findings: [] };
   }
 }

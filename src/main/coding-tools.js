@@ -337,33 +337,40 @@ function listDirTool(jail, args) {
   return { text: out.length ? out.join('\n') : '(empty)' };
 }
 
+function grepMatchesInFile(jail, filePath, expression, output) {
+  let buffer;
+  try {
+    const stats = fs.statSync(filePath);
+    if (stats.size > GREP_FILE_CAP) return;
+    buffer = fs.readFileSync(filePath);
+  } catch { return; }
+  if (isProbablyBinary(buffer)) return;
+  const lines = buffer.toString('utf8').split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!expression.test(lines[index])) continue;
+    output.push(`${jail.display(filePath)}:${index + 1}: ${lines[index].trim().slice(0, 200)}`);
+    if (output.length >= MAX_MATCHES) return;
+  }
+}
+
 function grepFilesTool(jail, args) {
   const base = jail.resolve(args && args.path);
-  let re;
-  try { re = new RegExp(args.pattern); }
-  catch { re = new RegExp(String(args.pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')); }
+  let expression;
+  try { expression = new RegExp(args.pattern); }
+  catch { expression = new RegExp(String(args.pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')); }
   const ext = args && args.ext ? String(args.ext).replace(/^\./, '').toLowerCase() : null;
-  const out = [];
+  const output = [];
   let scanned = 0;
-  for (const f of walkFiles(base, Infinity)) {
-    if (f.dir) continue;
-    if (ext && !f.abs.toLowerCase().endsWith('.' + ext)) continue;
-    let buf;
-    try { const st = fs.statSync(f.abs); if (st.size > GREP_FILE_CAP) continue; buf = fs.readFileSync(f.abs); } catch { continue; }
-    if (isProbablyBinary(buf)) continue;
-    scanned++;
-    const lines = buf.toString('utf8').split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (re.test(lines[i])) {
-        out.push(`${jail.display(f.abs)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
-        if (out.length >= MAX_MATCHES) {
-          out.push(`… [capped at ${MAX_MATCHES} matches — narrow the pattern or path]`);
-          return { text: out.join('\n') };
-        }
-      }
+  for (const file of walkFiles(base, Infinity)) {
+    if (file.dir || (ext && !file.abs.toLowerCase().endsWith('.' + ext))) continue;
+    scanned += 1;
+    grepMatchesInFile(jail, file.abs, expression, output);
+    if (output.length >= MAX_MATCHES) {
+      output.push(`… [capped at ${MAX_MATCHES} matches — narrow the pattern or path]`);
+      break;
     }
   }
-  return { text: out.length ? out.join('\n') : `(no matches in ${scanned} files)` };
+  return { text: output.length ? output.join('\n') : `(no matches in ${scanned} files)` };
 }
 
 // Commands do NOT inherit the app's full environment — the Electron process
@@ -422,6 +429,74 @@ async function runCheckCommand(root, command, extraEnv = {}, timeoutMs = 120000)
  *                                    decided by the caller inside this callback)
  * @returns {{tools:Array, names:Set<string>, call:function}}
  */
+async function handleWriteFile(context, args) {
+  const absolutePath = context.jail.resolve(args.path);
+  const content = String(args.content ?? '');
+  let facts = `new file, ${content.length} chars`;
+  try { facts = `OVERWRITES ${fs.statSync(absolutePath).size} bytes → ${content.length} chars`; } catch {}
+  const head = content.slice(0, 200).trimEnd();
+  const summary = `write_file → ${args.path} (${facts})` + (head ? `\n${head}${content.length > 200 ? '…' : ''}` : '');
+  if (!(await context.gate('write', summary))) return context.denied('this file write');
+  return writeFileTool(context.jail, args);
+}
+
+async function handleEditFile(context, args) {
+  context.jail.resolve(args.path);
+  const clipDiff = (value) => {
+    const text = String(value ?? '');
+    return text.length > 400 ? text.slice(0, 400) + '…' : text;
+  };
+  const summary = `edit_file → ${args.path}${args.replace_all ? ' (all occurrences)' : ''}\n`
+    + clipDiff(args.old_string).split('\n').map((line) => '- ' + line).join('\n') + '\n'
+    + clipDiff(args.new_string).split('\n').map((line) => '+ ' + line).join('\n');
+  if (!(await context.gate('write', summary))) return context.denied('this file edit');
+  return editFileTool(context.jail, args);
+}
+
+async function handleRunCommand(context, args) {
+  const command = String(args.command || '').trim();
+  if (!command) return { text: 'run_command: no command given.', isError: true };
+  if (!(await context.gate('shell', command))) return context.denied('this shell command');
+  const timeoutMs = Math.min(Math.max(Number(args.timeout_seconds) || 60, 1), 300) * 1000;
+  return runCommandTool(context.root, command, timeoutMs, context.buildEnv);
+}
+
+async function handleStartServer(context, args) {
+  const command = String(args.command || '').trim();
+  if (!command) return { text: 'start_server: no command given.', isError: true };
+  if (!(await context.gate('shell', command + '   [long-running server]'))) return context.denied('starting this server');
+  const waitMs = Math.min(Math.max(Number(args.wait_seconds) || 12, 1), 60) * 1000;
+  const result = await devServer.start({
+    projectId: context.projectId, root: context.root, command, env: shellEnv(context.buildEnv), waitMs
+  });
+  const head = result.running
+    ? `Server running${result.url ? ` at ${result.url}` : ''}${result.ready ? ' (ready)' : ' (still starting)'} — it stays up across turns; stop_server ends it.`
+    : `Server exited (code ${result.exitCode})${result.error ? ` — ${result.error}` : ''}.`;
+  return { text: `${head}\n\n${result.logs.join('\n') || '(no output yet)'}`, isError: !result.running };
+}
+
+function handleServerLogs(context, args) {
+  const result = devServer.logs(context.projectId, Number(args.lines) || 60);
+  if (!result.logs.length) return { text: result.running ? '(server running, no output captured yet)' : 'No server is running — start one with start_server.' };
+  return { text: `${result.running ? 'running' : 'stopped'}${result.url ? ` · ${result.url}` : ''}\n\n${result.logs.join('\n')}` };
+}
+
+async function executeCodingTool(context, name, args) {
+  if (name === 'read_file') return readFileTool(context.jail, args);
+  if (name === 'list_dir') return listDirTool(context.jail, args);
+  if (name === 'grep_files') return grepFilesTool(context.jail, args);
+  if (name === 'write_file') return handleWriteFile(context, args);
+  if (name === 'edit_file') return handleEditFile(context, args);
+  if (name === 'run_command') return handleRunCommand(context, args);
+  if (name === 'start_server') return handleStartServer(context, args);
+  if (name === 'server_logs') return handleServerLogs(context, args);
+  if (name === 'stop_server') {
+    const result = devServer.stop(context.projectId);
+    return { text: result.stopped ? `Stopped: ${result.command}` : 'No server was running.' };
+  }
+  return { text: `unknown coding tool: ${name}`, isError: true };
+}
+
 function buildCodingTools({ root, docsRoot, approveAction, buildEnv = {}, projectId = null }) {
   const jail = makeJail([root, docsRoot]);
   const names = new Set(TOOLS.map((t) => t.name));
@@ -432,66 +507,10 @@ function buildCodingTools({ root, docsRoot, approveAction, buildEnv = {}, projec
     isError: true
   });
 
+  const context = { jail, gate, denied, root, buildEnv, projectId };
   async function call(name, args = {}) {
-    try {
-      switch (name) {
-        case 'read_file': return readFileTool(jail, args);
-        case 'list_dir': return listDirTool(jail, args);
-        case 'grep_files': return grepFilesTool(jail, args);
-        case 'write_file': {
-          // Scope check BEFORE bothering the user; the approval shows facts —
-          // new-vs-overwrite, sizes, a content head — not a bare description.
-          const abs = jail.resolve(args.path);
-          const content = String(args.content ?? '');
-          let facts = `new file, ${content.length} chars`;
-          try { const st = fs.statSync(abs); facts = `OVERWRITES ${st.size} bytes → ${content.length} chars`; } catch {}
-          const head = content.slice(0, 200).trimEnd();
-          const summary = `write_file → ${args.path} (${facts})` + (head ? `\n${head}${content.length > 200 ? '…' : ''}` : '');
-          if (!(await gate('write', summary))) return denied('this file write');
-          return writeFileTool(jail, args);
-        }
-        case 'edit_file': {
-          // The approval IS the review: show the actual −/+ change, clipped.
-          jail.resolve(args.path);
-          const dclip = (s) => { const t = String(s ?? ''); return t.length > 400 ? t.slice(0, 400) + '…' : t; };
-          const summary = `edit_file → ${args.path}${args.replace_all ? ' (all occurrences)' : ''}\n`
-            + dclip(args.old_string).split('\n').map((l) => '- ' + l).join('\n') + '\n'
-            + dclip(args.new_string).split('\n').map((l) => '+ ' + l).join('\n');
-          if (!(await gate('write', summary))) return denied('this file edit');
-          return editFileTool(jail, args);
-        }
-        case 'run_command': {
-          const cmd = String(args.command || '').trim();
-          if (!cmd) return { text: 'run_command: no command given.', isError: true };
-          if (!(await gate('shell', cmd))) return denied('this shell command');
-          const timeoutMs = Math.min(Math.max(Number(args.timeout_seconds) || 60, 1), 300) * 1000;
-          return runCommandTool(root, cmd, timeoutMs, buildEnv);
-        }
-        case 'start_server': {
-          const cmd = String(args.command || '').trim();
-          if (!cmd) return { text: 'start_server: no command given.', isError: true };
-          if (!(await gate('shell', cmd + '   [long-running server]'))) return denied('starting this server');
-          const waitMs = Math.min(Math.max(Number(args.wait_seconds) || 12, 1), 60) * 1000;
-          const r = await devServer.start({ projectId, root, command: cmd, env: shellEnv(buildEnv), waitMs });
-          const head = r.running
-            ? `Server running${r.url ? ` at ${r.url}` : ''}${r.ready ? ' (ready)' : ' (still starting)'} — it stays up across turns; stop_server ends it.`
-            : `Server exited (code ${r.exitCode})${r.error ? ` — ${r.error}` : ''}.`;
-          return { text: `${head}\n\n${r.logs.join('\n') || '(no output yet)'}`, isError: !r.running };
-        }
-        case 'server_logs': {
-          const r = devServer.logs(projectId, Number(args.lines) || 60);
-          if (!r.logs.length) return { text: r.running ? '(server running, no output captured yet)' : 'No server is running — start one with start_server.' };
-          return { text: `${r.running ? 'running' : 'stopped'}${r.url ? ` · ${r.url}` : ''}\n\n${r.logs.join('\n')}` };
-        }
-        case 'stop_server': {
-          const r = devServer.stop(projectId);
-          return { text: r.stopped ? `Stopped: ${r.command}` : 'No server was running.' };
-        }
-        default: return { text: `unknown coding tool: ${name}`, isError: true };
-      }
-    } catch (e) {
-      return { text: `${name} failed: ${e.message}`, isError: true };
-    }
+    try { return await executeCodingTool(context, name, args); }
+    catch (error) { return { text: `${name} failed: ${error.message}`, isError: true }; }
   }
 
   return { tools: TOOLS, names, call };
@@ -506,40 +525,51 @@ const LIBRARY_TOOLS = [
   {
     name: 'read_file',
     description:
-      'Read a document from the project document library. Paths are the ones shown in the '
-      + 'PROJECT LIBRARY listing (relative to the library, or absolute inside it). Optional '
+      'Read a document from the project library or inspect a configured project source file read-only. '
+      + 'Paths are the ones shown in the PROJECT LIBRARY or WORKING DIRECTORY listing. Optional '
       + 'offset (1-based start line) and limit (line count) for large files.',
     inputSchema: TOOLS.find((t) => t.name === 'read_file').inputSchema
   },
   {
     name: 'list_dir',
     description:
-      'List folders and documents in the project document library (recursive, shallow by default).',
+      'List folders and files in the project document library or configured read-only source root (recursive, shallow by default).',
     inputSchema: TOOLS.find((t) => t.name === 'list_dir').inputSchema
   },
   {
     name: 'grep_files',
     description:
-      'Search document contents in the project library with a regular expression (falls back to '
+      'Search document or configured project source contents with a regular expression (falls back to '
       + 'a literal search). Returns path:line: text matches.',
     inputSchema: TOOLS.find((t) => t.name === 'grep_files').inputSchema
   }
 ];
 
 /**
- * Build the documents-mode tool pack: reads jailed to the library root.
+ * Build the documents-mode tool pack: reads jailed to the library plus any
+ * explicitly configured project source roots. All hands remain read-only.
  * Reads are level-"free" in the permission hierarchy — no approve callback,
  * because nothing here can mutate. @returns {{tools, names, call}}
  */
-function buildLibraryTools({ root }) {
-  const jail = makeJail([root]);
+function buildLibraryTools({ root, readRoots = [] }) {
+  const jail = makeJail([root, ...readRoots].filter(Boolean));
   const names = new Set(LIBRARY_TOOLS.map((t) => t.name));
+  const resolveRelativeAcrossRoots = (args) => {
+    const next = { ...(args || {}) };
+    const requested = next.path;
+    if (!requested || path.isAbsolute(String(requested))) return next;
+    const primaryCandidate = path.resolve(root, String(requested));
+    if (fs.existsSync(primaryCandidate)) return next;
+    const matches = readRoots.map((base) => path.resolve(base, String(requested))).filter((candidate) => fs.existsSync(candidate));
+    if (matches.length === 1) next.path = matches[0];
+    return next;
+  };
   async function call(name, args = {}) {
     try {
       switch (name) {
-        case 'read_file': return readFileTool(jail, args);
-        case 'list_dir': return listDirTool(jail, args);
-        case 'grep_files': return grepFilesTool(jail, args);
+        case 'read_file': return readFileTool(jail, resolveRelativeAcrossRoots(args));
+        case 'list_dir': return listDirTool(jail, resolveRelativeAcrossRoots(args));
+        case 'grep_files': return grepFilesTool(jail, resolveRelativeAcrossRoots(args));
         default: return { text: `unknown library tool: ${name}`, isError: true };
       }
     } catch (e) {

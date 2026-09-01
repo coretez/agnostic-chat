@@ -167,6 +167,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .conn__status { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); flex: none; }
 .conn__status--ok { background: var(--green); }
 .conn__status--error { background: var(--brand); }
+.conn__status--busy { background: #d49a1f; animation: auth-pulse 1s ease-in-out infinite alternate; }
+@keyframes auth-pulse { from { opacity: .45; } to { opacity: 1; } }
 .conn__info { min-width: 0; }
 .conn__label { font-size: 13px; font-weight: 500; }
 .conn__type { font-family: var(--mono); font-size: 9.5px; color: var(--ink3); text-transform: uppercase; }
@@ -230,6 +232,21 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .test-result--error { color: var(--brand); }
 .btn--ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
 .btn--ghost:hover { border-color: var(--brand); }
+
+/* LLM guard audit — metadata only; no prompt/response bodies are rendered. */
+.guard-audit { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px; }
+.guard-audit__head { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--ink3); margin-bottom: 10px; }
+.guard-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.guard-stat { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 9px 10px; }
+.guard-stat__n { font-family: var(--mono); font-size: 15px; color: var(--ink); }
+.guard-stat__label { font-family: var(--mono); font-size: 8.5px; color: var(--ink3); letter-spacing: 0.6px; margin-top: 3px; }
+.guard-events { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.guard-event { display: grid; grid-template-columns: 78px 82px minmax(100px, 1fr) 80px; gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line2); font-family: var(--mono); font-size: 9.5px; }
+.guard-event:last-child { border-bottom: none; }
+.guard-event__decision { text-transform: uppercase; color: var(--green); }
+.guard-event__decision--blocked, .guard-event__decision--error { color: var(--brand); }
+.guard-event__detail { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guard-event__time, .guard-event__latency { color: var(--ink3); }
 
 .linkbtn { border: none; background: transparent; color: var(--brand); font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.3px; cursor: pointer; padding: 0; margin-left: 6px; }
 .linkbtn:hover { text-decoration: underline; }
@@ -444,6 +461,15 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .turn--setup .turn__body { flex: 1; display: flex; flex-direction: column; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
 .turn--setup .setup__title { font-family: var(--mono); font-size: 9.5px; letter-spacing: 1px; color: var(--ink3); }
 .turn--setup .turn__body > div:not(.setup__title) { font-size: 12.5px; letter-spacing: 0.2px; color: var(--ink2); }
+.turn--security { padding: 8px 14px; }
+.security-card { width: min(760px, 100%); display: flex; gap: 12px; border: 1px solid color-mix(in srgb, var(--brand) 55%, var(--line)); border-left: 4px solid var(--brand); border-radius: 8px; background: color-mix(in srgb, var(--brand) 5%, var(--card)); padding: 14px 16px; box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+.security-card__icon { color: var(--brand); font-size: 17px; padding-top: 1px; }
+.security-card__content { min-width: 0; flex: 1; }
+.security-card__title { font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .8px; color: var(--brand); }
+.security-card__explanation { margin-top: 7px; color: var(--ink); font-size: 13px; line-height: 1.45; }
+.security-card__reason { margin-top: 7px; color: var(--ink2); font-size: 12px; }
+.security-card__meta { margin-top: 8px; color: var(--ink3); font-family: var(--mono); font-size: 8.5px; overflow-wrap: anywhere; }
+.security-card__actions { display: flex; gap: 8px; margin-top: 12px; }
 
 /* Live activity indicator */
 .turn__status { font-family: var(--mono); font-size: 10px; color: var(--ink3); margin-left: 4px; }

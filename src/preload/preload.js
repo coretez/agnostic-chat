@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('api', {
     // Permanent; main confirms before anything is removed.
     delete: (id) => ipcRenderer.invoke('projects:delete', { id }),
     pickWorkingDir: (id) => ipcRenderer.invoke('projects:pickWorkingDir', { id }),
+    setWorkingDir: (id, dir) => ipcRenderer.invoke('projects:setWorkingDir', { id, dir }),
     revealPath: (p) => ipcRenderer.invoke('app:revealPath', p),
     setPreferredModel: (id, model) => ipcRenderer.invoke('projects:setPreferredModel', { id, model }),
     gitStatus: (id) => ipcRenderer.invoke('projects:gitStatus', { id }),
@@ -93,6 +94,13 @@ contextBridge.exposeInMainWorld('api', {
   metrics: {
     listByChat: (chatId) => ipcRenderer.invoke('metrics:listByChat', { chatId }),
     listByProject: (projectId) => ipcRenderer.invoke('metrics:listByProject', { projectId })
+  },
+
+  // Durable workflow recovery. Read-only in the renderer; execution owns all
+  // writes so a page cannot fabricate a completed checkpoint.
+  workflows: {
+    latest: (chatId) => ipcRenderer.invoke('workflows:latest', { chatId }),
+    get: (runId) => ipcRenderer.invoke('workflows:get', { runId })
   },
 
   // Small key/value store; projectId omitted/null = global.
@@ -170,6 +178,17 @@ contextBridge.exposeInMainWorld('api', {
     test: (input) => ipcRenderer.invoke('providers:test', input)
   },
 
+  // Downstream LLM firewall connections. Secrets only travel into main;
+  // list/events return metadata and sanitized audit records.
+  guards: {
+    list: () => ipcRenderer.invoke('guards:list'),
+    add: (input) => ipcRenderer.invoke('guards:add', input),
+    update: (id, patch) => ipcRenderer.invoke('guards:update', { id, patch }),
+    remove: (id) => ipcRenderer.invoke('guards:remove', { id }),
+    test: (input) => ipcRenderer.invoke('guards:test', input),
+    events: (limit = 100) => ipcRenderer.invoke('guards:events', { limit })
+  },
+
   // MCP servers. Metadata only out; env/token only ever sent IN.
   mcp: {
     list: () => ipcRenderer.invoke('mcp:list'),
@@ -178,6 +197,12 @@ contextBridge.exposeInMainWorld('api', {
     remove: (id) => ipcRenderer.invoke('mcp:remove', { id }),
     connect: (input) => ipcRenderer.invoke('mcp:connect', input),
     authorize: (id) => ipcRenderer.invoke('mcp:authorize', { id }),
+    authStatus: (serverId = null) => ipcRenderer.invoke('mcp:authStatus', { serverId }),
+    onAuthStatus: (cb) => {
+      const h = (_e, data) => cb(data);
+      ipcRenderer.on('mcp:auth-status', h);
+      return () => ipcRenderer.removeListener('mcp:auth-status', h);
+    },
     enabledForProject: (projectId) => ipcRenderer.invoke('mcp:enabledForProject', { projectId }),
     setForProject: (input) => ipcRenderer.invoke('mcp:setForProject', input),
     checkSync: (serverId) => ipcRenderer.invoke('mcp:checkSync', { serverId })

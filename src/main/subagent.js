@@ -13,6 +13,13 @@
 const { runChatLoop } = require('./chat-loop');
 const { maybeCompress, contextWindowFor, renderForSummary, SUMMARY_PROMPT, estimateTokens } = require('./compress');
 
+// A focused evidence workflow commonly needs 6-8 ordered tool calls plus one
+// final reasoning pass. Six iterations made those tasks structurally
+// impossible to finish when the model issued one call per round (case
+// investigations exposed this reliably). Keep the cap bounded, but leave
+// enough room for the promised conclusion.
+const SUBAGENT_MAX_ITERS = 10;
+
 const DEFAULT_AGENT = {
   name: 'general',
   system_prompt:
@@ -20,11 +27,43 @@ const DEFAULT_AGENT = {
     + 'isolated context. Use the available tools as needed, then return ONLY a '
     + 'concise, self-contained conclusion — the findings or result the caller '
     + 'needs — not your working notes or raw tool output. Be specific and brief. '
+    + 'When the caller requests an evidence bundle or inputs for a downstream '
+    + 'report, preserve every material count, date/window, category breakdown, '
+    + 'named finding, source status, and explicit data gap needed to draft and '
+    + 'verify that report without repeating your tool calls. Compact does not '
+    + 'mean incomplete. '
     + 'If your findings include concrete identifiers, paths, or parameter values '
     + 'the caller will need for follow-up work, end your conclusion with a fenced '
     + '```json block of flat key/value pairs (e.g. {"case_id": "…"}). Omit the '
     + 'block when there are none.'
 };
+
+function subagentCompactor(connector, model, fastModel) {
+  return async (messages) => {
+    const result = await maybeCompress({
+      messages, contextWindow: contextWindowFor(model),
+      summarize: async (older) => {
+        const response = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 500 });
+        return response.text || '';
+      }
+    });
+    return result.messages;
+  };
+}
+
+function forwardSubagentTools(emit, agentName) {
+  return (event) => {
+    if (!['tool-start', 'tool-end'].includes(event.type)) return;
+    emit({ type: 'process', kind: `subagent-${event.type}`, agent: agentName, name: event.name, ok: event.ok, resultChars: event.resultChars, truncated: event.truncated });
+  };
+}
+
+function subagentResult(result, startedAt) {
+  const conclusion = (result.reply || '').trim();
+  const conclusionTokens = estimateTokens([{ content: conclusion }]);
+  const inputTokens = (result.toolTrace || []).reduce((total, trace) => total + Math.ceil((trace.resultChars || 0) / 4), 0);
+  return { conclusion, conclusionTokens, inputTokens, toolTrace: result.toolTrace, iterations: result.iterations, durationMs: Date.now() - startedAt };
+}
 
 /**
  * Run a delegated task in an isolated sub-thread.
@@ -41,62 +80,22 @@ const DEFAULT_AGENT = {
  */
 async function runSubagent({ connector, model, fastModel, agent, task, tools = [], callTool, onEvent }) {
   const emit = typeof onEvent === 'function' ? onEvent : () => {};
-  const a = agent || DEFAULT_AGENT;
-  const t0 = Date.now();
-  const started = { agent: a.name, task };
+  const selectedAgent = agent || DEFAULT_AGENT;
+  const startedAt = Date.now();
+  const started = { agent: selectedAgent.name, task };
   emit({ type: 'process', kind: 'subagent-start', ...started });
-
   const messages = [
-    { role: 'system', content: a.system_prompt || DEFAULT_AGENT.system_prompt },
+    { role: 'system', content: selectedAgent.system_prompt || DEFAULT_AGENT.system_prompt },
     { role: 'user', content: task }
   ];
-
-  // The sub-agent manages its own context, independent of the parent: the
-  // in-loop compact hook runs the ledger each iteration as tool results
-  // accrete (compressing the two-message seed up front was a no-op — the bulk
-  // arrives DURING the loop).
-  const compact = async (h) => {
-    const out = await maybeCompress({
-      messages: h,
-      contextWindow: contextWindowFor(model),
-      summarize: async (older) => {
-        const r = await connector.chat({ model: fastModel, messages: [{ role: 'user', content: SUMMARY_PROMPT + renderForSummary(older) }], maxTokens: 500 });
-        return r.text || '';
-      }
-    });
-    return out.messages;
-  };
-
   const result = await runChatLoop({
-    chat: (x) => connector.chat(x),
-    callTool,
-    model,
-    messages,
-    tools,
-    maxIters: 6,
-    compact,
-    // Forward only the sub-agent's tool activity; its loop-level model/token/done
-    // events would otherwise collide with the authoritative subagent-done below.
-    onEvent: (ev) => {
-      if (ev.type === 'tool-start' || ev.type === 'tool-end') {
-        emit({ type: 'process', kind: 'subagent-' + ev.type, agent: a.name, name: ev.name, ok: ev.ok, resultChars: ev.resultChars, truncated: ev.truncated });
-      }
-    }
+    chat: (request) => connector.chat(request), callTool, model, messages, tools,
+    maxIters: SUBAGENT_MAX_ITERS, compact: subagentCompactor(connector, model, fastModel),
+    onEvent: forwardSubagentTools(emit, selectedAgent.name)
   });
-
-  const conclusion = (result.reply || '').trim();
-  const conclusionTokens = estimateTokens([{ content: conclusion }]);
-  // Rough tally of what the sub-agent absorbed that the parent DIDN'T have to.
-  const inputTokens = (result.toolTrace || []).reduce((n, t) => n + Math.ceil((t.resultChars || 0) / 4), 0);
-  const durationMs = Date.now() - t0;
-
-  emit({
-    type: 'process', kind: 'subagent-done', agent: a.name,
-    conclusionTokens, inputTokens, iterations: result.iterations,
-    tools: (result.toolTrace || []).length, durationMs
-  });
-
-  return { conclusion, conclusionTokens, inputTokens, toolTrace: result.toolTrace, iterations: result.iterations, durationMs };
+  const summary = subagentResult(result, startedAt);
+  emit({ type: 'process', kind: 'subagent-done', agent: selectedAgent.name, conclusionTokens: summary.conclusionTokens, inputTokens: summary.inputTokens, iterations: summary.iterations, tools: (summary.toolTrace || []).length, durationMs: summary.durationMs });
+  return summary;
 }
 
 /**

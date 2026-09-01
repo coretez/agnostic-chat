@@ -47,6 +47,10 @@ const el = {
   connAdd: $('conn-add'), connTest: $('conn-test'), testResult: $('test-result'),
   connCancel: $('conn-cancel'), connSave: $('conn-save'), modelsDone: $('models-done'),
   modelsHelp: $('models-help'), keyHelp: $('key-help'),
+  guardList: $('guard-list'), guardEmpty: $('guard-empty'), guardEditor: $('guard-editor'), guardEditorTitle: $('guard-editor-title'),
+  guardAdd: $('guard-add'), guardTest: $('guard-test'), guardResult: $('guard-result'), guardCancel: $('guard-cancel'), guardSave: $('guard-save'), guardRefresh: $('guard-refresh'),
+  gLabel: $('g-label'), gKind: $('g-kind'), gBaseurl: $('g-baseurl'), gAuth: $('g-auth'), gTokenField: $('g-token-field'), gToken: $('g-token'), gTokenHint: $('g-token-hint'),
+  guardStats: $('guard-stats'), guardEvents: $('guard-events'), guardEventsEmpty: $('guard-events-empty'),
   help: $('help'), helpTitle: $('help-title'), helpBody: $('help-body'), helpClose: $('help-close'),
   // MCP
   mcpBtn: $('mcp-btn'),
@@ -83,9 +87,10 @@ const state = {
   internalsLens: 'context', // 'context' | 'process' | 'review'
   evaluatorModel: null,     // model id used by the meta-evaluator
   registry: [], providers: [], showAllModels: false,
+  guards: [], guardEvents: [], guardEditing: null,
   skillsAll: [], skillsEnabledIds: new Set(), skillEditing: null, skillsSource: null,
   agents: [], agentEditing: null,
-  mcpServers: [], mcpEditing: null, mcpTransport: 'stdio', mcpTools: null,
+  mcpServers: [], mcpAuth: {}, mcpEditing: null, mcpTransport: 'stdio', mcpTools: null,
   editing: null,            // provider id being edited, or null for new
   editorType: null,         // provider type selected in the editor dropdown
   modelOptions: [],         // model ids offered in the Default-model combobox
@@ -112,6 +117,7 @@ const PAGE_NOTES = {
   internals: () => 'LAST TURN · READ-ONLY',
   agents: () => `${state.agents.length} AGENT${state.agents.length === 1 ? '' : 'S'}`,
   documents: () => `${state.documents.length} DOCUMENTS`,
+  guards: () => state.guards.some((g) => g.enabled) ? 'FIREWALL ON' : 'FIREWALL OFF',
   models: () => `${state.providers.length} CONNECTIONS`
 };
 
@@ -131,46 +137,77 @@ function renderInline(s) {
 function splitRow(line) { return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()); }
 
 // Returns HTML; pushes raw html/svg code blocks into `previews` and leaves a placeholder.
+function fencedMarkdownBlock(lines, index, previews, language) {
+  const buffer = [];
+  let cursor = index + 1;
+  while (cursor < lines.length && !lines[cursor].startsWith('```')) { buffer.push(lines[cursor]); cursor += 1; }
+  const code = buffer.join('\n');
+  const html = /^(html|svg|xml)$/i.test(language)
+    ? `<div class="htmlblock" data-idx="${previews.push(code) - 1}"></div>`
+    : `<pre class="codeblock"><code>${escapeHtml(code)}</code></pre>`;
+  return { html, next: cursor + 1 };
+}
+
+function markdownTableBlock(lines, index) {
+  const header = splitRow(lines[index]);
+  const rows = [];
+  let cursor = index + 2;
+  while (cursor < lines.length && lines[cursor].includes('|') && lines[cursor].trim()) {
+    rows.push(splitRow(lines[cursor])); cursor += 1;
+  }
+  const head = header.map((cell) => `<th>${renderInline(cell)}</th>`).join('');
+  const body = rows.map((row) => '<tr>' + row.map((cell) => `<td>${renderInline(cell)}</td>`).join('') + '</tr>').join('');
+  return { html: `<table class="md-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`, next: cursor };
+}
+
+function markdownRunBlock(lines, index, expression, strip, wrapper) {
+  const values = [];
+  let cursor = index;
+  while (cursor < lines.length && expression.test(lines[cursor])) {
+    values.push(lines[cursor].replace(strip, '')); cursor += 1;
+  }
+  return { html: wrapper(values), next: cursor };
+}
+
+function markdownParagraphBlock(lines, index) {
+  const values = [lines[index]];
+  let cursor = index + 1;
+  const boundary = /^(#{1,6}\s|\s*>|\s*([-*+]|\d+\.)\s|\s*(-{3,}|\*{3,}))/;
+  while (cursor < lines.length && lines[cursor].trim() && !lines[cursor].startsWith('```')
+    && !boundary.test(lines[cursor]) && !lines[cursor].includes('|')) {
+    values.push(lines[cursor]); cursor += 1;
+  }
+  return { html: `<p class="md-p">${renderInline(values.join(' '))}</p>`, next: cursor };
+}
+
+function renderMarkdownList(values, tag) {
+  const items = values.map((item) => '<li>' + renderInline(item) + '</li>').join('');
+  return '<' + tag + ' class="md-list">' + items + '</' + tag + '>';
+}
+
+function renderMarkdownBlock(lines, index, previews) {
+  const line = lines[index];
+  if (line.startsWith('```')) return fencedMarkdownBlock(lines, index, previews, line.slice(3).trim());
+  const heading = line.match(/^(#{1,6})\s+(.*)$/);
+  if (heading) return { html: `<h${heading[1].length} class="md-h">${renderInline(heading[2])}</h${heading[1].length}>`, next: index + 1 };
+  if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return { html: '<hr class="md-hr">', next: index + 1 };
+  if (line.includes('|') && /-/.test(lines[index + 1] || '') && /^\s*\|?[-:\s|]+\|?\s*$/.test(lines[index + 1] || '')) return markdownTableBlock(lines, index);
+  if (/^\s*>\s?/.test(line)) return markdownRunBlock(lines, index, /^\s*>\s?/, /^\s*>\s?/, (values) => `<blockquote class="md-quote">${renderInline(values.join(' '))}</blockquote>`);
+  if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+    const tag = /^\s*\d+\./.test(line) ? 'ol' : 'ul';
+    return markdownRunBlock(lines, index, /^\s*([-*+]|\d+\.)\s+/, /^\s*([-*+]|\d+\.)\s+/, (values) => renderMarkdownList(values, tag));
+  }
+  if (!line.trim()) return { html: '', next: index + 1 };
+  return markdownParagraphBlock(lines, index);
+}
+
 function mdToHtml(md, previews) {
   const lines = String(md).replace(/\r\n/g, '\n').split('\n');
   let html = '';
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = line.match(/^```(\w*)/);
-    if (fence) {
-      const lang = fence[1] || '';
-      const buf = [];
-      i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
-      i++;
-      const code = buf.join('\n');
-      if (/^(html|svg|xml)$/i.test(lang)) { const idx = previews.push(code) - 1; html += `<div class="htmlblock" data-idx="${idx}"></div>`; }
-      else html += `<pre class="codeblock"><code>${escapeHtml(code)}</code></pre>`;
-      continue;
-    }
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { const lvl = h[1].length; html += `<h${lvl} class="md-h">${renderInline(h[2])}</h${lvl}>`; i++; continue; }
-    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { html += '<hr class="md-hr">'; i++; continue; }
-    if (line.includes('|') && i + 1 < lines.length && /-/.test(lines[i + 1]) && /^\s*\|?[-:\s|]+\|?\s*$/.test(lines[i + 1])) {
-      const header = splitRow(line); i += 2;
-      const rows = [];
-      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) { rows.push(splitRow(lines[i])); i++; }
-      html += '<table class="md-table"><thead><tr>' + header.map((c) => `<th>${renderInline(c)}</th>`).join('') + '</tr></thead><tbody>'
-        + rows.map((r) => '<tr>' + r.map((c) => `<td>${renderInline(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
-      continue;
-    }
-    if (/^\s*>\s?/.test(line)) { const buf = []; while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, '')); i++; } html += `<blockquote class="md-quote">${renderInline(buf.join(' '))}</blockquote>`; continue; }
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\./.test(line); const tag = ordered ? 'ol' : 'ul'; const items = [];
-      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, '')); i++; }
-      html += `<${tag} class="md-list">` + items.map((it) => `<li>${renderInline(it)}</li>`).join('') + `</${tag}>`;
-      continue;
-    }
-    if (!line.trim()) { i++; continue; }
-    const buf = [line]; i++;
-    while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*>|\s*([-*+]|\d+\.)\s|\s*(-{3,}|\*{3,}))/.test(lines[i]) && !lines[i].includes('|')) { buf.push(lines[i]); i++; }
-    html += `<p class="md-p">${renderInline(buf.join(' '))}</p>`;
+  for (let index = 0; index < lines.length;) {
+    const rendered = renderMarkdownBlock(lines, index, previews);
+    html += rendered.html;
+    index = rendered.next;
   }
   return html;
 }
@@ -256,50 +293,34 @@ function isMajorModel(m) {
   return !/(exp|preview|beta|nightly|thinking|tuning|latest|vision|embed|-\d{4}$|\d{4}-\d{2}-\d{2})/.test(s);
 }
 
-function buildModelMenu() {
-  el.modelMenu.innerHTML = '';
-  const enabled = state.providers.filter((p) => p.enabled);
-  let any = false;
-  let hiddenCount = 0;
+function modelsVisibleForProvider(provider) {
+  const allModels = providerModels(provider);
+  if (state.showAllModels) return { models: allModels, hidden: 0 };
+  const majorModels = allModels.filter(isMajorModel);
+  let models = (majorModels.length ? majorModels : allModels).slice(0, 8);
+  const selected = state.selected?.providerId === provider.id ? state.selected.model : null;
+  if (selected && allModels.includes(selected) && !models.includes(selected)) models = [selected, ...models];
+  return { models, hidden: allModels.length - models.length };
+}
 
-  for (const p of enabled) {
-    const all = providerModels(p);
-    if (!all.length) continue;
-    let list;
-    if (state.showAllModels) {
-      list = all;
-    } else {
-      const major = all.filter(isMajorModel);
-      list = (major.length ? major : all).slice(0, 8);
-      // Always keep the currently-selected model visible.
-      if (state.selected && state.selected.providerId === p.id && all.includes(state.selected.model) && !list.includes(state.selected.model)) list = [state.selected.model, ...list];
-      hiddenCount += all.length - list.length;
-    }
-    if (!list.length) continue;
-    any = true;
-    const g = document.createElement('div');
-    g.className = 'menu__group';
-    g.textContent = (p.label || p.type).toUpperCase();
-    el.modelMenu.appendChild(g);
-    for (const m of list) {
-      const b = document.createElement('button');
-      b.className = 'menu__item'; b.type = 'button';
-      const on = state.selected && state.selected.providerId === p.id && state.selected.model === m;
-      b.innerHTML = `<span class="tick">${on ? '›' : ''}</span>${escapeHtml(m)}`;
-      b.onclick = () => selectModel(p.id, m);
-      el.modelMenu.appendChild(b);
-    }
+function appendProviderModels(provider, models) {
+  const group = document.createElement('div');
+  group.className = 'menu__group';
+  group.textContent = (provider.label || provider.type).toUpperCase();
+  el.modelMenu.appendChild(group);
+  for (const model of models) {
+    const button = document.createElement('button');
+    button.className = 'menu__item'; button.type = 'button';
+    const selected = state.selected?.providerId === provider.id && state.selected.model === model;
+    button.innerHTML = `<span class="tick">${selected ? '›' : ''}</span>${escapeHtml(model)}`;
+    button.onclick = () => selectModel(provider.id, model);
+    el.modelMenu.appendChild(button);
   }
+}
 
-  if (!any) {
-    const empty = document.createElement('div');
-    empty.className = 'menu__group';
-    empty.textContent = 'NO CONNECTIONS';
-    el.modelMenu.appendChild(empty);
-  }
-
-  const sep = document.createElement('div'); sep.className = 'menu__sep'; el.modelMenu.appendChild(sep);
-  if (any) {
+function appendModelMenuFooter(hasModels, hiddenCount) {
+  const separator = document.createElement('div'); separator.className = 'menu__sep'; el.modelMenu.appendChild(separator);
+  if (hasModels) {
     const toggle = document.createElement('button');
     toggle.className = 'menu__item'; toggle.type = 'button';
     toggle.innerHTML = `<span class="tick">${state.showAllModels ? '☑' : '☐'}</span>Show all models` + (!state.showAllModels && hiddenCount > 0 ? `<span class="menu__meta">+${hiddenCount}</span>` : '');
@@ -311,6 +332,25 @@ function buildModelMenu() {
   manage.innerHTML = '<span class="tick"></span>Manage connections…';
   manage.onclick = () => { toggleModelMenu(false); showModels(); };
   el.modelMenu.appendChild(manage);
+}
+
+function buildModelMenu() {
+  el.modelMenu.innerHTML = '';
+  let providerCount = 0;
+  let hiddenCount = 0;
+  for (const provider of state.providers.filter((candidate) => candidate.enabled)) {
+    const visible = modelsVisibleForProvider(provider);
+    if (!visible.models.length) continue;
+    providerCount += 1;
+    hiddenCount += visible.hidden;
+    appendProviderModels(provider, visible.models);
+  }
+  if (!providerCount) {
+    const empty = document.createElement('div');
+    empty.className = 'menu__group'; empty.textContent = 'NO CONNECTIONS';
+    el.modelMenu.appendChild(empty);
+  }
+  appendModelMenuFooter(providerCount > 0, hiddenCount);
 }
 
 function toggleModelMenu(force) { const show = force ?? el.modelMenu.hidden; if (show) buildModelMenu(); el.modelMenu.hidden = !show; }
@@ -371,6 +411,7 @@ function showPage(page) {
   if (page === 'overview') renderOverview();
   if (page === 'internals') renderInternals();
   if (page === 'documents') renderDocumentsPage();
+  if (page === 'guards') loadGuards();
 }
 function showFirstRun() {
   el.tabbar.hidden = true;
@@ -462,18 +503,19 @@ function archivedProjectRow(p) {
   actions.appendChild(rowButton('✕', 'Delete project permanently', 'rowbtn--danger', () => deleteProject(p)));
   return li;
 }
-function renderOverview() {
-  const p = state.projects.find((x) => x.id === state.currentProjectId);
-  if (!p) return;
-  el.ovName.textContent = (p.name || 'Project').toUpperCase();
-  const dir = p.working_dir;
-  el.ovWdPath.textContent = dir || 'Not set';
-  el.ovWdPath.title = dir || '';
-  el.ovWdPath.classList.toggle('is-empty', !dir);
-  el.ovWdChange.textContent = dir ? 'CHANGE' : 'SET DIRECTORY';
-  el.ovWdReveal.hidden = !dir;
-  updateOutputDir(p);
-  el.ovPrefLabel.textContent = p.preferred_model || 'None';
+function renderOverviewDirectory(project) {
+  const directory = project.working_dir;
+  el.ovName.textContent = (project.name || 'Project').toUpperCase();
+  el.ovWdPath.textContent = directory || 'Not set';
+  el.ovWdPath.title = directory || '';
+  el.ovWdPath.classList.toggle('is-empty', !directory);
+  el.ovWdChange.textContent = directory ? 'CHANGE' : 'SET DIRECTORY';
+  el.ovWdReveal.hidden = !directory;
+  updateOutputDir(project);
+}
+
+function renderOverviewMetrics(project) {
+  el.ovPrefLabel.textContent = project.preferred_model || 'None';
   el.ovModel.textContent = state.selected?.model || '—';
   const activeProvider = state.selected && state.providers.find((x) => x.id === state.selected.providerId);
   el.ovFastLabel.textContent = activeProvider ? (activeProvider.fast_model || 'same as chat model') : '—';
@@ -482,46 +524,61 @@ function renderOverview() {
   el.ovDocs.textContent = state.documents.length;
   el.ovSkills.textContent = state.skills.length;
   el.ovMcp.textContent = state.mcpServers.filter((s) => s.enabled).length;
-  // Only reset the cheat-sheet textarea on an actual project switch — this fn
-  // also re-runs on unrelated state changes (e.g. model switch) while the
-  // overview page is open, and that must not clobber an in-progress edit.
-  if (el.ovCheat.dataset.projectId !== String(p.id)) {
-    el.ovCheat.value = p.cheat_sheet || '';
-    el.ovCheat.dataset.projectId = String(p.id);
+}
+
+function renderOverviewCheatSheet(project) {
+  if (el.ovCheat.dataset.projectId !== String(project.id)) {
+    el.ovCheat.value = project.cheat_sheet || '';
+    el.ovCheat.dataset.projectId = String(project.id);
     el.ovCheatMsg.textContent = '';
   }
+}
+
+function renderOverview() {
+  const project = state.projects.find((candidate) => candidate.id === state.currentProjectId);
+  if (!project) return;
+  renderOverviewDirectory(project);
+  renderOverviewMetrics(project);
+  renderOverviewCheatSheet(project);
   renderOverviewScope();
-  loadBuildEnv(p.id);
-  loadCheckCommand(p.id);
-  loadDocTargets(p.id);
+  loadBuildEnv(project.id);
+  loadCheckCommand(project.id);
+  loadDocTargets(project.id);
   updateModelSwitch();
 }
 // DOCUMENT TARGETS (Overview ↔ chat, either fills them): the format target
 // file, the branding text, and the raw-data (Excel) checkbox.
+function renderFormatTargets(result) {
+  const pathElement = document.getElementById('ov-fmt-path');
+  const selector = document.getElementById('ov-fmt-select');
+  const reveal = document.getElementById('ov-fmt-reveal');
+  pathElement.textContent = result.active || 'None — documents use plain styling';
+  pathElement.title = result.active ? `${result.dir}/${result.active}` : '';
+  pathElement.classList.toggle('is-empty', !result.active);
+  reveal.hidden = !result.active;
+  reveal.dataset.dir = result.dir || '';
+  selector.hidden = result.formats.length < 2;
+  if (result.formats.length >= 2) {
+    selector.innerHTML = result.formats.map((format) => `<option value="${escapeHtml(format)}"${format === result.active ? ' selected' : ''}>${escapeHtml(format)}</option>`).join('');
+  }
+}
+
+async function loadBrandingTarget(projectId, brand, fresh) {
+  if (!fresh) return;
+  try { brand.value = (await window.api.settings.get('output_branding', projectId)) || ''; }
+  catch { brand.value = ''; }
+  brand.dataset.projectId = String(projectId);
+  document.getElementById('ov-brand-msg').textContent = '';
+}
+
 async function loadDocTargets(projectId) {
   const brand = document.getElementById('ov-brand');
   if (!brand) return;
   const fresh = brand.dataset.projectId !== String(projectId);
   try {
-    const r = await window.api.documents.listFormats(projectId);
-    const pathEl = document.getElementById('ov-fmt-path');
-    const sel = document.getElementById('ov-fmt-select');
-    const reveal = document.getElementById('ov-fmt-reveal');
-    pathEl.textContent = r.active || 'None — documents use plain styling';
-    pathEl.title = r.active ? `${r.dir}/${r.active}` : '';
-    pathEl.classList.toggle('is-empty', !r.active);
-    reveal.hidden = !r.active;
-    reveal.dataset.dir = r.dir || '';
-    sel.hidden = r.formats.length < 2;
-    if (r.formats.length >= 2) {
-      sel.innerHTML = r.formats.map((f) => `<option value="${escapeHtml(f)}"${f === r.active ? ' selected' : ''}>${escapeHtml(f)}</option>`).join('');
-    }
+    renderFormatTargets(await window.api.documents.listFormats(projectId));
   } catch {}
-  if (fresh) {
-    try { brand.value = (await window.api.settings.get('output_branding', projectId)) || ''; } catch { brand.value = ''; }
-    brand.dataset.projectId = String(projectId);
-    document.getElementById('ov-brand-msg').textContent = '';
-  }
+  await loadBrandingTarget(projectId, brand, fresh);
   try { document.getElementById('ov-rawdata').checked = (await window.api.settings.get('output_rawdata', projectId)) === '1'; } catch {}
 }
 document.getElementById('ov-fmt-add').onclick = async () => {
@@ -635,33 +692,33 @@ async function saveCheatSheet() {
   setTimeout(() => { if (el.ovCheatMsg.textContent === 'saved') el.ovCheatMsg.textContent = ''; }, 1500);
 }
 
+function appendMenuChoice(menu, label, selected, onSelect) {
+  const button = document.createElement('button');
+  button.className = 'menu__item'; button.type = 'button';
+  button.innerHTML = `<span class="tick">${selected ? '›' : ''}</span>${escapeHtml(label)}`;
+  button.onclick = onSelect;
+  menu.appendChild(button);
+}
+
+function appendMenuGroup(menu, label) {
+  const group = document.createElement('div');
+  group.className = 'menu__group'; group.textContent = label;
+  menu.appendChild(group);
+}
+
 function buildPrefMenu() {
   el.ovPrefMenu.innerHTML = '';
   const proj = state.projects.find((p) => p.id === state.currentProjectId);
   const cur = proj && proj.preferred_model;
-
-  const none = document.createElement('button');
-  none.className = 'menu__item'; none.type = 'button';
-  none.innerHTML = `<span class="tick">${!cur ? '›' : ''}</span>None`;
-  none.onclick = () => setPreferred(null);
-  el.ovPrefMenu.appendChild(none);
-
-  for (const p of state.providers.filter((x) => x.enabled)) {
-    const all = providerModels(p);
+  appendMenuChoice(el.ovPrefMenu, 'None', !cur, () => setPreferred(null));
+  for (const provider of state.providers.filter((candidate) => candidate.enabled)) {
+    const all = providerModels(provider);
     if (!all.length) continue;
     const major = all.filter(isMajorModel);
     let list = (major.length ? major : all).slice(0, 8);
     if (cur && all.includes(cur) && !list.includes(cur)) list = [cur, ...list];
-    const g = document.createElement('div');
-    g.className = 'menu__group'; g.textContent = (p.label || p.type).toUpperCase();
-    el.ovPrefMenu.appendChild(g);
-    for (const m of list) {
-      const b = document.createElement('button');
-      b.className = 'menu__item'; b.type = 'button';
-      b.innerHTML = `<span class="tick">${cur === m ? '›' : ''}</span>${escapeHtml(m)}`;
-      b.onclick = () => setPreferred(m);
-      el.ovPrefMenu.appendChild(b);
-    }
+    appendMenuGroup(el.ovPrefMenu, (provider.label || provider.type).toUpperCase());
+    for (const model of list) appendMenuChoice(el.ovPrefMenu, model, cur === model, () => setPreferred(model));
   }
 }
 
@@ -685,26 +742,13 @@ function buildFastMenu() {
   if (!p) return;
   const cur = p.fast_model || null;
 
-  const none = document.createElement('button');
-  none.className = 'menu__item'; none.type = 'button';
-  none.innerHTML = `<span class="tick">${!cur ? '›' : ''}</span>Same as chat model`;
-  none.onclick = () => setFastModel(p.id, null);
-  el.ovFastMenu.appendChild(none);
-
+  appendMenuChoice(el.ovFastMenu, 'Same as chat model', !cur, () => setFastModel(p.id, null));
   const all = providerModels(p);
   const fast = all.filter(looksLikeFastModel);
   const list = fast.length ? fast : all;
   if (list.length) {
-    const g = document.createElement('div');
-    g.className = 'menu__group'; g.textContent = (p.label || p.type).toUpperCase() + (fast.length ? '' : ' · no obviously-fast id found, showing all');
-    el.ovFastMenu.appendChild(g);
-    for (const m of list) {
-      const b = document.createElement('button');
-      b.className = 'menu__item'; b.type = 'button';
-      b.innerHTML = `<span class="tick">${cur === m ? '›' : ''}</span>${escapeHtml(m)}`;
-      b.onclick = () => setFastModel(p.id, m);
-      el.ovFastMenu.appendChild(b);
-    }
+    appendMenuGroup(el.ovFastMenu, (p.label || p.type).toUpperCase() + (fast.length ? '' : ' · no obviously-fast id found, showing all'));
+    for (const model of list) appendMenuChoice(el.ovFastMenu, model, cur === model, () => setFastModel(p.id, model));
   }
 }
 
@@ -860,37 +904,42 @@ async function refreshScope() {
   updateComposerMeta();
 }
 
-// Interactive scoping — lives on the project OVERVIEW page.
-function renderOverviewScope() {
-  const pid = state.currentProjectId;
-  const g = (id) => document.getElementById(id);
-  if (!g('ov-skills-list')) return;
-
+function renderOverviewSkills(pid, getElement) {
   const allSkills = state.skillsAll || [];
   const enabledIds = state.skillsEnabledIds || new Set();
-  g('ov-skills-head').textContent = `SKILLS · ${enabledIds.size}/${allSkills.length} IN SCOPE`;
-  const skl = g('ov-skills-list'); skl.innerHTML = '';
-  g('ov-skills-empty').hidden = allSkills.length > 0;
-  for (const s of allSkills) {
-    const on = enabledIds.has(s.id);
-    skl.appendChild(scopeRow({
-      label: s.name, sub: null, on,
-      onToggle: async () => { if (!pid) return; await window.api.skills.setForProject({ projectId: pid, skillId: s.id, enabled: !on }); refreshScope(); }
+  getElement('ov-skills-head').textContent = `SKILLS · ${enabledIds.size}/${allSkills.length} IN SCOPE`;
+  const list = getElement('ov-skills-list'); list.innerHTML = '';
+  getElement('ov-skills-empty').hidden = allSkills.length > 0;
+  for (const skill of allSkills) {
+    const enabled = enabledIds.has(skill.id);
+    list.appendChild(scopeRow({
+      label: skill.name, sub: null, on: enabled,
+      onToggle: async () => { if (pid) { await window.api.skills.setForProject({ projectId: pid, skillId: skill.id, enabled: !enabled }); refreshScope(); } }
     }));
   }
+}
 
+function renderOverviewMcp(pid, getElement) {
   const servers = state.mcpServers.filter((s) => s.enabled);
   const mcpIds = state.projectMcpIds || new Set(servers.map((s) => s.id));
-  g('ov-mcp-head').textContent = `MCP CONNECTORS · ${servers.filter((s) => mcpIds.has(s.id)).length}/${servers.length} IN SCOPE`;
-  const ml = g('ov-mcp-list'); ml.innerHTML = '';
-  g('ov-mcp-empty').hidden = servers.length > 0;
-  for (const s of servers) {
-    const on = mcpIds.has(s.id);
-    ml.appendChild(scopeRow({
-      label: s.name, sub: `${s.transport} · ${(s.tools || []).length} tools · ${s.status || 'untested'}`, on,
-      onToggle: async () => { if (!pid) return; await window.api.mcp.setForProject({ projectId: pid, serverId: s.id, enabled: !on }); refreshScope(); }
+  getElement('ov-mcp-head').textContent = `MCP CONNECTORS · ${servers.filter((server) => mcpIds.has(server.id)).length}/${servers.length} IN SCOPE`;
+  const list = getElement('ov-mcp-list'); list.innerHTML = '';
+  getElement('ov-mcp-empty').hidden = servers.length > 0;
+  for (const server of servers) {
+    const enabled = mcpIds.has(server.id);
+    list.appendChild(scopeRow({
+      label: server.name, sub: `${server.transport} · ${(server.tools || []).length} tools · ${server.status || 'untested'}`, on: enabled,
+      onToggle: async () => { if (pid) { await window.api.mcp.setForProject({ projectId: pid, serverId: server.id, enabled: !enabled }); refreshScope(); } }
     }));
   }
+}
+
+// Interactive scoping — lives on the project OVERVIEW page.
+function renderOverviewScope() {
+  const getElement = (id) => document.getElementById(id);
+  if (!getElement('ov-skills-list')) return;
+  renderOverviewSkills(state.currentProjectId, getElement);
+  renderOverviewMcp(state.currentProjectId, getElement);
 }
 
 // ── DOCUMENTS page: the project library (canonical docs + deliverables) ────
@@ -1021,139 +1070,161 @@ function toggleLibraryTag(t) {
 }
 const hasTag = (item, key) => (item.tags || []).some((t) => `${t.facet}:${t.slug}` === key);
 
-async function renderDocumentsPage() {
-  if (!state.currentProjectId) return;
-  try { state.documents = await window.api.documents.list(state.currentProjectId); } catch {}
-  try { state.libraryTags = await window.api.library.tags(state.currentProjectId); } catch { state.libraryTags = []; }
-  const g = (id) => document.getElementById(id);
-  const canonUl = g('docs-canonical'), otherUl = g('docs-other');
-  if (!canonUl) return;
-  canonUl.innerHTML = ''; otherUl.innerHTML = '';
-  const canonTypes = new Set(DOC_CANON.map((c) => c.type));
-
-  // Tag filter bar — the project's whole vocabulary, grouped by facet.
-  const bar = g('library-filter');
-  if (bar) {
-    bar.innerHTML = '';
-    const used = (state.libraryTags || []).filter((t) => (t.doc_count || 0) + (t.chat_count || 0) > 0);
-    bar.hidden = used.length === 0;
-    let lastFacet = null;
-    for (const t of used) {
-      if (t.facet !== lastFacet) {
-        const lab = document.createElement('span'); lab.className = 'libfilter__facet'; lab.textContent = t.facet.toUpperCase();
-        bar.appendChild(lab); lastFacet = t.facet;
-      }
-      bar.appendChild(tagChips([t]).firstChild);
+function renderLibraryTagFilter(getElement) {
+  const bar = getElement('library-filter');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const used = (state.libraryTags || []).filter((tag) => (tag.doc_count || 0) + (tag.chat_count || 0) > 0);
+  bar.hidden = used.length === 0;
+  let lastFacet = null;
+  for (const tag of used) {
+    if (tag.facet !== lastFacet) {
+      const label = document.createElement('span'); label.className = 'libfilter__facet'; label.textContent = tag.facet.toUpperCase();
+      bar.appendChild(label); lastFacet = tag.facet;
     }
-    if (state.libraryTag) {
-      const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'tagchip tagchip--clear'; clear.textContent = '✕ clear filter';
-      clear.onclick = () => { state.libraryTag = null; renderDocumentsPage(); renderChats(); };
-      bar.appendChild(clear);
-    }
+    bar.appendChild(tagChips([tag]).firstChild);
   }
-
-  const row = (d, sub) => {
-    const li = document.createElement('li'); li.className = 'conn';
-    const when = (d.updated_at || d.created_at || '').slice(0, 16);
-    li.innerHTML = `
-      <span class="conn__status${canonTypes.has(d.doc_type) ? ' conn__status--ok' : ''}"></span>
-      <div class="conn__info"><div class="conn__label">${escapeHtml(d.title)}</div><div class="conn__type">${escapeHtml(d.doc_type || d.source || 'doc')}</div></div>
-      <div class="conn__mid"><div class="conn__url">${escapeHtml(sub || d.path || '')}</div><div class="conn__meta">v${d.version || 1}${when ? ' · ' + escapeHtml(when) : ''}</div></div>
-      <div class="conn__actions"></div>`;
-    if (d.tags && d.tags.length) li.querySelector('.conn__info').appendChild(tagChips(d.tags));
-    const actions = li.querySelector('.conn__actions');
-    const view = document.createElement('button'); view.className = 'conn__btn'; view.textContent = 'VIEW';
-    view.onclick = async () => {
-      const r = await window.api.documents.read(d.id);
-      if (r && r.error) { g('doc-reader-title').textContent = d.title; g('doc-reader-body').textContent = r.error; g('doc-reader').hidden = false; return; }
-      // Render by TYPE, not by hoping everything is text. A PDF opens in the
-      // panel's PDF viewer; a spreadsheet or image says what it is and offers
-      // Finder. Only actual text falls through to the markdown reader.
-      // A PDF opens in its own window. The artifact <webview> cannot render
-      // PDFs (measured: a captured frame held 9 distinct colours — blank),
-      // which is what the black screen was.
-      if (r.pdfPath && /pdf/i.test(r.mime || '')) {
-        const o = await window.api.documents.openPdf(d.id);
-        if (o && o.error) {
-          g('doc-reader-title').textContent = d.title;
-          g('doc-reader-body').textContent = o.error;
-          g('doc-reader').hidden = false;
-        }
-        return;
-      }
-      if (r.binary) {
-        const kb = Math.max(1, Math.round((r.bytes || 0) / 1024));
-        g('doc-reader-title').textContent = `${d.title} · v${d.version || 1}`;
-        g('doc-reader-body').innerHTML = `<p><b>${escapeHtml(String(r.mime || 'binary file'))}</b> · ${kb} KB</p>`
-          + '<p>There is no in-app viewer for this type yet. Use FINDER to open it in the app that owns it.</p>';
-        g('doc-reader').hidden = false;
-        g('doc-reader').scrollIntoView({ block: 'nearest' });
-        return;
-      }
-      if (/html/.test(r.mime || '')) { openArtifact(r.content, d.title); return; }
-      g('doc-reader-title').textContent = `${d.title} · v${d.version || 1}`;
-      g('doc-reader-body').innerHTML = mdToHtml(r.content || '(empty)', []);
-      g('doc-reader').hidden = false;
-      g('doc-reader').scrollIntoView({ block: 'nearest' });
-    };
-    actions.appendChild(view);
-    if (d.path) {
-      const rev = document.createElement('button'); rev.className = 'conn__btn'; rev.textContent = 'FINDER';
-      rev.onclick = () => window.api.projects.revealPath(d.path);
-      actions.appendChild(rev);
-    }
-    return li;
-  };
-
-  // Canonical docs in their designed order, with their role as the subtitle.
-  let canonCount = 0;
-  for (const c of DOC_CANON) {
-    const d = state.documents.find((x) => x.doc_type === c.type);
-    if (d) { canonUl.appendChild(row(d, c.sub)); canonCount += 1; }
-  }
-  setDocTabCount('canonical', canonCount);
-  // Everything else: deliverables, uploads, user docs — filtered by the
-  // selected tag, then organized per the current view.
-  const pool = state.documents.filter((d) => !canonTypes.has(d.doc_type));
-  setDocTabCount('library', pool.length);
-  setDocTab(state.docTab);
-  renderFacetRail(pool);
-  renderFacetChips(pool);
-  const others = pool.filter((d) => matchesFacets(d));
-  g('docs-other-empty').hidden = others.length > 0;
-
-  const groupHeader = (label) => {
-    const h = document.createElement('li'); h.className = 'libgroup'; h.textContent = label;
-    return h;
-  };
-  if (state.libraryView === 'recency' || !others.length) {
-    for (const d of others) otherUl.appendChild(row(d));
-  } else if (state.libraryView === 'kind') {
-    const byKind = new Map();
-    for (const d of others) { const k = d.doc_type || d.source || 'other'; (byKind.get(k) || byKind.set(k, []).get(k)).push(d); }
-    for (const [k, list] of [...byKind.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      otherUl.appendChild(groupHeader(k.toUpperCase()));
-      for (const d of list) otherUl.appendChild(row(d));
-    }
-  } else {
-    // entity / topic: group by that facet's tags; untagged docs sink to the end.
-    const facet = state.libraryView;
-    const byTag = new Map(); const untagged = [];
-    for (const d of others) {
-      const ts = (d.tags || []).filter((t) => t.facet === facet);
-      if (!ts.length) { untagged.push(d); continue; }
-      for (const t of ts) (byTag.get(t.name) || byTag.set(t.name, []).get(t.name)).push(d);
-    }
-    for (const [name, list] of [...byTag.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      otherUl.appendChild(groupHeader(`${facet.toUpperCase()}: ${name}`));
-      for (const d of list) otherUl.appendChild(row(d));
-    }
-    if (untagged.length) {
-      otherUl.appendChild(groupHeader(`(no ${facet} tag)`));
-      for (const d of untagged) otherUl.appendChild(row(d));
-    }
+  if (state.libraryTag) {
+    const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'tagchip tagchip--clear'; clear.textContent = '✕ clear filter';
+    clear.onclick = () => { state.libraryTag = null; renderDocumentsPage(); renderChats(); };
+    bar.appendChild(clear);
   }
 }
+
+function showDocumentReader(getElement, documentRow, content, html = false) {
+  getElement('doc-reader-title').textContent = `${documentRow.title} · v${documentRow.version || 1}`;
+  if (html) getElement('doc-reader-body').innerHTML = content;
+  else getElement('doc-reader-body').textContent = content;
+  getElement('doc-reader').hidden = false;
+  getElement('doc-reader').scrollIntoView({ block: 'nearest' });
+}
+
+async function viewDocument(getElement, documentRow) {
+  const result = await window.api.documents.read(documentRow.id);
+  if (result?.error) { showDocumentReader(getElement, documentRow, result.error); return; }
+  if (result.pdfPath && /pdf/i.test(result.mime || '')) {
+    const opened = await window.api.documents.openPdf(documentRow.id);
+    if (opened?.error) showDocumentReader(getElement, documentRow, opened.error);
+    return;
+  }
+  if (result.binary) {
+    const kilobytes = Math.max(1, Math.round((result.bytes || 0) / 1024));
+    const message = `<p><b>${escapeHtml(String(result.mime || 'binary file'))}</b> · ${kilobytes} KB</p><p>There is no in-app viewer for this type yet. Use FINDER to open it in the app that owns it.</p>`;
+    showDocumentReader(getElement, documentRow, message, true);
+    return;
+  }
+  if (/html/.test(result.mime || '')) { openArtifact(result.content, documentRow.title); return; }
+  showDocumentReader(getElement, documentRow, mdToHtml(result.content || '(empty)', []), true);
+}
+
+function documentLibraryRow(getElement, canonicalTypes, documentRow, subtitle) {
+  const listItem = document.createElement('li'); listItem.className = 'conn';
+  const updated = (documentRow.updated_at || documentRow.created_at || '').slice(0, 16);
+  listItem.innerHTML = `<span class="conn__status${canonicalTypes.has(documentRow.doc_type) ? ' conn__status--ok' : ''}"></span>
+    <div class="conn__info"><div class="conn__label">${escapeHtml(documentRow.title)}</div><div class="conn__type">${escapeHtml(documentRow.doc_type || documentRow.source || 'doc')}</div></div>
+    <div class="conn__mid"><div class="conn__url">${escapeHtml(subtitle || documentRow.path || '')}</div><div class="conn__meta">v${documentRow.version || 1}${updated ? ' · ' + escapeHtml(updated) : ''}</div></div><div class="conn__actions"></div>`;
+  if (documentRow.tags?.length) listItem.querySelector('.conn__info').appendChild(tagChips(documentRow.tags));
+  const actions = listItem.querySelector('.conn__actions');
+  const view = document.createElement('button'); view.className = 'conn__btn'; view.textContent = 'VIEW';
+  view.onclick = () => viewDocument(getElement, documentRow); actions.appendChild(view);
+  if (documentRow.path) {
+    const reveal = document.createElement('button'); reveal.className = 'conn__btn'; reveal.textContent = 'FINDER';
+    reveal.onclick = () => window.api.projects.revealPath(documentRow.path); actions.appendChild(reveal);
+  }
+  return listItem;
+}
+
+function documentGroupHeader(label) {
+  const header = document.createElement('li'); header.className = 'libgroup'; header.textContent = label;
+  return header;
+}
+
+function renderGroupedDocuments(otherList, documents, facet, createRow) {
+  const grouped = new Map(); const untagged = [];
+  for (const documentRow of documents) {
+    const tags = facet === 'kind' ? [{ name: documentRow.doc_type || documentRow.source || 'other' }]
+      : (documentRow.tags || []).filter((tag) => tag.facet === facet);
+    if (!tags.length) { untagged.push(documentRow); continue; }
+    for (const tag of tags) (grouped.get(tag.name) || grouped.set(tag.name, []).get(tag.name)).push(documentRow);
+  }
+  for (const [name, rows] of [...grouped.entries()].sort((left, right) => left[0].localeCompare(right[0]))) {
+    otherList.appendChild(documentGroupHeader(facet === 'kind' ? name.toUpperCase() : `${facet.toUpperCase()}: ${name}`));
+    for (const row of rows) otherList.appendChild(createRow(row));
+  }
+  if (untagged.length) {
+    otherList.appendChild(documentGroupHeader(`(no ${facet} tag)`));
+    for (const row of untagged) otherList.appendChild(createRow(row));
+  }
+}
+
+async function loadDocumentPageState(projectId) {
+  try { state.documents = await window.api.documents.list(projectId); } catch {}
+  try { state.libraryTags = await window.api.library.tags(projectId); }
+  catch { state.libraryTags = []; }
+}
+
+function renderCanonicalDocumentList(canonicalList, createRow) {
+  let canonicalCount = 0;
+  for (const canonical of DOC_CANON) {
+    const documentRow = state.documents.find((candidate) => candidate.doc_type === canonical.type);
+    if (!documentRow) continue;
+    canonicalList.appendChild(createRow(documentRow, canonical.sub));
+    canonicalCount += 1;
+  }
+  setDocTabCount('canonical', canonicalCount);
+}
+
+function renderOtherDocumentList(otherList, pool, createRow, getElement) {
+  renderFacetRail(pool);
+  renderFacetChips(pool);
+  const documents = pool.filter((documentRow) => matchesFacets(documentRow));
+  getElement('docs-other-empty').hidden = documents.length > 0;
+  if (state.libraryView === 'recency' || !documents.length) {
+    for (const documentRow of documents) otherList.appendChild(createRow(documentRow));
+  } else renderGroupedDocuments(otherList, documents, state.libraryView, createRow);
+}
+
+async function renderDocumentsPage() {
+  if (!state.currentProjectId) return;
+  await loadDocumentPageState(state.currentProjectId);
+  const getElement = (id) => document.getElementById(id);
+  const canonicalList = getElement('docs-canonical'), otherList = getElement('docs-other');
+  if (!canonicalList) return;
+  canonicalList.innerHTML = ''; otherList.innerHTML = '';
+  const canonicalTypes = new Set(DOC_CANON.map((documentType) => documentType.type));
+  renderLibraryTagFilter(getElement);
+  const createRow = (documentRow, subtitle) => documentLibraryRow(getElement, canonicalTypes, documentRow, subtitle);
+  renderCanonicalDocumentList(canonicalList, createRow);
+  const pool = state.documents.filter((documentRow) => !canonicalTypes.has(documentRow.doc_type));
+  setDocTabCount('library', pool.length);
+  setDocTab(state.docTab);
+  renderOtherDocumentList(otherList, pool, createRow, getElement);
+}
+function facetHeader(key, label) {
+  const header = document.createElement('div'); header.className = 'facet__h';
+  header.innerHTML = `<span class="facet__lbl">${escapeHtml(label)}</span>`;
+  if (!state.facets[key].size) return header;
+  const clear = document.createElement('button');
+  clear.type = 'button'; clear.className = 'facet__clr'; clear.textContent = 'clear';
+  clear.onclick = () => {
+    state.facets[key].clear();
+    if (key === 'topic') { state.libraryTag = null; renderChats(); }
+    renderDocumentsPage();
+  };
+  header.appendChild(clear);
+  return header;
+}
+
+function facetValueButton(key, label, value, count) {
+  const selected = state.facets[key].has(value);
+  const button = document.createElement('button'); button.type = 'button';
+  button.className = 'fv' + (selected ? ' fv--on' : '') + (!count && !selected ? ' fv--zero' : '');
+  button.innerHTML = `<i class="fv__box"></i><span class="fv__v">${escapeHtml(String(value))}</span><span class="fv__n">${count}</span>`;
+  button.title = `${label}: ${value} — ${count} document${count === 1 ? '' : 's'}`;
+  button.onclick = () => toggleFacet(key, value);
+  return button;
+}
+
 /** The facet rail: every dimension, every value, with live counts. */
 function renderFacetRail(pool) {
   const rail = document.getElementById('library-facets');
@@ -1163,25 +1234,8 @@ function renderFacetRail(pool) {
     const values = facetCounts(pool, key);
     if (!values.length) continue;
     const box = document.createElement('div'); box.className = 'facet';
-    const head = document.createElement('div'); head.className = 'facet__h';
-    head.innerHTML = `<span class="facet__lbl">${escapeHtml(label)}</span>`;
-    if (state.facets[key].size) {
-      const clr = document.createElement('button');
-      clr.type = 'button'; clr.className = 'facet__clr'; clr.textContent = 'clear';
-      clr.onclick = () => { state.facets[key].clear(); if (key === 'topic') { state.libraryTag = null; renderChats(); } renderDocumentsPage(); };
-      head.appendChild(clr);
-    }
-    box.appendChild(head);
-    for (const [value, n] of values) {
-      const on = state.facets[key].has(value);
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'fv' + (on ? ' fv--on' : '') + (!n && !on ? ' fv--zero' : '');
-      b.innerHTML = `<i class="fv__box"></i><span class="fv__v">${escapeHtml(String(value))}</span><span class="fv__n">${n}</span>`;
-      b.title = `${label}: ${value} — ${n} document${n === 1 ? '' : 's'}`;
-      b.onclick = () => toggleFacet(key, value);
-      box.appendChild(b);
-    }
+    box.appendChild(facetHeader(key, label));
+    for (const [value, count] of values) box.appendChild(facetValueButton(key, label, value, count));
     rail.appendChild(box);
   }
 }
@@ -1240,6 +1294,39 @@ document.getElementById('docs-reveal').onclick = async () => {
 document.getElementById('doc-reader-close').onclick = () => { document.getElementById('doc-reader').hidden = true; };
 
 // ── KNOWN VALUES rail: what this chat has learned, visible and editable ────
+function openVariableEditor(listItem, variable) {
+  if (listItem.querySelector('input')) return;
+  const input = document.createElement('input');
+  input.type = 'text'; input.className = 'raillist__edit'; input.value = String(variable.value);
+  listItem.querySelector('.sub').replaceWith(input);
+  input.focus(); input.select();
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    if (save) {
+      try { await window.api.chats.setVariable(state.currentChatId, variable.key, input.value.trim()); } catch {}
+    }
+    renderVars();
+  };
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') finish(true);
+    else if (event.key === 'Escape') finish(false);
+  };
+  input.onblur = () => finish(false);
+  input.onclick = (event) => event.stopPropagation();
+}
+
+function variableListItem(variable) {
+  const listItem = document.createElement('li');
+  listItem.className = 'raillist__item';
+  listItem.innerHTML = `<div class="title">${escapeHtml(variable.key)}</div>`
+    + `<div class="sub">${escapeHtml(String(variable.value).slice(0, 90))} · ${escapeHtml(variable.confidence || 'observed')}</div>`;
+  listItem.title = 'Click to edit — your value outranks anything the model observed. Empty clears it.';
+  listItem.onclick = () => openVariableEditor(listItem, variable);
+  return listItem;
+}
+
 async function renderVars() {
   const list = document.getElementById('vars-list');
   const head = document.getElementById('vars-head');
@@ -1248,36 +1335,7 @@ async function renderVars() {
   try { const v = await window.api.chats.variables(state.currentChatId); vars = Array.isArray(v) ? v : []; } catch {}
   head.textContent = `KNOWN VALUES · ${vars.length}`;
   list.innerHTML = '';
-  for (const v of vars) {
-    const li = document.createElement('li');
-    li.className = 'raillist__item';
-    li.innerHTML = `<div class="title">${escapeHtml(v.key)}</div>`
-      + `<div class="sub">${escapeHtml(String(v.value).slice(0, 90))} · ${escapeHtml(v.confidence || 'observed')}</div>`;
-    li.title = 'Click to edit — your value outranks anything the model observed. Empty clears it.';
-    // Inline editor (window.prompt does not exist in Electron): click swaps the
-    // sub line for an input; Enter saves, Escape/blur cancels.
-    li.onclick = () => {
-      if (li.querySelector('input')) return;
-      const sub = li.querySelector('.sub');
-      const input = document.createElement('input');
-      input.type = 'text'; input.className = 'raillist__edit'; input.value = String(v.value);
-      sub.replaceWith(input);
-      input.focus(); input.select();
-      let done = false;
-      const finish = async (save) => {
-        if (done) return; done = true;
-        if (save) { try { await window.api.chats.setVariable(state.currentChatId, v.key, input.value.trim()); } catch {} }
-        renderVars();
-      };
-      input.onkeydown = (e) => {
-        if (e.key === 'Enter') finish(true);
-        else if (e.key === 'Escape') finish(false);
-      };
-      input.onblur = () => finish(false);
-      input.onclick = (e) => e.stopPropagation();
-    };
-    list.appendChild(li);
-  }
+  for (const variable of vars) list.appendChild(variableListItem(variable));
   document.getElementById('vars-note').hidden = vars.length > 0;
 }
 
@@ -1429,52 +1487,59 @@ function captureInternals(ev, chatId = state.currentChatId) {
   updateCtxMeter();
   if (state.page === 'internals') renderInternals();
 }
+const PLAN_EVENT_KINDS = new Set(['planning', 'planning-done', 'plan', 'execute-start', 'step-start', 'step-done', 'step-stuck', 'replan', 'escalate', 'execute-done', 'var-set', 'var-capture', 'mid-turn-compact', 'group-start', 'group-merge', 'group-merged']);
+function renderProcessLensIfVisible() {
+  if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+}
+
+function capturePlanEvent(record, event) {
+  if (event.kind === 'plan') {
+    record.plan = { goal: event.goal || '', merge: event.merge || '', steps: (event.steps || []).map((step) => ({ id: step.id, task: step.task, produces: step.produces || '', parallel: !!step.parallel, status: 'pending' })), replans: 0, vars: 0 };
+    return;
+  }
+  if (!record.plan) return;
+  let step = record.plan.steps.find((candidate) => candidate.id === event.step);
+  if (event.kind === 'step-start' && !step && event.task) {
+    step = { id: event.step, task: event.task, parallel: !!event.parallel, status: 'pending' };
+    record.plan.steps.push(step);
+  }
+  if (event.kind === 'step-start' && step) { step.task = event.task || step.task; step.status = 'running'; }
+  else if (event.kind === 'step-done' && step) step.status = 'done';
+  else if (event.kind === 'step-stuck' && step) step.status = 'stuck';
+  else if (event.kind === 'replan') { record.plan.replans = event.attempt || record.plan.replans + 1; record.plan.steps = record.plan.steps.filter((item) => ['done', 'running', 'stuck'].includes(item.status)); }
+  else if (event.kind === 'escalate') record.plan.escalated = true;
+  else if (event.kind === 'execute-done') record.plan.completed = event.completed !== false;
+  else if (event.kind === 'var-set' || event.kind === 'var-capture') record.plan.vars = (record.plan.vars || 0) + 1;
+  else if (event.kind === 'mid-turn-compact') record.plan.compacted = true;
+}
+
+function captureSubagentEvent(record, event) {
+  if (event.kind === 'subagent-start') {
+    record.process.push({ agent: event.agent, task: event.task, status: 'running', tools: 0, conclusionTokens: 0, inputTokens: 0 });
+    return;
+  }
+  const current = [...record.process].reverse().find((item) => item.status === 'running') || record.process[record.process.length - 1];
+  if (!current) return;
+  if (event.kind === 'subagent-tool-end') current.tools += 1;
+  else if (event.kind === 'subagent-done') {
+    current.status = 'done'; current.conclusionTokens = event.conclusionTokens || 0;
+    current.inputTokens = event.inputTokens || 0; current.tools = event.tools ?? current.tools;
+    current.durationMs = event.durationMs;
+  }
+}
+
 // Sub-agent lifecycle events (delegate → runSubagent) build the thread tree.
 function captureProcess(ev, chatId = state.currentChatId) {
   if (ev.kind === 'skill-select') return; // carried on the ledger; nothing to accumulate
   const rec = state.internals[chatId];
   if (!rec) return;
   rec.process = rec.process || [];
-  // Plan-and-execute lifecycle (execute.js/plan-derive.js) — tracked on rec.plan
-  // so the PROCESS lens can show the derived plan, per-step status, re-plans and
-  // variable captures. Handled BEFORE the sub-agent branch below so these kinds
-  // never get misread as sub-agent updates.
-  const PLAN_KINDS = { planning: 1, 'planning-done': 1, plan: 1, 'execute-start': 1, 'step-start': 1, 'step-done': 1, 'step-stuck': 1, replan: 1, escalate: 1, 'execute-done': 1, 'var-set': 1, 'var-capture': 1, 'mid-turn-compact': 1, 'group-start': 1, 'group-merge': 1, 'group-merged': 1 };
-  if (ev.kind === 'align') { rec.aligned = ev.decisions || true; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
-  if (PLAN_KINDS[ev.kind]) {
-    if (ev.kind === 'plan') {
-      rec.plan = { goal: ev.goal || '', merge: ev.merge || '', steps: (ev.steps || []).map((s) => ({ id: s.id, task: s.task, produces: s.produces || '', parallel: !!s.parallel, status: 'pending' })), replans: 0, vars: 0 };
-    } else if (rec.plan) {
-      const byId = (id) => rec.plan.steps.find((s) => s.id === id);
-      if (ev.kind === 'step-start') { let s = byId(ev.step); if (!s && ev.task) { s = { id: ev.step, task: ev.task, parallel: !!ev.parallel, status: 'pending' }; rec.plan.steps.push(s); } if (s) { s.task = ev.task || s.task; s.status = 'running'; } }
-      else if (ev.kind === 'step-done') { const s = byId(ev.step); if (s) s.status = 'done'; }
-      else if (ev.kind === 'step-stuck') { const s = byId(ev.step); if (s) s.status = 'stuck'; }
-      else if (ev.kind === 'replan') { rec.plan.replans = ev.attempt || (rec.plan.replans + 1); rec.plan.steps = rec.plan.steps.filter((s) => s.status === 'done' || s.status === 'running' || s.status === 'stuck'); }
-      else if (ev.kind === 'escalate') { rec.plan.escalated = true; }
-      else if (ev.kind === 'execute-done') { rec.plan.completed = ev.completed !== false; }
-      else if (ev.kind === 'var-set' || ev.kind === 'var-capture') { rec.plan.vars = (rec.plan.vars || 0) + 1; }
-      else if (ev.kind === 'mid-turn-compact') { rec.plan.compacted = true; }
-    }
-    if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
-    return;
-  }
-  if (ev.kind === 'merge-start') { rec.merge = { status: 'running', count: ev.count }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
-  if (ev.kind === 'merge-done') { rec.merge = { status: 'done', tokens: ev.tokens }; if (state.page === 'internals' && state.internalsLens === 'process') renderInternals(); return; }
-  if (ev.kind === 'subagent-start') {
-    rec.process.push({ agent: ev.agent, task: ev.task, status: 'running', tools: 0, conclusionTokens: 0, inputTokens: 0 });
-  } else {
-    const cur = [...rec.process].reverse().find((p) => p.status === 'running') || rec.process[rec.process.length - 1];
-    if (!cur) return;
-    if (ev.kind === 'subagent-tool-end') cur.tools += 1;
-    else if (ev.kind === 'subagent-done') {
-      cur.status = 'done';
-      cur.conclusionTokens = ev.conclusionTokens || 0;
-      cur.inputTokens = ev.inputTokens || 0;
-      cur.tools = ev.tools != null ? ev.tools : cur.tools;
-      cur.durationMs = ev.durationMs;
-    }
-  }
-  if (state.page === 'internals' && state.internalsLens === 'process') renderInternals();
+  if (ev.kind === 'align') rec.aligned = ev.decisions || true;
+  else if (PLAN_EVENT_KINDS.has(ev.kind)) capturePlanEvent(rec, ev);
+  else if (ev.kind === 'merge-start') rec.merge = { status: 'running', count: ev.count };
+  else if (ev.kind === 'merge-done') rec.merge = { status: 'done', tokens: ev.tokens };
+  else captureSubagentEvent(rec, ev);
+  renderProcessLensIfVisible();
 }
 function captureInternalsTools(ev, chatId = state.currentChatId) {
   const rec = state.internals[chatId];
@@ -1507,34 +1572,42 @@ function captureMetrics(ev, chatId = state.currentChatId) {
 }
 
 // Render the MEASURED card (real provider usage + reductions) in the CONTEXT lens.
+function measuredItem(label, value, style = '') {
+  return `<div class="measured__item"><span class="measured__k">${label}</span><span class="measured__v${style ? ' measured__v--' + style : ''}">${value}</span></div>`;
+}
+
+function measuredEstimate(metrics, inputTokens) {
+  const estimated = metrics.estInputTokens || 0;
+  if (metrics.measured && estimated) {
+    const difference = inputTokens ? Math.round(Math.abs(inputTokens - estimated) / inputTokens * 100) : 0;
+    return `<div class="measured__est">estimate ${fmtTok(estimated)} vs measured ${fmtTok(inputTokens)} input — ${difference}% off (chars/4 heuristic)</div>`;
+  }
+  if (!metrics.measured) return `<div class="measured__est">provider returned no usage this turn — showing estimate ${fmtTok(estimated)} input; reductions are still real.</div>`;
+  return '';
+}
+
+function measuredItems(metrics) {
+  const inputTokens = metrics.inputTokens || 0, outputTokens = metrics.outputTokens || 0, cached = metrics.cachedTokens || 0;
+  const cachePercent = inputTokens ? Math.round((cached / inputTokens) * 100) : 0;
+  const reductions = (metrics.skillSavedTokens || 0) + (metrics.filterSavedTokens || 0) + (metrics.compactionSavedTokens || 0) + (metrics.delegateAbsorbedTokens || 0);
+  return [
+    measuredItem('turn time', metrics.durationMs != null ? fmtDur(metrics.durationMs) : '—'),
+    measuredItem('input tokens', metrics.measured ? fmtTok(inputTokens) : '—'),
+    measuredItem('output tokens', metrics.measured ? fmtTok(outputTokens) : '—'),
+    measuredItem('cache read', metrics.measured ? `${fmtTok(cached)} <small>${cachePercent}%</small>` : '—', cachePercent >= 60 ? 'good' : (cachePercent === 0 ? 'warn' : '')),
+    measuredItem('token reduction', fmtTok(reductions), reductions ? 'good' : ''),
+    measuredItem('skills used', `${metrics.skillsLoaded || 0}<small>/${metrics.skillsAvailable || 0}</small>`),
+    measuredItem('delegated', `${metrics.delegated || 0}${metrics.delegateAbsorbedTokens ? ` <small>kept ${fmtTok(metrics.delegateAbsorbedTokens)}</small>` : ''}`),
+    measuredEstimate(metrics, inputTokens)
+  ].join('');
+}
+
 function renderMeasured(rec) {
   const m = rec && rec.metrics;
   if (!m) { el.intMeasuredCard.hidden = true; return; }
   el.intMeasuredCard.hidden = false;
   el.intMeasuredSrc.textContent = m.measured ? 'real provider usage' : 'estimate only (provider sent no usage)';
-  const items = [];
-  const item = (k, v, cls) => items.push(`<div class="measured__item"><span class="measured__k">${k}</span><span class="measured__v${cls ? ' measured__v--' + cls : ''}">${v}</span></div>`);
-  const inTok = m.inputTokens || 0, outTok = m.outputTokens || 0, cached = m.cachedTokens || 0;
-  const cachePct = inTok ? Math.round((cached / inTok) * 100) : 0;
-  const reductions = (m.skillSavedTokens || 0) + (m.filterSavedTokens || 0) + (m.compactionSavedTokens || 0) + (m.delegateAbsorbedTokens || 0);
-
-  item('turn time', m.durationMs != null ? fmtDur(m.durationMs) : '—');
-  item('input tokens', m.measured ? fmtTok(inTok) : '—');
-  item('output tokens', m.measured ? fmtTok(outTok) : '—');
-  item('cache read', m.measured ? `${fmtTok(cached)} <small>${cachePct}%</small>` : '—', cachePct >= 60 ? 'good' : (cachePct === 0 ? 'warn' : ''));
-  item('token reduction', `${fmtTok(reductions)}`, reductions ? 'good' : '');
-  item('skills used', `${m.skillsLoaded || 0}<small>/${m.skillsAvailable || 0}</small>`);
-  item('delegated', `${m.delegated || 0}${m.delegateAbsorbedTokens ? ` <small>kept ${fmtTok(m.delegateAbsorbedTokens)}</small>` : ''}`);
-
-  let html = items.join('');
-  const est = m.estInputTokens || 0;
-  if (m.measured && est) {
-    const diff = inTok ? Math.round(Math.abs(inTok - est) / inTok * 100) : 0;
-    html += `<div class="measured__est">estimate ${fmtTok(est)} vs measured ${fmtTok(inTok)} input — ${diff}% off (chars/4 heuristic)</div>`;
-  } else if (!m.measured) {
-    html += `<div class="measured__est">provider returned no usage this turn — showing estimate ${fmtTok(est)} input; reductions are still real.</div>`;
-  }
-  el.intMeasured.innerHTML = html;
+  el.intMeasured.innerHTML = measuredItems(m);
 }
 
 function updateCtxMeter() {
@@ -1546,6 +1619,79 @@ function updateCtxMeter() {
   el.ctxMeter.classList.toggle('is-high', pct >= 60 && pct < 85);
   el.ctxMeter.classList.toggle('is-crit', pct >= 85);
   el.ctxMeter.innerHTML = `<span class="ctxbar"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}% ctx`;
+}
+
+function renderContextOccupancy(ledger) {
+  const denominator = Math.max(ledger.total, ledger.window) || 1;
+  el.intOccbar.innerHTML = '';
+  el.intLegend.innerHTML = '';
+  for (const contributor of ledger.contributors) {
+    const metadata = CONTRIB[contributor.key] || { label: contributor.key, color: '#888' };
+    const segment = document.createElement('div'); segment.className = 'occseg occseg--' + contributor.key;
+    segment.style.width = (contributor.tokens / denominator * 100) + '%';
+    segment.title = `${metadata.label}: ${fmtTok(contributor.tokens)} tok`; el.intOccbar.appendChild(segment);
+    const item = document.createElement('div'); item.className = 'occitem';
+    item.innerHTML = `<span class="sw" style="background:${metadata.color}"></span>${metadata.label} <b>${fmtTok(contributor.tokens)}</b>`;
+    el.intLegend.appendChild(item);
+  }
+  const free = ledger.window - ledger.total;
+  const freeItem = document.createElement('div'); freeItem.className = 'occitem';
+  freeItem.innerHTML = free >= 0
+    ? `<span class="sw" style="background:var(--line)"></span>free <b>${fmtTok(free)}</b>`
+    : `<span class="sw" style="background:var(--brand)"></span><b style="color:var(--brand)">OVER by ${fmtTok(-free)}</b>`;
+  el.intLegend.appendChild(freeItem);
+}
+
+function appendTimelineEvent(glyph, label, delta = '', warn = false, muted = false) {
+  const item = document.createElement('li');
+  item.className = 'intevt' + (muted ? ' intevt--muted' : '');
+  item.innerHTML = `<span class="intevt__glyph">${glyph}</span><span class="intevt__label">${escapeHtml(label)}</span>`
+    + (delta ? `<span class="intevt__delta${warn ? ' intevt__delta--warn' : ''}">${escapeHtml(delta)}</span>` : '');
+  el.intTimeline.appendChild(item);
+}
+
+function renderLedgerEvent(event) {
+  if (event.type === 'skill-select') {
+    const label = event.error ? `Selected skills · planning failed, 0 of ${event.available} loaded ⚠ ${event.error}` : `Selected skills · ${event.available} available → ${event.selected} loaded`;
+    appendTimelineEvent('◇', label, event.saved ? `−${fmtTok(event.saved)}` : '', !!event.error);
+  } else if (event.type === 'tool-scope') {
+    const basis = event.fellBack ? 'planning failed — fell back to the full catalog' : event.bySkills?.length ? `skills (${event.bySkills.join(', ')})` : 'request relevance';
+    appendTimelineEvent('✂', `Tool scope · ${basis} narrowed catalog to ${event.scoped}/${event.totalAvailable} tools`, event.fellBack ? '' : `−${event.totalAvailable - event.scoped} tools`, !!event.fellBack);
+  } else if (event.type === 'compact') appendTimelineEvent('⚡', `Compacted older history → summary (${fmtTok(event.tokensBefore)} → ${fmtTok(event.tokensAfter)})`, `−${fmtTok(event.saved)}`);
+}
+
+function renderContextTimeline(record, ledger) {
+  el.intTimeline.innerHTML = '';
+  appendTimelineEvent('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(ledger.total)} tok`, false, true);
+  for (const event of ledger.events || []) renderLedgerEvent(event);
+  if ((ledger.events || []).every((event) => event.type !== 'compact')) appendTimelineEvent('✓', 'No compaction needed this turn', '', false, true);
+  appendTimelineEvent('⚙', `${ledger.toolCount || 0} tools offered to the model`, '', false, true);
+  for (const turn of record.toolTurns || []) {
+    const delta = turn.saved ? ` · filtered −${fmtTok(turn.saved)}` : '';
+    const duration = turn.durationMs != null ? ` · ${fmtDur(turn.durationMs)}` : '';
+    appendTimelineEvent(turn.isError ? '✕' : '↩', `Tool result · ${String(turn.name).split('__').pop()}${turn.truncated ? ' (elided)' : ''}`, `${fmtTok(turn.resultTokens)} tok${delta}${duration}`, turn.saved > 0);
+  }
+}
+
+function promptMessageCard(message) {
+  const metadata = CONTRIB[message.contributor] || { label: message.contributor, color: '#888' };
+  const card = document.createElement('div'); card.className = 'intmsg';
+  const preview = (message.content || '').replace(/\s+/g, ' ').slice(0, 90) || (message.toolCalls || []).map((tool) => `[calls ${tool}]`).join(' ') || '(empty)';
+  const body = escapeHtml(message.content || '')
+    + (message.toolCalls?.length ? `\n\n<span class="intmsg__clip">↳ tool calls: ${escapeHtml(message.toolCalls.join(', '))}</span>` : '')
+    + (message.clippedChars ? `\n<span class="intmsg__clip">…(${fmtTok(message.clippedChars)} more chars not shown)</span>` : '');
+  card.innerHTML = `<div class="intmsg__head"><span class="intmsg__role">${escapeHtml(message.role)}</span>`
+    + `<span class="intmsg__tag" style="background:${metadata.color}">${metadata.label}</span><span class="intmsg__title">${escapeHtml(preview)}</span>`
+    + `<span class="intmsg__tok">${fmtTok(message.tokens)} tok</span></div><pre class="intmsg__body" hidden>${body}</pre>`;
+  const content = card.querySelector('.intmsg__body');
+  card.querySelector('.intmsg__head').onclick = () => { content.hidden = !content.hidden; };
+  return card;
+}
+
+function renderPromptMessages(ledger) {
+  el.intMsgcount.textContent = `${ledger.assembled.length} messages`;
+  el.intPrompt.innerHTML = '';
+  for (const message of ledger.assembled) el.intPrompt.appendChild(promptMessageCard(message));
 }
 
 function renderInternals() {
@@ -1564,189 +1710,105 @@ function renderInternals() {
   if (lens === 'review') { renderReview(rec); return; }
 
   renderMeasured(rec);
-
   const pct = L.window ? Math.round((L.total / L.window) * 100) : 0;
   el.intWindow.textContent = `${fmtTok(L.total)} / ${fmtTok(L.window)} tok · ${pct}%`;
-
-  // Occupancy bar — segments scaled to the window; headroom (or overflow) shown.
-  const denom = Math.max(L.total, L.window) || 1;
-  el.intOccbar.innerHTML = '';
-  for (const c of L.contributors) {
-    const seg = document.createElement('div');
-    seg.className = 'occseg occseg--' + c.key;
-    seg.style.width = (c.tokens / denom * 100) + '%';
-    seg.title = `${(CONTRIB[c.key] || {}).label || c.key}: ${fmtTok(c.tokens)} tok`;
-    el.intOccbar.appendChild(seg);
-  }
-  const free = L.window - L.total;
-  el.intLegend.innerHTML = '';
-  for (const c of L.contributors) {
-    const meta = CONTRIB[c.key] || { label: c.key, color: '#888' };
-    const item = document.createElement('div');
-    item.className = 'occitem';
-    item.innerHTML = `<span class="sw" style="background:${meta.color}"></span>${meta.label} <b>${fmtTok(c.tokens)}</b>`;
-    el.intLegend.appendChild(item);
-  }
-  const freeItem = document.createElement('div');
-  freeItem.className = 'occitem';
-  freeItem.innerHTML = free >= 0
-    ? `<span class="sw" style="background:var(--line)"></span>free <b>${fmtTok(free)}</b>`
-    : `<span class="sw" style="background:var(--brand)"></span><b style="color:var(--brand)">OVER by ${fmtTok(-free)}</b>`;
-  el.intLegend.appendChild(freeItem);
-
-  // Pipeline events timeline.
-  el.intTimeline.innerHTML = '';
-  const addEvt = (glyph, label, delta, warn, muted) => {
-    const li = document.createElement('li');
-    li.className = 'intevt' + (muted ? ' intevt--muted' : '');
-    li.innerHTML = `<span class="intevt__glyph">${glyph}</span><span class="intevt__label">${escapeHtml(label)}</span>`
-      + (delta ? `<span class="intevt__delta${warn ? ' intevt__delta--warn' : ''}">${escapeHtml(delta)}</span>` : '');
-    el.intTimeline.appendChild(li);
-  };
-  addEvt('▸', 'Assembled prompt from skills, history and current turn', `${fmtTok(L.total)} tok`, false, true);
-  for (const e of (L.events || [])) {
-    if (e.type === 'skill-select') {
-      const label = e.error ? `Selected skills · planning failed, 0 of ${e.available} loaded ⚠ ${e.error}` : `Selected skills · ${e.available} available → ${e.selected} loaded`;
-      addEvt('◇', label, e.saved ? `−${fmtTok(e.saved)}` : '', !!e.error);
-    } else if (e.type === 'tool-scope') {
-      const by = e.fellBack ? 'planning failed — fell back to the full catalog' : (e.bySkills && e.bySkills.length) ? `skills (${e.bySkills.join(', ')})` : 'request relevance';
-      addEvt('✂', `Tool scope · ${by} narrowed catalog to ${e.scoped}/${e.totalAvailable} tools`, e.fellBack ? '' : `−${e.totalAvailable - e.scoped} tools`, !!e.fellBack);
-    }
-    else if (e.type === 'compact') addEvt('⚡', `Compacted older history → summary (${fmtTok(e.tokensBefore)} → ${fmtTok(e.tokensAfter)})`, `−${fmtTok(e.saved)}`);
-  }
-  if ((L.events || []).every((e) => e.type !== 'compact')) addEvt('✓', 'No compaction needed this turn', '', false, true);
-  addEvt('⚙', `${L.toolCount || 0} tools offered to the model`, '', false, true);
-  for (const t of (rec.toolTurns || [])) {
-    const delta = t.saved ? ` · filtered −${fmtTok(t.saved)}` : '';
-    const dur = t.durationMs != null ? ` · ${fmtDur(t.durationMs)}` : '';
-    addEvt(t.isError ? '✕' : '↩', `Tool result · ${String(t.name).split('__').pop()}${t.truncated ? ' (elided)' : ''}`, `${fmtTok(t.resultTokens)} tok${delta}${dur}`, t.saved > 0);
-  }
-
-  // Assembled prompt viewer.
-  el.intMsgcount.textContent = `${L.assembled.length} messages`;
-  el.intPrompt.innerHTML = '';
-  L.assembled.forEach((m, i) => {
-    const meta = CONTRIB[m.contributor] || { label: m.contributor, color: '#888' };
-    const card = document.createElement('div');
-    card.className = 'intmsg';
-    const preview = (m.content || '').replace(/\s+/g, ' ').slice(0, 90) || (m.toolCalls || []).map((t) => `[calls ${t}]`).join(' ') || '(empty)';
-    const body = escapeHtml(m.content || '')
-      + (m.toolCalls && m.toolCalls.length ? `\n\n<span class="intmsg__clip">↳ tool calls: ${escapeHtml(m.toolCalls.join(', '))}</span>` : '')
-      + (m.clippedChars ? `\n<span class="intmsg__clip">…(${fmtTok(m.clippedChars)} more chars not shown)</span>` : '');
-    card.innerHTML = `<div class="intmsg__head">`
-      + `<span class="intmsg__role">${escapeHtml(m.role)}</span>`
-      + `<span class="intmsg__tag" style="background:${meta.color}">${meta.label}</span>`
-      + `<span class="intmsg__title">${escapeHtml(preview)}</span>`
-      + `<span class="intmsg__tok">${fmtTok(m.tokens)} tok</span></div>`
-      + `<pre class="intmsg__body" hidden>${body}</pre>`;
-    const head = card.querySelector('.intmsg__head');
-    const pre = card.querySelector('.intmsg__body');
-    head.onclick = () => { pre.hidden = !pre.hidden; };
-    el.intPrompt.appendChild(card);
-  });
+  renderContextOccupancy(L);
+  renderContextTimeline(rec, L);
+  renderPromptMessages(L);
 }
 
-// PROCESS lens — the pipeline stages and the delegated sub-agent tree.
-function renderProcess(rec) {
-  const L = rec.ledger;
-  const compacted = (L.events || []).some((e) => e.type === 'compact');
-  const nTools = (rec.toolTurns || []).length;
-  const subs = rec.process || [];
+function skillStageDetail(skillSelection) {
+  if (!skillSelection) return 'no skills enabled this turn';
+  if (skillSelection.error) return `⚠ planning failed, 0 of ${skillSelection.available} loaded — ${skillSelection.error}`;
+  return `${skillSelection.available} available → ${(skillSelection.selected || []).length} loaded${skillSelection.savedTokens ? ` · saved ${fmtTok(skillSelection.savedTokens)}` : ''}`;
+}
 
-  const ss = L.skillSelect;
-  const ssDetail = !ss ? 'no skills enabled this turn'
-    : ss.error ? `⚠ planning failed, 0 of ${ss.available} loaded — ${ss.error}`
-    : `${ss.available} available → ${(ss.selected || []).length} loaded${ss.savedTokens ? ` · saved ${fmtTok(ss.savedTokens)}` : ''}`;
-  // Tool-scope isn't a top-level ledger field — it rides on L.events (same
-  // source the pipeline timeline reads), so pull it out here too.
-  const ts = (L.events || []).find((e) => e.type === 'tool-scope');
-  const tsDetail = !ts ? 'no tools connected this turn'
-    : ts.fellBack ? `⚠ planning failed — fell back to the full catalog (${ts.scoped}/${ts.totalAvailable} tools)`
-    : (ts.bySkills && ts.bySkills.length) ? `${ts.totalAvailable} available → ${ts.scoped} scoped (by skill: ${ts.bySkills.join(', ')})`
-    : `${ts.totalAvailable} available → ${ts.scoped} selected by request relevance`;
-  const filterSaved = (rec.toolTurns || []).reduce((n, t) => n + (t.saved || 0), 0);
-  // 'done' = ran this turn. 'active' = running now. 'idle' = a real, built
-  // capability that simply wasn't needed this turn (still shown plainly, not
-  // muted). 'warn' = the stage ran but planning failed and fell back.
-  // 'planned' is reserved for capabilities that don't exist yet — don't use
-  // it to mean "not used this turn" or "failed this turn".
-  // Plan-and-execute (Pass 2): the derived plan, its per-step status, and the
-  // working memory captured along the way.
-  const plan = rec.plan;
-  const planDetail = !plan ? 'simple turn — flat loop'
-    : `${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}`
-      + (plan.replans ? ` · ${plan.replans} re-plan${plan.replans === 1 ? '' : 's'}` : '')
-      + (plan.vars ? ` · ${plan.vars} value${plan.vars === 1 ? '' : 's'} remembered` : '')
-      + (plan.escalated ? ' · escalated to user' : '');
+function toolStageDetail(toolSelection) {
+  if (!toolSelection) return 'no tools connected this turn';
+  if (toolSelection.fellBack) return `⚠ planning failed — fell back to the full catalog (${toolSelection.scoped}/${toolSelection.totalAvailable} tools)`;
+  if (toolSelection.bySkills?.length) return `${toolSelection.totalAvailable} available → ${toolSelection.scoped} scoped (by skill: ${toolSelection.bySkills.join(', ')})`;
+  return `${toolSelection.totalAvailable} available → ${toolSelection.scoped} selected by request relevance`;
+}
+
+function planStageDetail(plan) {
+  if (!plan) return 'simple turn — flat loop';
+  return `${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}`
+    + (plan.replans ? ` · ${plan.replans} re-plan${plan.replans === 1 ? '' : 's'}` : '')
+    + (plan.vars ? ` · ${plan.vars} value${plan.vars === 1 ? '' : 's'} remembered` : '')
+    + (plan.escalated ? ' · escalated to user' : '');
+}
+
+function plannedStepStages(plan) {
+  if (!plan) return [];
+  return plan.steps.map((step) => ({
+    name: `· Step ${step.id}`, detail: `${step.parallel ? '⇉ ' : ''}${(step.task || '').slice(0, 110)}`,
+    state: step.status === 'done' ? 'done' : step.status === 'running' ? 'active' : step.status === 'stuck' ? 'warn' : 'idle'
+  }));
+}
+
+function processStages(record) {
+  const ledger = record.ledger, plan = record.plan, subagents = record.process || [];
+  const toolCount = (record.toolTurns || []).length;
+  const toolSelection = (ledger.events || []).find((event) => event.type === 'tool-scope');
+  const saved = (record.toolTurns || []).reduce((total, turn) => total + (turn.saved || 0), 0);
   const stages = [
-    { name: 'Assemble', detail: `${L.assembled.length} messages`, state: 'done' },
-    { name: 'Select skills', detail: ssDetail, state: ss && ss.error ? 'warn' : 'done' },
-    { name: 'Select tools', detail: tsDetail, state: ts && ts.fellBack ? 'warn' : 'done' },
-    { name: 'Plan', detail: planDetail, state: plan ? (plan.escalated ? 'warn' : 'done') : 'idle' },
-    ...(plan ? plan.steps.map((s) => ({
-      name: `· Step ${s.id}`,
-      detail: `${s.parallel ? '⇉ ' : ''}${(s.task || '').slice(0, 110)}`,
-      state: s.status === 'done' ? 'done' : s.status === 'running' ? 'active' : s.status === 'stuck' ? 'warn' : 'idle'
-    })) : []),
-    { name: 'Compact', detail: compacted ? 'summarized older history' : (plan && plan.compacted ? 'mid-turn (protected known values)' : 'not needed this turn'), state: 'done' },
-    { name: 'Route', detail: L.model || '', state: 'done' },
-    { name: 'Tool loop', detail: `${nTools} tool call${nTools === 1 ? '' : 's'}`, state: 'done' },
-    { name: 'Filter / trim', detail: nTools ? `${nTools} tool result${nTools === 1 ? '' : 's'} filtered · saved ${fmtTok(filterSaved)}` : 'no tool output to filter', state: 'done' },
-    { name: 'Delegate', detail: subs.length ? `${subs.length} sub-agent${subs.length === 1 ? '' : 's'}${subs.length > 1 ? ' (parallel)' : ''}` : 'not needed this turn', state: subs.length ? 'done' : 'idle' },
-    { name: 'Merge', detail: rec.merge ? (rec.merge.status === 'done' ? `merged ${subs.length} results → ${fmtTok(rec.merge.tokens || 0)} tok` : 'merging…') : (subs.length ? 'returned separately (no merge)' : 'not needed this turn'), state: rec.merge ? (rec.merge.status === 'done' ? 'done' : 'active') : (subs.length ? 'done' : 'idle') },
+    { name: 'Assemble', detail: `${ledger.assembled.length} messages`, state: 'done' },
+    { name: 'Select skills', detail: skillStageDetail(ledger.skillSelect), state: ledger.skillSelect?.error ? 'warn' : 'done' },
+    { name: 'Select tools', detail: toolStageDetail(toolSelection), state: toolSelection?.fellBack ? 'warn' : 'done' },
+    { name: 'Plan', detail: planStageDetail(plan), state: plan ? (plan.escalated ? 'warn' : 'done') : 'idle' },
+    ...plannedStepStages(plan),
+    { name: 'Compact', detail: (ledger.events || []).some((event) => event.type === 'compact') ? 'summarized older history' : (plan?.compacted ? 'mid-turn (protected known values)' : 'not needed this turn'), state: 'done' },
+    { name: 'Route', detail: ledger.model || '', state: 'done' },
+    { name: 'Tool loop', detail: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`, state: 'done' },
+    { name: 'Filter / trim', detail: toolCount ? `${toolCount} tool result${toolCount === 1 ? '' : 's'} filtered · saved ${fmtTok(saved)}` : 'no tool output to filter', state: 'done' },
+    { name: 'Delegate', detail: subagents.length ? `${subagents.length} sub-agent${subagents.length === 1 ? '' : 's'}${subagents.length > 1 ? ' (parallel)' : ''}` : 'not needed this turn', state: subagents.length ? 'done' : 'idle' },
+    { name: 'Merge', detail: record.merge ? (record.merge.status === 'done' ? `merged ${subagents.length} results → ${fmtTok(record.merge.tokens || 0)} tok` : 'merging…') : (subagents.length ? 'returned separately (no merge)' : 'not needed this turn'), state: record.merge ? (record.merge.status === 'done' ? 'done' : 'active') : (subagents.length ? 'done' : 'idle') },
     { name: 'Persist', detail: 'saved to chat', state: 'done' }
   ];
-  const STAGE_TAG = { planned: 'planned', idle: 'not used this turn' };
+  return { stages, ledger, subagents, toolCount };
+}
+
+function renderProcessStages(stages) {
+  const stageTags = { planned: 'planned', idle: 'not used this turn' };
   el.intStages.innerHTML = '';
-  for (const s of stages) {
-    const li = document.createElement('li');
-    li.className = 'stage stage--' + s.state;
-    li.innerHTML = `<span class="stage__dot"></span><span class="stage__name">${escapeHtml(s.name)}</span>`
-      + `<span class="stage__detail">${escapeHtml(s.detail)}</span>`
-      + (STAGE_TAG[s.state] ? `<span class="stage__tag">${STAGE_TAG[s.state]}</span>` : '');
-    el.intStages.appendChild(li);
+  for (const stage of stages) {
+    const item = document.createElement('li'); item.className = 'stage stage--' + stage.state;
+    item.innerHTML = `<span class="stage__dot"></span><span class="stage__name">${escapeHtml(stage.name)}</span>`
+      + `<span class="stage__detail">${escapeHtml(stage.detail)}</span>`
+      + (stageTags[stage.state] ? `<span class="stage__tag">${stageTags[stage.state]}</span>` : '');
+    el.intStages.appendChild(item);
   }
+}
 
-  // Threads: main + one card per delegated sub-agent.
-  el.intThreadmeta.textContent = subs.length ? `main + ${subs.length} sub-agent${subs.length === 1 ? '' : 's'}` : 'main only';
+function processThreadCard(subagent, windowSize) {
+  const percent = Math.min(100, Math.round(((subagent.inputTokens || subagent.conclusionTokens || 0) / (windowSize || 1)) * 100));
+  const saved = Math.max(0, (subagent.inputTokens || 0) - (subagent.conclusionTokens || 0));
+  const card = document.createElement('div'); card.className = 'thread thread--sub';
+  card.innerHTML = `<div class="thread__head"><span class="thread__name">${escapeHtml(subagent.agent || 'sub-agent')}</span>`
+    + `<span class="thread__status thread__status--${subagent.status === 'done' ? 'done' : 'running'}">${subagent.status === 'done' ? 'done' : 'running…'}</span>`
+    + `<span class="thread__meter"><i style="width:${percent}%;background:#7a5cc0"></i></span></div><div class="thread__task">${escapeHtml((subagent.task || '').slice(0, 200) || '(no task)')}</div>`
+    + `<div class="thread__stats"><span>absorbed <b>${fmtTok(subagent.inputTokens || 0)}</b> tok</span><span>returned <b>${fmtTok(subagent.conclusionTokens || 0)}</b> tok</span>`
+    + `<span><b>${subagent.tools || 0}</b> tool${subagent.tools === 1 ? '' : 's'}</span>${subagent.durationMs != null ? `<span><b>${fmtDur(subagent.durationMs)}</b></span>` : ''}`
+    + `${saved ? `<span class="thread__win">kept ${fmtTok(saved)} out of main</span>` : ''}</div>`;
+  return card;
+}
+
+function renderProcessThreads(record, ledger, subagents, toolCount) {
+  el.intThreadmeta.textContent = subagents.length ? `main + ${subagents.length} sub-agent${subagents.length === 1 ? '' : 's'}` : 'main only';
   el.intThreads.innerHTML = '';
-  const mainPct = L.window ? Math.min(100, Math.round((L.total / L.window) * 100)) : 0;
-  const main = document.createElement('div');
-  main.className = 'thread thread--main';
-  main.innerHTML = `<div class="thread__head"><span class="thread__name">MAIN THREAD</span>`
-    + `<span class="thread__status thread__status--done">${L.model || ''}</span>`
-    + `<span class="thread__meter"><i style="width:${mainPct}%"></i></span></div>`
-    + `<div class="thread__stats"><span><b>${fmtTok(L.total)}</b> / ${fmtTok(L.window)} tok · ${mainPct}%</span><span><b>${nTools}</b> tools</span><span><b>${subs.length}</b> delegated</span></div>`;
+  const percent = ledger.window ? Math.min(100, Math.round((ledger.total / ledger.window) * 100)) : 0;
+  const main = document.createElement('div'); main.className = 'thread thread--main';
+  main.innerHTML = `<div class="thread__head"><span class="thread__name">MAIN THREAD</span><span class="thread__status thread__status--done">${ledger.model || ''}</span>`
+    + `<span class="thread__meter"><i style="width:${percent}%"></i></span></div><div class="thread__stats"><span><b>${fmtTok(ledger.total)}</b> / ${fmtTok(ledger.window)} tok · ${percent}%</span><span><b>${toolCount}</b> tools</span><span><b>${subagents.length}</b> delegated</span></div>`;
   el.intThreads.appendChild(main);
-
-  for (const s of subs) {
-    const win = L.window || 1;
-    const subPct = Math.min(100, Math.round(((s.inputTokens || s.conclusionTokens || 0) / win) * 100));
-    const saved = Math.max(0, (s.inputTokens || 0) - (s.conclusionTokens || 0));
-    const card = document.createElement('div');
-    card.className = 'thread thread--sub';
-    card.innerHTML = `<div class="thread__head"><span class="thread__name">${escapeHtml(s.agent || 'sub-agent')}</span>`
-      + `<span class="thread__status thread__status--${s.status === 'done' ? 'done' : 'running'}">${s.status === 'done' ? 'done' : 'running…'}</span>`
-      + `<span class="thread__meter"><i style="width:${subPct}%;background:#7a5cc0"></i></span></div>`
-      + `<div class="thread__task">${escapeHtml((s.task || '').slice(0, 200) || '(no task)')}</div>`
-      + `<div class="thread__stats">`
-      + `<span>absorbed <b>${fmtTok(s.inputTokens || 0)}</b> tok</span>`
-      + `<span>returned <b>${fmtTok(s.conclusionTokens || 0)}</b> tok</span>`
-      + `<span><b>${s.tools || 0}</b> tool${s.tools === 1 ? '' : 's'}</span>`
-      + (s.durationMs != null ? `<span><b>${fmtDur(s.durationMs)}</b></span>` : '')
-      + (saved ? `<span class="thread__win">kept ${fmtTok(saved)} out of main</span>` : '')
-      + `</div>`;
-    el.intThreads.appendChild(card);
+  for (const subagent of subagents) el.intThreads.appendChild(processThreadCard(subagent, ledger.window));
+  if (record.merge) {
+    const merge = document.createElement('div'); merge.className = 'thread thread--merge';
+    merge.innerHTML = `<div class="thread__head"><span class="thread__name">⋈ MERGE</span><span class="thread__status thread__status--${record.merge.status === 'done' ? 'done' : 'running'}">${record.merge.status === 'done' ? 'done' : 'merging…'}</span></div>`
+      + `<div class="thread__stats"><span>combined <b>${subagents.length}</b> results${record.merge.tokens ? ` → <b>${fmtTok(record.merge.tokens)}</b> tok` : ''}</span></div>`;
+    el.intThreads.appendChild(merge);
   }
-  if (rec.merge) {
-    const m = document.createElement('div');
-    m.className = 'thread thread--merge';
-    m.innerHTML = `<div class="thread__head"><span class="thread__name">⋈ MERGE</span>`
-      + `<span class="thread__status thread__status--${rec.merge.status === 'done' ? 'done' : 'running'}">${rec.merge.status === 'done' ? 'done' : 'merging…'}</span></div>`
-      + `<div class="thread__stats"><span>combined <b>${subs.length}</b> results${rec.merge.tokens ? ` → <b>${fmtTok(rec.merge.tokens)}</b> tok` : ''}</span></div>`;
-    el.intThreads.appendChild(m);
-  }
-  if (!subs.length) {
+  if (!subagents.length) {
     const note = document.createElement('div');
     note.className = 'threadtree__empty';
     note.innerHTML = 'No delegation this turn. The orchestrator can call <code>delegate(agent, task)</code> for one sub-agent, or <code>assign(tasks, merge)</code> to run several in parallel and merge — each runs in its own context and returns only a distilled conclusion.';
@@ -1754,8 +1816,44 @@ function renderProcess(rec) {
   }
 }
 
+// PROCESS lens — the pipeline stages and the delegated sub-agent tree.
+function renderProcess(record) {
+  const process = processStages(record);
+  renderProcessStages(process.stages);
+  renderProcessThreads(record, process.ledger, process.subagents, process.toolCount);
+}
+
 // ── REVIEW lens — a second LLM critiques the turn ──────────────────
 function evalLabel() { return state.evaluatorModel || state.selected?.model || 'pick a model…'; }
+
+function appendReviewMessage(text) {
+  const message = document.createElement('div');
+  message.className = 'review__running';
+  message.textContent = text;
+  el.intEvalFindings.appendChild(message);
+}
+
+function appendReviewError(review) {
+  appendReviewMessage('Evaluation error: ' + review.error);
+  if (!review.raw) return;
+  const raw = document.createElement('pre');
+  raw.className = 'intmsg__body';
+  raw.style.marginTop = '8px';
+  raw.textContent = review.raw;
+  el.intEvalFindings.appendChild(raw);
+}
+
+function reviewFindingCard(finding) {
+  const severity = String(finding.severity || 'low').toLowerCase();
+  const target = String(finding.target || 'usage').toLowerCase();
+  const card = document.createElement('div');
+  card.className = 'finding';
+  card.innerHTML = `<div class="finding__head"><span class="finding__sev finding__sev--${severity}">${escapeHtml(severity)}</span>`
+    + `<span class="finding__cat">${escapeHtml(finding.category || '')}</span><span class="finding__target finding__target--${target}">${escapeHtml(target)}</span></div>`
+    + `<div class="finding__obs">${escapeHtml(finding.observation || '')}</div>`
+    + (finding.suggestion ? `<div class="finding__sug">${escapeHtml(finding.suggestion)}</div>` : '');
+  return card;
+}
 
 function renderReview(rec) {
   el.intEvalLabel.textContent = evalLabel();
@@ -1768,32 +1866,10 @@ function renderReview(rec) {
   el.intEvalFindings.innerHTML = '';
   if (!rv) { el.intEvalNote.hidden = false; return; }
   el.intEvalNote.hidden = true;
-  const note = (cls, text) => { const d = document.createElement('div'); d.className = 'review__running'; d.textContent = text; el.intEvalFindings.appendChild(d); };
-  if (rv.running) return note('', `Reviewing with ${evalLabel()}…`);
-  if (rv.error) {
-    note('', 'Evaluation error: ' + rv.error);
-    if (rv.raw) {
-      const pre = document.createElement('pre');
-      pre.className = 'intmsg__body'; pre.style.marginTop = '8px';
-      pre.textContent = rv.raw;
-      el.intEvalFindings.appendChild(pre);
-    }
-    return;
-  }
-  if (!rv.findings.length) return note('', 'No issues found — the turn looks efficient.');
-  for (const f of rv.findings) {
-    const sev = String(f.severity || 'low').toLowerCase();
-    const target = String(f.target || 'usage').toLowerCase();
-    const card = document.createElement('div');
-    card.className = 'finding';
-    card.innerHTML = `<div class="finding__head">`
-      + `<span class="finding__sev finding__sev--${sev}">${escapeHtml(sev)}</span>`
-      + `<span class="finding__cat">${escapeHtml(f.category || '')}</span>`
-      + `<span class="finding__target finding__target--${target}">${escapeHtml(target)}</span></div>`
-      + `<div class="finding__obs">${escapeHtml(f.observation || '')}</div>`
-      + (f.suggestion ? `<div class="finding__sug">${escapeHtml(f.suggestion)}</div>` : '');
-    el.intEvalFindings.appendChild(card);
-  }
+  if (rv.running) return appendReviewMessage(`Reviewing with ${evalLabel()}…`);
+  if (rv.error) return appendReviewError(rv);
+  if (!rv.findings.length) return appendReviewMessage('No issues found — the turn looks efficient.');
+  for (const finding of rv.findings) el.intEvalFindings.appendChild(reviewFindingCard(finding));
 }
 
 function buildEvalMenu() {
@@ -1825,54 +1901,61 @@ function setEvaluator(model) {
 }
 
 // A compact digest of the turn — metrics + structure, never the raw bulk.
-function buildDigest(rec) {
-  const L = rec.ledger;
-  const cur = (L.assembled || []).find((m) => m.contributor === 'current');
-  const skillEvt = (L.events || []).find((e) => e.type === 'skill-select');
-  const toolEvt = (L.events || []).find((e) => e.type === 'tool-scope');
+function planningDigest(events) {
+  const skill = events.find((event) => event.type === 'skill-select');
+  const tools = events.find((event) => event.type === 'tool-scope');
   return {
-    chatModel: L.model,
-    window: L.window,
-    totalTokens: L.total,
-    occupancyPct: L.window ? Math.round((L.total / L.window) * 100) : 0,
-    contributors: L.contributors,
-    compaction: (L.events || []).filter((e) => e.type === 'compact'),
+    skills: skill ? { available: skill.available, loaded: skill.selected, error: skill.error || null } : null,
+    tools: tools ? { available: tools.totalAvailable, scoped: tools.scoped, fellBackToFullCatalog: !!tools.fellBack, boundedBySkill: tools.bySkills || null } : null
+  };
+}
+
+function planDigest(plan) {
+  if (!plan) return null;
+  return {
+    goal: plan.goal || '',
+    steps: (plan.steps || []).map((step) => ({ id: step.id, task: (step.task || '').slice(0, 140), produces: step.produces || '', parallel: !!step.parallel, status: step.status })),
+    merge: (plan.merge || '').slice(0, 200), replans: plan.replans || 0,
+    escalatedToUser: !!plan.escalated, completed: plan.completed !== false,
+    varsCaptured: plan.vars || 0
+  };
+}
+
+function executionDigest(record) {
+  return {
+    mode: record.plan ? 'plan-and-execute' : record.aligned ? 'alignment' : 'flat-loop',
+    turnComplete: !!record.metrics,
+    plan: planDigest(record.plan)
+  };
+}
+
+function toolDigest(record) {
+  return {
+    offered: record.ledger.toolCount || 0,
+    results: (record.toolTurns || []).map((tool) => ({ name: String(tool.name).split('__').pop(), tokens: tool.resultTokens, truncated: !!tool.truncated }))
+  };
+}
+
+function buildDigest(record) {
+  const ledger = record.ledger;
+  const events = ledger.events || [];
+  const current = (ledger.assembled || []).find((message) => message.contributor === 'current');
+  return {
+    chatModel: ledger.model, window: ledger.window, totalTokens: ledger.total,
+    occupancyPct: ledger.window ? Math.round((ledger.total / ledger.window) * 100) : 0,
+    contributors: ledger.contributors,
+    compaction: events.filter((event) => event.type === 'compact'),
     // Without this, a failed planning call and a deliberate "nothing needed"
     // decision look identical from the outside (both end up N tools offered,
     // 0 called) — the evaluator would otherwise diagnose a missing feature
     // when the actual cause was this turn's planning call failing.
-    planning: {
-      skills: skillEvt ? { available: skillEvt.available, loaded: skillEvt.selected, error: skillEvt.error || null } : null,
-      tools: toolEvt ? { available: toolEvt.totalAvailable, scoped: toolEvt.scoped, fellBackToFullCatalog: !!toolEvt.fellBack, boundedBySkill: toolEvt.bySkills || null } : null
-    },
+    planning: planningDigest(events),
     // Pass 2 + execution (plan-and-execute): the derived plan, per-step status,
     // re-plans, and working-memory captures. mode "flat-loop" = the planner
     // judged the turn simple (or planning failed/timed out and degraded).
-    execution: {
-      // An alignment turn is a DELIBERATE outcome (open decisions returned to
-      // the user, no steps by design) — reporting it as 'flat-loop' with a
-      // null plan made every align turn read to the evaluator as a planning
-      // failure.
-      mode: rec.plan ? 'plan-and-execute' : rec.aligned ? 'alignment' : 'flat-loop',
-      // Evaluations can run MID-TURN — without this the evaluator reads
-      // "N tools offered, 0 called" on a still-running turn as waste.
-      turnComplete: !!rec.metrics,
-      plan: rec.plan ? {
-        goal: rec.plan.goal || '',
-        steps: (rec.plan.steps || []).map((s) => ({ id: s.id, task: (s.task || '').slice(0, 140), produces: s.produces || '', parallel: !!s.parallel, status: s.status })),
-        merge: (rec.plan.merge || '').slice(0, 200),
-        replans: rec.plan.replans || 0,
-        escalatedToUser: !!rec.plan.escalated,
-        completed: rec.plan.completed !== false,
-        varsCaptured: rec.plan.vars || 0
-      } : null
-    },
-    tools: {
-      offered: L.toolCount || 0,
-      results: (rec.toolTurns || []).map((t) => ({ name: String(t.name).split('__').pop(), tokens: t.resultTokens, truncated: !!t.truncated }))
-    },
-    delegations: (rec.process || []).map((p) => ({ agent: p.agent, absorbedTokens: p.inputTokens, returnedTokens: p.conclusionTokens, tools: p.tools })),
-    request: cur ? (cur.content || '').slice(0, 500) : ''
+    execution: executionDigest(record), tools: toolDigest(record),
+    delegations: (record.process || []).map((item) => ({ agent: item.agent, absorbedTokens: item.inputTokens, returnedTokens: item.conclusionTokens, tools: item.tools })),
+    request: current ? (current.content || '').slice(0, 500) : ''
   };
 }
 
@@ -1909,6 +1992,46 @@ function turn(text, role, model) {
   el.messages.scrollTop = el.messages.scrollHeight;
   return div;
 }
+
+function securityCardCopy(direction) {
+  if (direction === 'outbound') return ['LLM FIREWALL · OUTBOUND PROMPT BLOCKED', 'Protected or sensitive information was detected. This prompt was not sent to the upstream model.'];
+  if (direction === 'inbound') return ['GATE GUARD · MODEL RESPONSE WITHHELD', 'The model produced a response, but the Gate Guard withheld it before it reached you.'];
+  return ['MODEL TRAFFIC BLOCKED', 'The configured guard stopped this turn. No blocked content was used by Shamrock.'];
+}
+
+function appendSecurityActions(actions, outbound, editablePrompt) {
+  if (outbound && editablePrompt) {
+    const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'btn btn--brand btn--sm'; edit.textContent = 'EDIT PROMPT';
+    edit.onclick = () => { el.input.value = editablePrompt; autosize(); el.input.focus(); };
+    actions.appendChild(edit);
+  }
+  const audit = document.createElement('button'); audit.type = 'button'; audit.className = 'btn btn--ghost btn--sm'; audit.textContent = 'VIEW AUDIT';
+  audit.onclick = () => showPage('guards');
+  actions.appendChild(audit);
+}
+
+function renderSecurityCard(div, security = {}, editablePrompt = '') {
+  const outbound = security.direction === 'outbound';
+  const [title, explanation] = securityCardCopy(security.direction);
+  div.className = 'turn turn--security';
+  div.innerHTML = `<div class="security-card">
+    <div class="security-card__icon">◆</div>
+    <div class="security-card__content">
+      <div class="security-card__title">${escapeHtml(title)}</div>
+      <div class="security-card__explanation">${escapeHtml(explanation)}</div>
+      <div class="security-card__reason">${escapeHtml(security.message || 'Blocked by the configured guard.')}</div>
+      <div class="security-card__meta">${[
+        security.safetyCode ? `SAFETY CODE ${security.safetyCode}` : '',
+        security.requestId ? `REQUEST ${security.requestId}` : '',
+        security.guardLabel || ''
+      ].filter(Boolean).map(escapeHtml).join(' · ')}</div>
+      <div class="security-card__actions"></div>
+    </div>
+  </div>`;
+  appendSecurityActions(div.querySelector('.security-card__actions'), outbound, editablePrompt);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  return div;
+}
 // Claude-style action row at the BOTTOM of each assistant reply:
 // copy · thumbs up · thumbs down · retry. Ratings persist on the message row
 // (O14: user judgment lands beside the turn's metrics).
@@ -1927,6 +2050,30 @@ function setRatingUI(row, rating) {
   row.querySelector('[data-act="up"]').classList.toggle('is-active', rating === 1);
   row.querySelector('[data-act="down"]').classList.toggle('is-active', rating === -1);
 }
+async function copyAssistantReply(div, button) {
+  try {
+    await navigator.clipboard.writeText(div._copyText || '');
+    button.textContent = '✓';
+    setTimeout(() => { button.textContent = '⧉'; }, 1200);
+  } catch {}
+}
+async function rateAssistantReply(div, row, value) {
+  const id = await resolveMessageId(div);
+  if (!id) return;
+  const next = div._rating === value ? null : value;
+  div._rating = next;
+  try { await window.api.messages.rate(id, next); } catch {}
+  setRatingUI(row, next);
+}
+function retryLastUserRequest() {
+  if (el.send.dataset.mode === 'stop') return;
+  const users = document.querySelectorAll('.turn--user .turn__body');
+  const last = users.length ? users[users.length - 1].textContent : '';
+  if (!last.trim()) return;
+  el.input.value = last;
+  autosize();
+  submit();
+}
 function addCopyBtn(div) {
   if (div.querySelector('.turnactions')) return;
   const row = document.createElement('div');
@@ -1937,32 +2084,10 @@ function addCopyBtn(div) {
     <button type="button" data-act="down" title="Bad response">👎</button>
     <button type="button" data-act="retry" title="Retry — send the request again">↻</button>`;
   const btn = (a) => row.querySelector(`[data-act="${a}"]`);
-  btn('copy').onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(div._copyText || '');
-      btn('copy').textContent = '✓';
-      setTimeout(() => { btn('copy').textContent = '⧉'; }, 1200);
-    } catch {}
-  };
-  const rate = async (value) => {
-    const id = await resolveMessageId(div);
-    if (!id) return;
-    const next = div._rating === value ? null : value;   // click again clears
-    div._rating = next;
-    try { await window.api.messages.rate(id, next); } catch {}
-    setRatingUI(row, next);
-  };
-  btn('up').onclick = () => rate(1);
-  btn('down').onclick = () => rate(-1);
-  btn('retry').onclick = () => {
-    if (el.send.dataset.mode === 'stop') return;   // a turn is running
-    const users = document.querySelectorAll('.turn--user .turn__body');
-    const lastUser = users.length ? users[users.length - 1].textContent : '';
-    if (!lastUser.trim()) return;
-    el.input.value = lastUser;
-    autosize();
-    submit();
-  };
+  btn('copy').onclick = () => copyAssistantReply(div, btn('copy'));
+  btn('up').onclick = () => rateAssistantReply(div, row, 1);
+  btn('down').onclick = () => rateAssistantReply(div, row, -1);
+  btn('retry').onclick = retryLastUserRequest;
   setRatingUI(row, div._rating || null);
   div.appendChild(row);
   return row;
@@ -2000,8 +2125,15 @@ function attachChipsOnTurn(turnEl, attached) {
 function renderMessages(messages) {
   el.messages.innerHTML = '';
   if (messages.length === 0) { turn('NEW CHAT · MESSAGES SAVED TO THIS PROJECT', 'meta'); return; }
+  let lastUserPrompt = '';
   for (const m of messages) {
     let meta = null; try { meta = m.metadata ? JSON.parse(m.metadata) : null; } catch {}
+    if (m.role === 'user') lastUserPrompt = m.content || '';
+    if (meta && meta.security && meta.security.blocked) {
+      const t = document.createElement('div'); el.messages.appendChild(t);
+      renderSecurityCard(t, meta.security, lastUserPrompt);
+      continue;
+    }
     const t = turn(m.content, m.role === 'user' ? 'user' : 'assistant', meta && meta.model);
     if (m.role !== 'user') {
       t._messageId = m.id;
@@ -2224,52 +2356,55 @@ function showSetupNotice(missing) {
 // as a single composed reply through the normal send path — so O8 decision
 // recording works unchanged. First of the feedback shapes; more (multi-select,
 // ranking) can ride the same align-form event.
+function alignmentOptionButton(option, decision, choose, shorten) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'alignform__opt'; button.textContent = option;
+  if (decision.recommendation && decision.recommendation.toLowerCase().includes(shorten(option).toLowerCase())) button.classList.add('is-rec');
+  button.onclick = () => choose(button, shorten(option));
+  return button;
+}
+
+function appendAlignmentWriteIn(options, buttons, choose) {
+  const wrapper = document.createElement('div'); wrapper.className = 'alignform__writein';
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'alignform__opt'; button.textContent = 'OTHER:';
+  const input = document.createElement('input'); input.placeholder = 'write in your own…';
+  const selectInput = () => { if (input.value.trim()) choose(button, input.value.trim()); };
+  button.onclick = () => { input.focus(); selectInput(); }; input.oninput = selectInput;
+  buttons.push(button); wrapper.appendChild(button); wrapper.appendChild(input); options.appendChild(wrapper);
+}
+
+function appendAlignmentDecision(form, picks, decision, index, shorten) {
+  const question = document.createElement('div'); question.className = 'alignform__q';
+  question.textContent = `${index + 1}. ${decision.question}`; form.appendChild(question);
+  const options = document.createElement('div'); options.className = 'alignform__opts';
+  const buttons = [];
+  const choose = (button, value) => { buttons.forEach((item) => item.classList.remove('is-picked')); button.classList.add('is-picked'); picks[index] = value; };
+  for (const option of (decision.options || [])) {
+    const button = alignmentOptionButton(option, decision, choose, shorten);
+    buttons.push(button); options.appendChild(button);
+  }
+  appendAlignmentWriteIn(options, buttons, choose); form.appendChild(options);
+  if (decision.recommendation) { const recommendation = document.createElement('div'); recommendation.className = 'alignform__rec'; recommendation.textContent = '★ ' + decision.recommendation; form.appendChild(recommendation); }
+}
+
+function submitAlignmentChoices(form, decisions, picks) {
+  const selected = [];
+  decisions.forEach((decision, index) => { if (picks[index]) selected.push(`${index + 1}: ${picks[index]}`); });
+  if (!selected.length) return;
+  el.input.value = selected.join('; ');
+  autosize(); form.remove();
+  pendingAlignAnswer = true;
+  submit();
+}
+
 function renderAlignForm(body, ev) {
   const form = document.createElement('div');
   form.className = 'alignform';
   const picks = new Array(ev.decisions.length).fill(null);
   const short = (o) => String(o).split(' — ')[0].split(' - ')[0].trim();
-  ev.decisions.forEach((d, i) => {
-    const q = document.createElement('div'); q.className = 'alignform__q';
-    q.textContent = `${i + 1}. ${d.question}`;
-    form.appendChild(q);
-    const opts = document.createElement('div'); opts.className = 'alignform__opts';
-    const btns = [];
-    const select = (btn, value) => { btns.forEach((b) => b.classList.remove('is-picked')); if (btn) btn.classList.add('is-picked'); picks[i] = value; };
-    for (const o of (d.options || [])) {
-      const b = document.createElement('button'); b.type = 'button'; b.className = 'alignform__opt';
-      b.textContent = o;
-      // Dashed outline marks the model's recommendation — a hint, not a pick.
-      if (d.recommendation && d.recommendation.toLowerCase().includes(short(o).toLowerCase())) b.classList.add('is-rec');
-      b.onclick = () => select(b, short(o));
-      btns.push(b); opts.appendChild(b);
-    }
-    const wrap = document.createElement('div'); wrap.className = 'alignform__writein';
-    const wb = document.createElement('button'); wb.type = 'button'; wb.className = 'alignform__opt'; wb.textContent = 'OTHER:';
-    const wi = document.createElement('input');
-    wi.placeholder = 'write in your own…';
-    const writeSelect = () => { if (wi.value.trim()) select(wb, wi.value.trim()); };
-    wb.onclick = () => { wi.focus(); writeSelect(); };
-    wi.oninput = writeSelect;
-    btns.push(wb);
-    wrap.appendChild(wb); wrap.appendChild(wi); opts.appendChild(wrap);
-    form.appendChild(opts);
-    if (d.recommendation) { const r = document.createElement('div'); r.className = 'alignform__rec'; r.textContent = '★ ' + d.recommendation; form.appendChild(r); }
-  });
+  ev.decisions.forEach((decision, index) => appendAlignmentDecision(form, picks, decision, index, short));
   const go = document.createElement('button'); go.type = 'button'; go.className = 'btn btn--brand btn--sm'; go.textContent = 'USE THESE CHOICES';
-  go.onclick = () => {
-    const parts = [];
-    ev.decisions.forEach((d, i) => { if (picks[i]) parts.push(`${i + 1}: ${picks[i]}`); });
-    if (!parts.length) return;
-    el.input.value = parts.join('; ');
-    autosize();
-    form.remove();          // the markdown reply above stays as the durable record
-    // O8: this next turn IS the ratification — the user picked these answers
-    // in the align form. Only that earns `user` confidence in the store;
-    // everything else the planner infers is `derived` and stays correctable.
-    pendingAlignAnswer = true;
-    submit();
-  };
+  go.onclick = () => submitAlignmentChoices(form, ev.decisions, picks);
   const bar = document.createElement('div'); bar.className = 'alignform__bar'; bar.appendChild(go);
   form.appendChild(bar);
   body.appendChild(form);
@@ -2280,211 +2415,219 @@ function renderAlignForm(body, ev) {
 // cleared immediately, so it can never leak into an unrelated later turn.
 let pendingAlignAnswer = false;
 
+function createSubmissionContext(text) {
+  const context = {
+    text, chatId: state.currentChatId, projectId: state.currentProjectId,
+    turnId: `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    fromAlign: pendingAlignAnswer, attachments: state.attachments.slice(),
+    model: state.selected?.model, streamed: '', alignment: null
+  };
+  pendingAlignAnswer = false;
+  state.turnByChat = state.turnByChat || {}; state.turnByChat[context.chatId] = context.turnId;
+  return context;
+}
+
+function beginSubmissionUi(context) {
+  state.attachments = []; renderAttachChips();
+  const userTurn = turn(context.text || '📎 (attached files)', 'user');
+  if (context.attachments.length) attachChipsOnTurn(userTurn, context.attachments);
+  el.input.value = ''; autosize();
+  el.send.dataset.mode = 'stop'; el.send.textContent = '⏹ STOP & SAVE';
+  document.documentElement.classList.add('busy');
+  context.thinking = turn('', 'assistant', context.model);
+  context.body = context.thinking.querySelector('.turn__body');
+  const dots = document.createElement('span'); dots.className = 'typing'; dots.innerHTML = '<span></span><span></span><span></span>';
+  context.status = document.createElement('span'); context.status.className = 'turn__status';
+  context.body.appendChild(dots); context.body.appendChild(context.status); planReset();
+}
+
+async function saveSubmissionAttachments(context) {
+  if (!context.attachments.length || !context.projectId) return;
+  for (const attachment of context.attachments) {
+    try {
+      const saved = await window.api.documents.saveUpload({ projectId: context.projectId, name: attachment.name, content: attachment.content });
+      if (saved && saved.path) attachment.path = saved.path;
+    } catch {}
+  }
+  state.documents = await window.api.documents.list(context.projectId); renderDocs();
+}
+
+function continueTurn(context, prompt, amount, activeText, stoppedText) {
+  window.api.continueChat(amount, context.turnId); prompt.remove();
+  context.status.textContent = amount ? activeText : stoppedText;
+}
+
+function showContinuationPrompt(context, message, continueLabel, amount) {
+  context.status.textContent = '';
+  const prompt = document.createElement('div'); prompt.className = 'limitprompt';
+  prompt.innerHTML = `<span class="limitprompt__msg">${message}</span>`;
+  const proceed = document.createElement('button'); proceed.className = 'btn btn--brand btn--sm'; proceed.textContent = continueLabel;
+  const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
+  proceed.onclick = () => continueTurn(context, prompt, amount, 'continuing…', 'summarizing…');
+  stop.onclick = () => continueTurn(context, prompt, 0, 'continuing…', 'summarizing…');
+  prompt.appendChild(proceed); prompt.appendChild(stop); context.body.appendChild(prompt);
+  el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function stuckPromptMessage(event) {
+  const step = (event.step || '').slice(0, 160);
+  const goal = event.goal ? ` while working on “${escapeHtml((event.goal || '').slice(0, 120))}”` : '';
+  const blocked = step ? ` — blocked at: ${escapeHtml(step)}` : '';
+  return `Stuck after ${event.replans || 0} re-plan${event.replans === 1 ? '' : 's'}${goal}${blocked}. Keep trying?`;
+}
+
+function actionBypassButton(context, prompt) {
+  const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS SHELL PROMPTS';
+  bypass.title = 'Stop asking for this project. File changes are rolled back by git; shell effects are not.';
+  bypass.onclick = async () => {
+    try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {}
+    continueTurn(context, prompt, 1, 'continuing…', 'action skipped…'); updateBypassChip();
+  };
+  return bypass;
+}
+
+function appendGitInitialization(context, prompt) {
+  const initialize = document.createElement('button'); initialize.className = 'btn btn--ghost btn--sm'; initialize.textContent = 'INITIALIZE GIT';
+  initialize.title = 'Create a git repo in the working directory';
+  const note = document.createElement('span'); note.className = 'limitprompt__msg limitprompt__msg--dim';
+  note.textContent = 'No git repo — writes ask every time and bypass is unavailable.';
+  initialize.onclick = async () => {
+    initialize.disabled = true; initialize.textContent = 'initializing…';
+    const result = await window.api.projects.gitInit(state.currentProjectId);
+    if (result && result.ok) {
+      initialize.remove(); note.textContent = '✓ git initialized — writes now flow free; bypass available:';
+      prompt.appendChild(actionBypassButton(context, prompt));
+    } else { initialize.disabled = false; initialize.textContent = 'INITIALIZE GIT'; note.textContent = `git init failed: ${(result && result.error) || 'unknown'}`; }
+  };
+  prompt.appendChild(initialize); prompt.appendChild(note);
+}
+
+function showActionPrompt(context, event) {
+  context.status.textContent = '';
+  const prompt = document.createElement('div'); prompt.className = 'limitprompt';
+  const message = event.kind === 'shell' ? 'Run this shell command in the working directory?' : 'Allow this file change?';
+  prompt.innerHTML = `<span class="limitprompt__msg">${message}</span><code class="shellcmd">${escapeHtml(String(event.summary || '').slice(0, 600))}</code>`;
+  const allow = document.createElement('button'); allow.className = 'btn btn--brand btn--sm'; allow.textContent = 'ALLOW';
+  const deny = document.createElement('button'); deny.className = 'btn btn--ghost btn--sm'; deny.textContent = 'DENY';
+  allow.onclick = () => continueTurn(context, prompt, 1, 'continuing…', 'action skipped…');
+  deny.onclick = () => continueTurn(context, prompt, 0, 'continuing…', 'action skipped…');
+  prompt.appendChild(allow); prompt.appendChild(deny);
+  if (event.gitAvailable) prompt.appendChild(actionBypassButton(context, prompt));
+  else appendGitInitialization(context, prompt);
+  context.body.appendChild(prompt); el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function updateSubmissionStatus(context, event) {
+  if (event.type === 'model' && !context.streamed) context.status.textContent = 'thinking…';
+  else if (event.type === 'process' && event.kind === 'planning' && !context.streamed) context.status.textContent = 'deriving plan…';
+  else if (event.type === 'process' && event.kind === 'planning-done' && !context.streamed) context.status.textContent = event.steps ? `plan: ${event.steps} steps` : 'thinking…';
+  else if (event.type === 'process' && event.kind === 'retry') context.status.textContent = `provider busy (${event.status || 'error'}) — retry ${event.attempt}…`;
+  else if (event.type === 'tool-start' && !context.streamed) context.status.textContent = `running ${String(event.name).split('__').pop()}…`;
+}
+
+function captureSubmissionProgress(context, event) {
+  if (event.type === 'internals') captureInternals(event, context.chatId);
+  else if (event.type === 'internals-tools') captureInternalsTools(event, context.chatId);
+  else if (event.type === 'tool-end') captureInternalsToolEnd(event, context.chatId);
+  else if (event.type === 'process') captureProcess(event, context.chatId);
+  else if (event.type === 'metrics') captureMetrics(event, context.chatId);
+  else if (event.type === 'document-saved') onDocumentSaved(event);
+}
+
+function handleSubmissionProgress(context, event) {
+  if (event.turnId && event.turnId !== context.turnId) return;
+  if (event.type === 'token') {
+    const stick = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
+    context.streamed += event.text; streamRender(context.body, context.streamed);
+    if (stick) el.messages.scrollTop = el.messages.scrollHeight;
+  } else if (event.type === 'limit') showContinuationPrompt(context, `Reached ${event.iterations} tool steps without finishing — keep going?`, 'CONTINUE +10', 10);
+  else if (event.type === 'stuck') showContinuationPrompt(context, stuckPromptMessage(event), 'KEEP TRYING', 1);
+  else if (event.type === 'action-approve') showActionPrompt(context, event);
+  else if (event.type === 'align-form') context.alignment = event;
+  else if (event.type === 'stream-reset') context.streamed = '';
+  updateSubmissionStatus(context, event); captureSubmissionProgress(context, event); planEvent(event);
+}
+
+function messageHistoryWithoutBlockedTurns(storedMessages) {
+  const history = [];
+  for (const message of storedMessages) {
+    let metadata = null; try { metadata = message.metadata ? JSON.parse(message.metadata) : null; } catch {}
+    if (metadata && metadata.security && metadata.security.blocked) {
+      if (history.length && history[history.length - 1].role === 'user') history.pop();
+    } else history.push({ role: message.role, content: message.content });
+  }
+  return history;
+}
+
+async function submissionHistory(context) {
+  const stored = await window.api.messages.list(context.chatId);
+  const history = messageHistoryWithoutBlockedTurns(stored);
+  if (!context.attachments.length || !history.length) return history;
+  const block = context.attachments.map((attachment) => `\n\n[Attached file: ${attachment.name}${attachment.path ? ` — saved at ${attachment.path}` : ''}]\n\`\`\`\n${attachment.content}\n\`\`\``).join('');
+  const last = history[history.length - 1];
+  history[history.length - 1] = { ...last, content: (last.content || '') + block };
+  return history;
+}
+
+function submissionRequest(context, messages) {
+  const attachments = context.attachments.map((attachment) => ({ name: attachment.name, path: attachment.path || null, chars: (attachment.content || '').length }));
+  return window.api.sendMessage({ providerId: state.selected?.providerId, model: context.model, messages, text: context.text, projectId: context.projectId, chatId: context.chatId, turnId: context.turnId, fromAlign: context.fromAlign, attachments });
+}
+
+async function renderBlockedSubmission(context, result) {
+  clearTimeout(_streamPending); renderSecurityCard(context.thinking, result.security, context.text);
+  const messages = { outbound: 'Outbound prompt blocked by the LLM Firewall before reaching the model.', inbound: 'Model response withheld by the Gate Guard.' };
+  const content = messages[result.security.direction] || 'Model traffic blocked by the configured guard.';
+  await window.api.messages.add({ chatId: context.chatId, role: 'system', content, metadata: { model: result.model, security: result.security } });
+}
+
+function finalSubmissionText(context, result) {
+  let text = ((result.planned ? result.reply : context.streamed) || result.reply || context.streamed || '(empty response)').trim();
+  if (result.aborted && !result.planned) text += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
+  if (result.truncated) text += '\n\n⚠ *Response hit the output-token limit — it may be cut off. Ask to continue for the rest.*';
+  if (result.checkFailing) text += `\n\n⚠ *The project check${result.checkCommand ? ` (\`${result.checkCommand}\`)` : ''} is still failing — the finding was recorded in the DEBT ledger.*`;
+  return text;
+}
+
+async function renderCompletedSubmission(context, result) {
+  if (result.compressed) {
+    const note = document.createElement('div'); note.className = 'turn turn--meta';
+    note.innerHTML = '<div class="turn__body">⚡ EARLIER HISTORY COMPRESSED TO SAVE CONTEXT</div>';
+    el.messages.insertBefore(note, context.thinking);
+  }
+  clearTimeout(_streamPending);
+  const text = finalSubmissionText(context, result); renderAssistantBody(context.body, text);
+  context.thinking._copyText = text; addCopyBtn(context.thinking);
+  if (result.toolTrace && result.toolTrace.length) toolChips(context.thinking, result.toolTrace);
+  if (context.alignment && context.alignment.decisions && context.alignment.decisions.length) renderAlignForm(context.body, context.alignment);
+  el.messages.scrollTop = el.messages.scrollHeight;
+  await window.api.messages.add({ chatId: context.chatId, role: 'assistant', content: text, metadata: { model: result.model, tools: result.toolTrace || [] } });
+}
+
+function finishSubmission(context, unsubscribe) {
+  unsubscribe(); planStop(); renderVars();
+  el.send.dataset.mode = ''; el.send.textContent = 'SEND'; el.send.disabled = false;
+  document.documentElement.classList.remove('busy'); el.input.focus();
+}
+
 async function submit() {
-  if (el.send.dataset.mode === 'stop') return; // a turn is running — the button is the stop control
+  if (el.send.dataset.mode === 'stop') return;
   const text = el.input.value.trim();
   if ((!text && !state.attachments.length) || !state.currentChatId) return;
   const missing = missingPrereqs();
-  if (missing.length) { showSetupNotice(missing); return; }
-  // Turn identity, captured NOW: everything this turn saves or attributes uses
-  // these — switching chats mid-turn must never land the reply, internals, or
-  // metrics in the wrong chat. turnId scopes progress events and the
-  // abort/continue control channels to exactly this turn.
-  const turnChatId = state.currentChatId;
-  const turnProjectId = state.currentProjectId;
-  const turnId = `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-  // Consume the align-ratification flag exactly once (O8).
-  const fromAlign = pendingAlignAnswer; pendingAlignAnswer = false;
-  state.turnByChat = state.turnByChat || {};
-  state.turnByChat[turnChatId] = turnId;
-  const attached = state.attachments.slice();
-  state.attachments = []; renderAttachChips();
-  const userTurn = turn(text || '📎 (attached files)', 'user');
-  if (attached.length) attachChipsOnTurn(userTurn, attached);
-  el.input.value = ''; autosize();
-  // The SEND button morphs into the stop control for the running turn — same
-  // button, same look; clicking it aborts + saves work (main persists
-  // variables, step results, and metrics for what ran).
-  el.send.dataset.mode = 'stop';
-  el.send.textContent = '⏹ STOP & SAVE';
-  document.documentElement.classList.add('busy');
-  await window.api.messages.add({ chatId: turnChatId, role: 'user', content: text });
-  // Keep attachments as project documents so they persist + appear in the rail.
-  if (attached.length && turnProjectId) {
-    // Written to disk (not just indexed) so the coding tools can actually open
-    // them, and so the paths can be handed to the planner with this turn.
-    for (const a of attached) {
-      try {
-        const r = await window.api.documents.saveUpload({ projectId: turnProjectId, name: a.name, content: a.content });
-        if (r && r.path) a.path = r.path;
-      } catch {}
-    }
-    state.documents = await window.api.documents.list(state.currentProjectId); renderDocs();
-  }
-
-  const model = state.selected?.model;
-  const thinking = turn('', 'assistant', model);
-  const body = thinking.querySelector('.turn__body');
-  const dots = document.createElement('span'); dots.className = 'typing'; dots.innerHTML = '<span></span><span></span><span></span>';
-  const status = document.createElement('span'); status.className = 'turn__status';
-  body.appendChild(dots); body.appendChild(status);
-  const shortTool = (n) => String(n).split('__').pop();
-  planReset();
-  let streamed = '';
-  let alignEv = null; // structured O7 decisions — rendered as a form after the reply lands
-  const nearBottom = () => el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 80;
-  // Mid-turn "tool-call limit reached" prompt: let the user grant more steps.
-  function showLimitPrompt(iterations) {
-    status.textContent = '';
-    const prompt = document.createElement('div');
-    prompt.className = 'limitprompt';
-    prompt.innerHTML = `<span class="limitprompt__msg">Reached ${iterations} tool steps without finishing — keep going?</span>`;
-    const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'CONTINUE +10';
-    const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
-    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
-    cont.onclick = () => answer(10);
-    stop.onclick = () => answer(0);
-    prompt.appendChild(cont); prompt.appendChild(stop);
-    body.appendChild(prompt);
-    el.messages.scrollTop = el.messages.scrollHeight;
-  }
-  // Stuck-plan escalation (decision #1): re-plans are exhausted — explain what
-  // is stuck and ask approval to keep trying (same chat:continue channel).
-  function showStuckPrompt(ev) {
-    status.textContent = '';
-    const prompt = document.createElement('div');
-    prompt.className = 'limitprompt';
-    const step = (ev.step || '').slice(0, 160);
-    prompt.innerHTML = `<span class="limitprompt__msg">Stuck after ${ev.replans || 0} re-plan${ev.replans === 1 ? '' : 's'}`
-      + (ev.goal ? ` while working on “${escapeHtml((ev.goal || '').slice(0, 120))}”` : '')
-      + (step ? ` — blocked at: ${escapeHtml(step)}` : '') + `. Keep trying?</span>`;
-    const cont = document.createElement('button'); cont.className = 'btn btn--brand btn--sm'; cont.textContent = 'KEEP TRYING';
-    const stop = document.createElement('button'); stop.className = 'btn btn--ghost btn--sm'; stop.textContent = 'STOP & SUMMARIZE';
-    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'summarizing…'; };
-    cont.onclick = () => answer(1);
-    stop.onclick = () => answer(0);
-    prompt.appendChild(cont); prompt.appendChild(stop);
-    body.appendChild(prompt);
-    el.messages.scrollTop = el.messages.scrollHeight;
-  }
-  // Coding mode: per-action approval for mutations (writes/edits/shell) over
-  // the same one-shot chat:continue channel. BYPASS (stop asking for this
-  // project) is only offered when the working dir has git — rollback exists.
-  function showActionPrompt(ev) {
-    status.textContent = '';
-    const prompt = document.createElement('div');
-    prompt.className = 'limitprompt';
-    const msg = ev.kind === 'shell'
-      ? 'Run this shell command in the working directory?'
-      : 'Allow this file change?';
-    prompt.innerHTML = `<span class="limitprompt__msg">${msg}</span>`
-      + `<code class="shellcmd">${escapeHtml(String(ev.summary || '').slice(0, 600))}</code>`;
-    const allow = document.createElement('button'); allow.className = 'btn btn--brand btn--sm'; allow.textContent = 'ALLOW';
-    const deny = document.createElement('button'); deny.className = 'btn btn--ghost btn--sm'; deny.textContent = 'DENY';
-    const answer = (more) => { window.api.continueChat(more, turnId); prompt.remove(); status.textContent = more ? 'continuing…' : 'action skipped…'; };
-    allow.onclick = () => answer(1);
-    deny.onclick = () => answer(0);
-    prompt.appendChild(allow); prompt.appendChild(deny);
-    const makeBypassBtn = () => {
-      const bypass = document.createElement('button'); bypass.className = 'btn btn--ghost btn--sm'; bypass.textContent = 'BYPASS SHELL PROMPTS';
-      bypass.title = 'Stop asking for this project. File changes are rolled back by git; SHELL effects (network, installs, deletes outside the repo) are NOT — the app will ask you to confirm this grant.';
-      bypass.onclick = async () => { try { await window.api.settings.set('coding_bypass', '1', state.currentProjectId); } catch {} answer(1); updateBypassChip(); };
-      return bypass;
-    };
-    if (ev.gitAvailable) {
-      prompt.appendChild(makeBypassBtn());
-    } else {
-      // Ask, don't just refuse: initialize git right here — the pending
-      // approval stays open, and main re-checks git on every gate decision.
-      const init = document.createElement('button'); init.className = 'btn btn--ghost btn--sm'; init.textContent = 'INITIALIZE GIT';
-      init.title = 'Create a git repo in the working directory — file writes then flow without prompts, and bypass becomes available';
-      const note = document.createElement('span');
-      note.className = 'limitprompt__msg limitprompt__msg--dim';
-      note.textContent = 'No git repo — writes ask every time and bypass is unavailable.';
-      init.onclick = async () => {
-        init.disabled = true; init.textContent = 'initializing…';
-        const r = await window.api.projects.gitInit(state.currentProjectId);
-        if (r && r.ok) {
-          init.remove();
-          note.textContent = '✓ git initialized — writes now flow free; bypass available:';
-          prompt.appendChild(makeBypassBtn());
-        } else {
-          init.disabled = false; init.textContent = 'INITIALIZE GIT';
-          note.textContent = `git init failed: ${(r && r.error) || 'unknown'}`;
-        }
-      };
-      prompt.appendChild(init);
-      prompt.appendChild(note);
-    }
-    body.appendChild(prompt);
-    el.messages.scrollTop = el.messages.scrollHeight;
-  }
-
-  const unsub = window.api.onChatProgress((ev) => {
-    if (ev.turnId && ev.turnId !== turnId) return; // another turn's events
-    if (ev.type === 'token') {
-      streamed += ev.text;
-      const stick = nearBottom();
-      streamRender(body, streamed); // prose live; html/svg buffered as placeholders
-      if (stick) el.messages.scrollTop = el.messages.scrollHeight;
-    } else if (ev.type === 'model') { if (!streamed) status.textContent = 'thinking…'; }
-    else if (ev.type === 'process' && ev.kind === 'planning') { if (!streamed) status.textContent = 'deriving plan…'; }
-    else if (ev.type === 'process' && ev.kind === 'planning-done') { if (!streamed) status.textContent = ev.steps ? `plan: ${ev.steps} steps` : 'thinking…'; }
-    else if (ev.type === 'process' && ev.kind === 'retry') { status.textContent = `provider busy (${ev.status || 'error'}) — retry ${ev.attempt}…`; }
-    else if (ev.type === 'tool-start') { if (!streamed) status.textContent = `running ${shortTool(ev.name)}…`; }
-    else if (ev.type === 'limit') { showLimitPrompt(ev.iterations); }
-    else if (ev.type === 'stuck') { showStuckPrompt(ev); }
-    else if (ev.type === 'action-approve') { showActionPrompt(ev); }
-    else if (ev.type === 'align-form') { alignEv = ev; }
-    else if (ev.type === 'stream-reset') { streamed = ''; }  // synthesis begins — steps streamed above were working text, not the reply
-    else if (ev.type === 'internals') { captureInternals(ev, turnChatId); }
-    else if (ev.type === 'internals-tools') { captureInternalsTools(ev, turnChatId); }
-    else if (ev.type === 'tool-end') { captureInternalsToolEnd(ev, turnChatId); }
-    else if (ev.type === 'process') { captureProcess(ev, turnChatId); }
-    else if (ev.type === 'metrics') { captureMetrics(ev, turnChatId); }
-    else if (ev.type === 'document-saved') { onDocumentSaved(ev); }
-    planEvent(ev);
-  });
-
+  if (missing.length) return showSetupNotice(missing);
+  const context = createSubmissionContext(text); beginSubmissionUi(context);
+  await window.api.messages.add({ chatId: context.chatId, role: 'user', content: text });
+  await saveSubmissionAttachments(context);
+  const unsubscribe = window.api.onChatProgress((event) => handleSubmissionProgress(context, event));
   try {
-    const history = (await window.api.messages.list(turnChatId)).map((m) => ({ role: m.role, content: m.content }));
-    if (attached.length && history.length) {
-      const block = attached.map((a) => `\n\n[Attached file: ${a.name}${a.path ? ` — saved at ${a.path}` : ''}]\n\`\`\`\n${a.content}\n\`\`\``).join('');
-      const last = history[history.length - 1];
-      history[history.length - 1] = { ...last, content: (last.content || '') + block };
-    }
-    const res = await window.api.sendMessage({ providerId: state.selected?.providerId, model, messages: history, text, projectId: turnProjectId, chatId: turnChatId, turnId, fromAlign, attachments: attached.map((a) => ({ name: a.name, path: a.path || null, chars: (a.content || '').length })) });
-    if (res.compressed) {
-      const note = document.createElement('div');
-      note.className = 'turn turn--meta';
-      note.innerHTML = '<div class="turn__body">⚡ EARLIER HISTORY COMPRESSED TO SAVE CONTEXT</div>';
-      el.messages.insertBefore(note, thinking);
-    }
-    clearTimeout(_streamPending);
-    // Planned turns: the authoritative reply is the synthesis (res.reply);
-    // streamed may hold per-step working text if stream-reset was missed.
-    let finalText = ((res.planned ? res.reply : streamed) || res.reply || streamed || '(empty response)').trim();
-    if (res.aborted && !res.planned) finalText += '\n\n⏹ *Stopped at your request — gathered values and tool work were saved.*';
-    // Honesty marker: a max_tokens cut must never present as a complete answer.
-    if (res.truncated) finalText += '\n\n⚠ *Response hit the output-token limit — it may be cut off. Ask to continue for the rest.*';
-    // O26: a failing check must never be invisible behind a confident reply —
-    // same honesty-marker treatment as a truncated response.
-    if (res.checkFailing) finalText += `\n\n⚠ *The project check${res.checkCommand ? ` (\`${res.checkCommand}\`)` : ''} is still failing — the finding was recorded in the DEBT ledger.*`;
-    renderAssistantBody(body, finalText);
-    thinking._copyText = finalText;
-    if (!thinking.querySelector('.copybtn')) addCopyBtn(thinking);
-    if (res.toolTrace && res.toolTrace.length) toolChips(thinking, res.toolTrace);
-    if (alignEv && alignEv.decisions && alignEv.decisions.length) renderAlignForm(body, alignEv);
-    el.messages.scrollTop = el.messages.scrollHeight;
-    await window.api.messages.add({ chatId: turnChatId, role: 'assistant', content: finalText, metadata: { model: res.model, tools: res.toolTrace || [] } });
-  } catch (err) {
-    thinking.className = 'turn turn--meta';
-    thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(err?.message ?? 'request failed')}</div>`;
-  } finally {
-    unsub(); planStop(); renderVars();
-    el.send.dataset.mode = ''; el.send.textContent = 'SEND'; el.send.disabled = false;
-    document.documentElement.classList.remove('busy'); el.input.focus();
-  }
+    const result = await submissionRequest(context, await submissionHistory(context));
+    if (result.security && result.security.blocked) await renderBlockedSubmission(context, result);
+    else await renderCompletedSubmission(context, result);
+  } catch (error) {
+    context.thinking.className = 'turn turn--meta';
+    context.thinking.innerHTML = `<div class="turn__body">ERROR · ${escapeHtml(error?.message ?? 'request failed')}</div>`;
+  } finally { finishSubmission(context, unsubscribe); }
 }
 function autosize() { el.input.style.height = 'auto'; el.input.style.height = `${el.input.scrollHeight}px`; }
 
@@ -2548,7 +2691,90 @@ function planEvent(ev) {
   }
 }
 
-// ── Models screen ─────────────────────────────────────────────────
+// ── LLM guards screen ─────────────────────────────────────────────
+async function loadGuards() {
+  try { [state.guards, state.guardEvents] = await Promise.all([window.api.guards.list(), window.api.guards.events(100)]); }
+  catch (error) { console.error('[guards load]', error && error.message); state.guards = []; state.guardEvents = []; }
+  renderGuards(); renderGuardEvents();
+}
+
+function renderGuards() {
+  el.guardList.innerHTML = ''; el.guardEmpty.hidden = state.guards.length > 0;
+  for (const guard of state.guards) {
+    const li = document.createElement('li'); li.className = 'conn';
+    const statusCls = guard.status === 'ok' ? ' conn__status--ok' : guard.status === 'error' ? ' conn__status--error' : '';
+    const needsToken = guard.auth_mode === 'bearer' && !guard.has_secret;
+    li.innerHTML = `<span class="conn__status${statusCls}" title="${escapeHtml(guard.status_detail || guard.status || 'untested')}"></span>
+      <div class="conn__info"><div class="conn__label">${escapeHtml(guard.label || 'LLM guard')}${needsToken ? ' <span class="conn__nokey">NO TOKEN</span>' : ''}</div><div class="conn__type">${escapeHtml(guard.kind)} · ${guard.auth_mode === 'bearer' ? 'GUARD TOKEN' : 'PROVIDER KEY PASSTHROUGH'}</div></div>
+      <div class="conn__mid"><div class="conn__url">${escapeHtml(guard.base_url)}</div><div class="conn__model">${guard.enabled ? 'ACTIVE · model traffic is routed here' : 'OFF · provider traffic is direct'}</div></div><div class="conn__actions"></div>`;
+    const actions = li.querySelector('.conn__actions');
+    const toggle = document.createElement('button'); toggle.className = 'toggle' + (guard.enabled ? ' is-on' : ''); toggle.innerHTML = '<div class="toggle__knob"></div>'; toggle.title = guard.enabled ? 'Turn guard off' : 'Turn guard on';
+    toggle.onclick = async () => { const r = await window.api.guards.update(guard.id, { enabled: !guard.enabled }); if (r && r.ok) await loadGuards(); };
+    actions.appendChild(toggle);
+    const test = document.createElement('button'); test.className = 'conn__btn'; test.textContent = 'TEST';
+    test.onclick = async () => { test.textContent = '…'; const r = await window.api.guards.test({ id: guard.id }); test.textContent = r.ok ? 'OK' : 'FAIL'; await loadGuards(); };
+    actions.appendChild(test);
+    const edit = document.createElement('button'); edit.className = 'conn__btn'; edit.textContent = 'EDIT'; edit.onclick = () => openGuardEditor(guard.id); actions.appendChild(edit);
+    const remove = document.createElement('button'); remove.className = 'conn__btn conn__btn--danger'; remove.textContent = 'REMOVE'; remove.onclick = async () => { await window.api.guards.remove(guard.id); await loadGuards(); }; actions.appendChild(remove);
+    el.guardList.appendChild(li);
+  }
+}
+
+function renderGuardEvents() {
+  const events = state.guardEvents || []; el.guardEvents.innerHTML = '';
+  el.guardEventsEmpty.hidden = events.length > 0; el.guardEvents.hidden = events.length === 0;
+  const count = (decision) => events.filter((e) => e.decision === decision).length;
+  const durations = events.map((e) => Number(e.duration_ms)).filter(Number.isFinite);
+  const avg = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  el.guardStats.innerHTML = [[events.length, 'CALLS SHOWN'], [count('allowed'), 'ALLOWED'], [count('blocked'), 'BLOCKED'], [avg ? `${avg}ms` : '—', 'AVG LATENCY']]
+    .map(([n, label]) => `<div class="guard-stat"><div class="guard-stat__n">${n}</div><div class="guard-stat__label">${label}</div></div>`).join('');
+  for (const event of events) {
+    const li = document.createElement('li'); li.className = 'guard-event';
+    const when = event.created_at ? new Date(String(event.created_at).replace(' ', 'T') + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
+    li.innerHTML = `<span class="guard-event__time">${escapeHtml(when)}</span><span class="guard-event__decision guard-event__decision--${escapeHtml(event.decision)}">${escapeHtml(event.decision)}</span><span class="guard-event__detail" title="${escapeHtml(event.detail || '')}">${escapeHtml(event.model || event.operation)}${event.detail ? ' · ' + escapeHtml(event.detail) : ''}</span><span class="guard-event__latency">${event.duration_ms == null ? '—' : `${event.duration_ms}ms`}</span>`;
+    el.guardEvents.appendChild(li);
+  }
+}
+
+function syncGuardAuthField() {
+  const isTrylon = el.gKind.value === 'trylon';
+  if (isTrylon) el.gAuth.value = 'passthrough';
+  el.gAuth.disabled = isTrylon;
+  el.gTokenField.hidden = el.gAuth.value !== 'bearer';
+}
+function openGuardEditor(id) {
+  state.guardEditing = id || null; el.guardResult.textContent = ''; el.guardResult.className = 'test-result';
+  const guard = id ? state.guards.find((g) => g.id === id) : null;
+  el.guardEditorTitle.textContent = guard ? 'EDIT GUARD' : 'ADD GUARD';
+  el.gLabel.value = guard ? (guard.label || '') : 'Local Trylon'; el.gKind.value = guard ? guard.kind : 'trylon';
+  el.gBaseurl.value = guard ? guard.base_url : 'http://127.0.0.1:8000/v1'; el.gAuth.value = guard ? guard.auth_mode : 'passthrough';
+  el.gToken.value = ''; el.gToken.placeholder = guard && guard.has_secret ? 'leave blank to keep current token' : 'paste token';
+  syncGuardAuthField(); el.guardEditor.hidden = false;
+}
+function closeGuardEditor() { state.guardEditing = null; el.guardEditor.hidden = true; }
+async function testGuardEditor() {
+  const input = { baseUrl: el.gBaseurl.value.trim(), authMode: el.gAuth.value, secret: el.gToken.value || undefined };
+  if (state.guardEditing && !el.gToken.value) input.id = state.guardEditing;
+  el.guardResult.textContent = 'testing…'; el.guardResult.className = 'test-result';
+  try {
+    const result = await window.api.guards.test(input);
+    el.guardResult.textContent = result.ok ? `ok · ${result.detail || 'reachable'}` : (result.error || 'failed');
+    el.guardResult.className = 'test-result ' + (result.ok ? 'test-result--ok' : 'test-result--error');
+    if (state.guardEditing) await loadGuards();
+  } catch (error) { el.guardResult.textContent = error.message || 'failed'; el.guardResult.className = 'test-result test-result--error'; }
+}
+async function saveGuardEditor() {
+  const input = { label: el.gLabel.value.trim() || 'LLM guard', kind: el.gKind.value, baseUrl: el.gBaseurl.value.trim(), authMode: el.gAuth.value };
+  if (el.gToken.value) input.secret = el.gToken.value;
+  if (!input.baseUrl) { el.guardResult.textContent = 'enter a base URL'; el.guardResult.className = 'test-result test-result--error'; return; }
+  if (input.authMode === 'bearer' && !input.secret && !state.guards.find((g) => g.id === state.guardEditing && g.has_secret)) { el.guardResult.textContent = 'enter a guard token'; el.guardResult.className = 'test-result test-result--error'; return; }
+  try {
+    const result = state.guardEditing ? await window.api.guards.update(state.guardEditing, input) : await window.api.guards.add(input);
+    if (!result || !result.ok) { if (result && result.cancelled) return; throw new Error((result && result.error) || 'save failed'); }
+    closeGuardEditor(); await loadGuards();
+  } catch (error) { el.guardResult.textContent = error.message || 'save failed'; el.guardResult.className = 'test-result test-result--error'; }
+}
+
 function showModels() {
   el.pages.querySelectorAll('.page').forEach((s) => { s.hidden = s.dataset.page !== 'models'; });
   el.tabbar.querySelectorAll('.tab').forEach((b) => b.classList.remove('is-active'));
@@ -2822,8 +3048,36 @@ function showMcp() {
 }
 function leaveMcp() { if (state.currentProjectId) showPage('chat'); else showFirstRun(); }
 
-async function loadMcp() { state.mcpServers = await window.api.mcp.list(); renderScope(); }
-async function refreshMcp() { state.mcpServers = await window.api.mcp.list(); renderMcpList(); renderScope(); }
+async function loadMcp() {
+  state.mcpServers = await window.api.mcp.list();
+  try {
+    const auth = await window.api.mcp.authStatus();
+    state.mcpAuth = Object.fromEntries((auth || []).map((a) => [a.serverId, a]));
+  } catch {}
+  renderScope();
+}
+async function refreshMcp() {
+  state.mcpServers = await window.api.mcp.list();
+  try {
+    const auth = await window.api.mcp.authStatus();
+    state.mcpAuth = Object.fromEntries((auth || []).map((a) => [a.serverId, a]));
+  } catch {}
+  renderMcpList(); renderScope();
+}
+
+function authStatusText(auth) {
+  if (!auth) return '';
+  if (auth.state === 'renewing') return 'Renewing authorization…';
+  if (auth.state === 'retrying') return 'Authorization expired; retrying once…';
+  if (auth.state === 'reauth_required') return 'Sign in required';
+  if (auth.state === 'renewed') return 'Authorization renewed';
+  if (auth.state === 'error') return auth.detail || 'Authorization error';
+  if (auth.state !== 'connected') return '';
+  if (!auth.expiresAt) return 'Connected';
+  const mins = Math.max(0, Math.round((auth.expiresAt - Date.now()) / 60000));
+  const renewed = auth.lastRenewedAt && (Date.now() - new Date(auth.lastRenewedAt).getTime()) < 120000 ? ' · renewed now' : '';
+  return `Connected${renewed} · renews in ${mins}m`;
+}
 // Version-drift check: compare the live server (tools + skill versions)
 // against what the app imported/cached. Badges the row and the titlebar MCP
 // button; the badge's UPDATE action re-syncs (reconnect + skill re-import).
@@ -2846,13 +3100,18 @@ function renderMcpList() {
   for (const s of state.mcpServers) {
     const li = document.createElement('li');
     li.className = 'conn';
-    const statusCls = s.status === 'ok' ? ' conn__status--ok' : s.status === 'error' ? ' conn__status--error' : '';
+    const auth = state.mcpAuth[s.id];
+    const authBusy = auth && ['renewing', 'retrying'].includes(auth.state);
+    const authBad = auth && ['reauth_required', 'error'].includes(auth.state);
+    const authGood = auth && ['connected', 'renewed'].includes(auth.state);
+    const statusCls = authBad ? ' conn__status--error' : authBusy ? ' conn__status--busy' : (authGood || s.status === 'ok') ? ' conn__status--ok' : s.status === 'error' ? ' conn__status--error' : '';
     const detail = s.transport === 'http' ? (s.url || '') : `${s.command || ''} ${(s.args || []).join(' ')}`.trim();
     const toolNames = (s.tools || []).map((t) => t.name).slice(0, 4).join(', ');
-    const needsAuth = s.transport === 'http' && s.status === 'error' && /401|auth/i.test(s.status_detail || '');
-    const subText = s.status === 'error' && s.status_detail
+    const needsAuth = s.transport === 'http' && (authBad || (s.status === 'error' && /401|auth/i.test(s.status_detail || '')));
+    const liveAuth = authStatusText(auth);
+    const subText = liveAuth || (s.status === 'error' && s.status_detail
       ? (needsAuth ? `${s.status_detail} — click SIGN IN →` : s.status_detail)
-      : (toolNames || 'no tools yet');
+      : (toolNames || 'no tools yet'));
     const sync = (state.mcpSync || {})[s.id];
     const driftBits = sync && sync.drift
       ? [sync.skillsOutdated.length ? `${sync.skillsOutdated.length} skill update${sync.skillsOutdated.length === 1 ? '' : 's'}` : '',
@@ -2862,7 +3121,7 @@ function renderMcpList() {
     const driftTitle = sync && sync.skillsOutdated.length
       ? sync.skillsOutdated.map((k) => `${k.name}: v${k.local} → v${k.remote}`).join('\n') : driftBits;
     li.innerHTML = `
-      <span class="conn__status${statusCls}" title="${escapeHtml(s.status_detail || s.status || 'untested')}"></span>
+      <span class="conn__status${statusCls}" title="${escapeHtml((auth && auth.detail) || s.status_detail || s.status || 'untested')}"></span>
       <div class="conn__info"><div class="conn__label">${escapeHtml(s.name)}${driftBits ? ` <span class="conn__drift" title="${escapeHtml(driftTitle)}">⟳ ${escapeHtml(driftBits)}</span>` : ''}</div><div class="conn__type">${escapeHtml(s.transport)}${s.tools && s.tools.length ? ' · ' + s.tools.length + ' tools' : ''}</div></div>
       <div class="conn__mid"><div class="conn__url">${escapeHtml(detail)}</div><div class="conn__model${s.status === 'error' ? ' conn__model--err' : ''}">${escapeHtml(subText)}</div></div>
       <div class="conn__actions"></div>`;
@@ -2892,7 +3151,7 @@ function renderMcpList() {
 
     if (s.transport === 'http') {
       const signin = document.createElement('button');
-      signin.className = 'conn__btn conn__btn--primary'; signin.textContent = 'SIGN IN'; signin.title = 'Authenticate (OAuth)';
+      signin.className = 'conn__btn conn__btn--primary'; signin.textContent = needsAuth ? 'SIGN IN AGAIN' : 'SIGN IN'; signin.title = 'Authenticate (OAuth)';
       signin.onclick = async () => {
         signin.textContent = '…';
         try {
@@ -2901,7 +3160,7 @@ function renderMcpList() {
           else { signin.textContent = 'FAIL'; console.log('[mcp signin] fail', r.error); }
         } catch (e) { signin.textContent = 'ERR'; console.error('[mcp signin] threw', e && (e.stack || e.message)); }
         await refreshMcp();
-        setTimeout(() => { signin.textContent = 'SIGN IN'; }, 2000);
+        setTimeout(() => { signin.textContent = needsAuth ? 'SIGN IN AGAIN' : 'SIGN IN'; }, 2000);
       };
       actions.appendChild(signin);
     }
@@ -3302,6 +3561,13 @@ function openNewProjectForm() { el.newProjectForm.hidden = false; el.newProjectI
 el.themeBtn.onclick = toggleTheme;
 el.modelsBtn.onclick = showModels;
 el.mcpBtn.onclick = showMcp;
+el.guardAdd.onclick = () => openGuardEditor(null);
+el.guardCancel.onclick = closeGuardEditor;
+el.guardTest.onclick = testGuardEditor;
+el.guardSave.onclick = saveGuardEditor;
+el.guardRefresh.onclick = loadGuards;
+el.gAuth.onchange = syncGuardAuthField;
+el.gKind.onchange = syncGuardAuthField;
 el.mcpAdd.onclick = () => openMcpEditor(null);
 el.mcpDone.onclick = leaveMcp;
 el.mcpCancel.onclick = closeMcpEditor;
@@ -3438,7 +3704,13 @@ window.addEventListener('keydown', (e) => {
 (async function init() {
   applyTheme();
   await loadProviders();
+  await loadGuards();
   await loadMcp();
+  window.api.mcp.onAuthStatus((auth) => {
+    if (!auth || auth.serverId == null) return;
+    state.mcpAuth[auth.serverId] = auth;
+    renderMcpList();
+  });
   await loadSkills();
   await loadProjects();
   if (state.projects.length > 0) selectProject(state.projects[0].id);

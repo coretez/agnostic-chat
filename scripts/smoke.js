@@ -1,5 +1,7 @@
 'use strict';
 
+require('./_app-identity'); // keychain identity — see the file for why
+
 // Headless smoke test of the data layer. Runs inside Electron's main process
 // (so node:sqlite + safeStorage are available). Uses a throwaway temp DB.
 
@@ -12,13 +14,21 @@ const { openDatabase } = require('../src/main/db');
 const repo = require('../src/main/db/repo');
 const secrets = require('../src/main/secrets');
 const { registryList, getConnector } = require('../src/main/providers');
+const { STREAM_TOTAL_TIMEOUT_MS: OPENAI_STREAM_TOTAL_TIMEOUT_MS, CHAT_REQUEST_RETRIES: OPENAI_CHAT_REQUEST_RETRIES } = require('../src/main/providers/openai-compat');
+const { STREAM_TOTAL_TIMEOUT_MS: ANTHROPIC_STREAM_TOTAL_TIMEOUT_MS, CHAT_REQUEST_RETRIES: ANTHROPIC_CHAT_REQUEST_RETRIES } = require('../src/main/providers/anthropic');
+const { testGuard } = require('../src/main/guards');
 const { connectAndList, McpConnection } = require('../src/main/mcp/client');
 const mcpManager = require('../src/main/mcp/manager');
 const { runChatLoop } = require('../src/main/chat-loop');
 const { maybeCompress } = require('../src/main/compress');
+const { compactToolHistory } = require('../src/main/tool-history');
+const { verifyPrimarySources } = require('../src/main/primary-source-verifier');
+const { ensureStockHost } = require('../src/main/workflow-hosting');
+const { verifyStockReport, verifyStockPublisher } = require('../src/main/stock-artifact-verifier');
 const { buildCodingTools, hasGit, commitStep } = require('../src/main/coding-tools');
 const projectDocs = require('../src/main/project-docs');
 const { planContext } = require('../src/main/plan-derive');
+const { createWorkflowContract, constrainPlan, validateWorkflow, renderResumeContext, withResumeContext, resumePlan, focusResumedStockStep, filterMcpToolset, shouldRepairAcceptance, effectiveStepOutputTokenBudget, effectiveStepDurationBudget, effectiveProviderResponseBudget, validMermaid } = require('../src/main/workflow-contracts');
 const { DEFAULT_TEMPLATE } = require('../src/main/documents');
 const { spawnSync } = require('node:child_process');
 
@@ -27,6 +37,8 @@ function assert(cond, msg) {
   console.log('  ok -', msg);
 }
 
+// qa-template-start: declarative end-to-end assertion catalogue; production
+// function limits are enforced on the implementations exercised below.
 app.whenReady().then(async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agnostic-smoke-'));
   openDatabase(path.join(tmp, 'test.db'));
@@ -44,6 +56,8 @@ app.whenReady().then(async () => {
   repo.messages.add({ chatId: chat.id, role: 'user', content: 'Draft the onboarding doc' });
   repo.messages.add({ chatId: chat.id, role: 'assistant', content: 'Here is a draft…' });
   assert(repo.messages.listByChat(chat.id).length === 2, 'two messages in chat');
+  assert(OPENAI_STREAM_TOTAL_TIMEOUT_MS === 180000 && ANTHROPIC_STREAM_TOTAL_TIMEOUT_MS === 180000, 'provider streams have a finite wall-clock deadline in addition to idle detection');
+  assert(OPENAI_CHAT_REQUEST_RETRIES === 0 && ANTHROPIC_CHAT_REQUEST_RETRIES === 0, 'provider chat requests do not multiply the harness retry budget');
 
   // Documents live on the PROJECT; chats just link to them
   const doc = repo.documents.create({
@@ -55,8 +69,193 @@ app.whenReady().then(async () => {
   // Cross-project isolation
   assert(repo.documents.listByProject(projB.id).length === 0, 'projB sees none of projA docs');
 
+  // Reliability contracts: consequential scope is deterministic, work is
+  // bounded, and acceptance is proven from artifacts/evidence rather than a
+  // model saying "done".
+  {
+    const topMissing = createWorkflowContract({ text: 'Investigate the top 5 cases' });
+    assert(topMissing.kind === 'top-cases' && topMissing.scope.count === 5 && topMissing.scope.issues.some((i) => i.key === 'period'), 'workflow contract: top cases without a window stops for scope');
+    const topScoped = createWorkflowContract({ text: 'Investigate the top 5 cases for August 2026' });
+    assert(topScoped.scope.period === 'August 2026' && topScoped.scope.issues.length === 0, 'workflow contract: a named case window resolves scope');
+    const reportMissing = createWorkflowContract({ text: 'Write a monthly report for Expo' });
+    assert(reportMissing.kind === 'monthly-report' && reportMissing.scope.entity === 'Expo' && reportMissing.scope.issues.length === 1, 'workflow contract: monthly report requires an explicit period');
+    assert(createWorkflowContract({ text: 'Build a website with a section describing the Expo monthly report and top-five cases' }).kind === 'website', 'workflow contract: incidental benchmark names do not override the requested website deliverable');
+    const stockContract = createWorkflowContract({ text: 'Create a stock analysis program using public news and price trends with a daily HTML page and spreadsheet history' });
+    assert(stockContract.kind === 'stock-analysis' && stockContract.acceptance.includes('history-spreadsheet'), 'workflow contract: stock analysis receives the daily artifact and evidence contract');
+    assert(stockContract.budgets.maxStepOutputTokens === 20000, 'workflow contract: stock artifact writes have a finite deliverable-sized output ceiling');
+    assert(effectiveStepOutputTokenBudget({ kind: 'stock-analysis', budgets: { maxStepOutputTokens: 8000 } }) === 20000, 'workflow recovery: persisted stock runs inherit the artifact-sized response ceiling');
+    assert(effectiveStepDurationBudget({ kind: 'stock-analysis', budgets: {} }) === 360000, 'workflow recovery: persisted legacy stock runs inherit the finite step deadline');
+    assert(effectiveProviderResponseBudget(stockContract) === 360000 && effectiveProviderResponseBudget({ kind: 'generic', budgets: {} }) === 180000, 'workflow provider budget: complex artifacts get a bounded 360s response window while ordinary chat keeps 180s');
+    const fakeSiem = { tools: [{ name: 'Fluency_Expo__list_cases' }, { name: 'Fluency_Expo__investigate_proofpoint' }], routes: new Map([['Fluency_Expo__list_cases', 1]]) };
+    const stockToolset = filterMcpToolset(stockContract, fakeSiem);
+    assert(stockContract.toolPolicy.mcp === 'deny' && stockContract.toolPolicy.projectSkills === 'deny' && stockToolset.tools.length === 0 && stockToolset.blocked === 2, 'workflow contract: stock work deterministically excludes SIEM MCP tools and project security skills');
+    const caseToolset = filterMcpToolset(topScoped, fakeSiem);
+    assert(caseToolset.tools.length === 2 && caseToolset.blocked === 0, 'workflow contract: security case work retains its connected SIEM tools');
+    const stockPlan = constrainPlan({ simple: true, align: true, decisions: [{ question: 'Which stack?', options: ['Python', 'Node'] }], steps: [] }, stockContract);
+    assert(!stockPlan.align && stockPlan.steps.length === 6 && /stock-selection-history\.xlsx/.test(stockPlan.steps[3].task), 'workflow contract: a fully specified stock benchmark cannot stop for implementation alignment');
+    const noisyStockPlan = constrainPlan({ simple: false, align: false, steps: Array.from({ length: 8 }, (_, i) => ({ id: i + 1, task: `generic stock step ${i + 1}` })) }, stockContract);
+    assert(noisyStockPlan.steps.length === 6 && /AAPL, AMZN, AVGO/.test(noisyStockPlan.steps[1].task) && /same program must own the full repeatable pipeline/i.test(noisyStockPlan.steps[1].task) && /FIRST run the reusable source program.s publication path/i.test(noisyStockPlan.steps[3].task) && /framework-owned hosting/.test(noisyStockPlan.steps[4].produces) && !/start_server/.test(noisyStockPlan.steps[4].task), 'workflow contract: every stock benchmark receives one reusable pipeline and one framework-owned hosting path');
+    const refinedStockPlan = constrainPlan({ simple: false, steps: [{ id: 1, task: 'model tried to restart' }] }, stockContract, { remainingFrom: 3 });
+    assert(refinedStockPlan.steps.length === 4 && refinedStockPlan.steps[0].id === 3 && /evidence\.json/.test(refinedStockPlan.steps[0].task), 'workflow contract: stock refinement returns only the unfinished tail');
+    const emptyStockRoot = path.join(tmp, 'stock-empty');
+    fs.mkdirSync(emptyStockRoot, { recursive: true });
+    const missingStock = validateWorkflow(stockContract, { stepResults: [{ step: 1, conclusion: 'done' }], artifacts: [], workingDir: emptyStockRoot, serverStatus: { running: false } });
+    assert(missingStock.failures.some((f) => f.id === 'runnable-program') && missingStock.failures.some((f) => f.id === 'host-verified'), 'workflow acceptance: stock output cannot pass without reusable source and a live persistent host');
+    const evidenceRoot = path.join(tmp, 'primary-evidence');
+    fs.mkdirSync(evidenceRoot, { recursive: true });
+    fs.writeFileSync(path.join(evidenceRoot, 'evidence.json'), JSON.stringify({ sources: [
+      { name: 'Aggregator (Primary)', url: 'https://stockanalysis.com/stocks/aapl/', content_type: 'primary', publication_date: '2026-08-30' },
+      { name: 'Apple Investor Relations (Primary)', url: 'https://investor.apple.com/', content_type: 'primary', data_freshness: 'Live IR page' },
+      { name: 'Microsoft Investor Relations (Primary)', url: 'https://www.microsoft.com/en-us/Investor', content_type: 'primary', publication_date: '2026-08-29' }
+    ] }));
+    const verifiedPrimary = await verifyPrimarySources({ root: evidenceRoot, fetchImpl: async () => ({ status: 200 }), timeoutMs: 50 });
+    assert(verifiedPrimary.ok && verifiedPrimary.valid.length === 1 && /microsoft\.com/.test(verifiedPrimary.valid[0].url), 'workflow acceptance: primary source must be reachable, explicitly dated, and on an official issuer/SEC domain');
+    const unreachablePrimary = await verifyPrimarySources({ root: evidenceRoot, fetchImpl: async () => { throw new Error('offline'); }, timeoutMs: 50 });
+    assert(!unreachablePrimary.ok, 'workflow acceptance: an official dated URL still fails when the framework cannot reach it');
+    const primaryGate = validateWorkflow(stockContract, { stepResults: [{ step: 1, conclusion: 'done' }], artifacts: [], workingDir: emptyStockRoot, primarySourceVerification: verifiedPrimary, serverStatus: { running: false } });
+    assert(primaryGate.checks.find((check) => check.id === 'primary-source-evidence').ok, 'workflow acceptance: the stock gate consumes independent primary-source verification, not URL-shaped prose');
+    const honestTiming = validateWorkflow(stockContract, { stepResults: [{ step: 1, conclusion: '2026-09-01 is not yet a completed close; latest completed session is 2026-08-31.' }], artifacts: [], workingDir: emptyStockRoot, now: '2026-09-01T12:00:00Z', primarySourceVerification: verifiedPrimary, serverStatus: { running: false } });
+    assert(honestTiming.checks.find((check) => check.id === 'market-session-honesty').ok, 'workflow acceptance: a not-yet-completed close warning is not misclassified as a completed-close claim');
+    const dishonestTiming = validateWorkflow(stockContract, { stepResults: [{ step: 1, conclusion: '2026-09-01 market close is final.' }], artifacts: [], workingDir: emptyStockRoot, now: '2026-09-01T12:00:00Z', primarySourceVerification: verifiedPrimary, serverStatus: { running: false } });
+    assert(!dishonestTiming.checks.find((check) => check.id === 'market-session-honesty').ok, 'workflow acceptance: an affirmative same-day close claim still fails before 4:05 p.m. New York time');
+    const stockArtifactRoot = path.join(tmp, 'stock-artifact-consistency');
+    const stockReportDir = path.join(stockArtifactRoot, 'reports', '2026-08-31');
+    fs.mkdirSync(stockReportDir, { recursive: true });
+    fs.writeFileSync(path.join(stockArtifactRoot, 'analysis_result.json'), JSON.stringify({ run_date: '2026-08-31', retrieval_time_utc: '2026-08-31T20:06:00Z', all_evaluated: [{ ticker: 'XOM', total_score: 50.5 }], selections: [] }));
+    fs.writeFileSync(path.join(stockReportDir, 'index.html'), '<html>2026-08-31 stale XOM 0 No qualifying selections</html>');
+    assert(!verifyStockReport(stockArtifactRoot).ok, 'workflow acceptance: a stale candidate score or timestamp cannot pass report consistency');
+    fs.writeFileSync(path.join(stockReportDir, 'index.html'), '<html>2026-08-31 2026-08-31T20:06:00Z XOM 50.5 No qualifying selections</html>');
+    assert(verifyStockReport(stockArtifactRoot).ok, 'workflow acceptance: canonical date, timestamp, candidate score, and no-pick outcome pass report consistency');
+    const publisherPath = path.join(stockArtifactRoot, 'analyze.py');
+    fs.writeFileSync(publisherPath, "WORKBOOK='stock-selection-history.xlsx'\nREPORT='reports/2026-08-31/index.html'\n");
+    assert(verifyStockPublisher([publisherPath]).ok && !verifyStockPublisher([]).ok, 'workflow acceptance: reusable program must own both spreadsheet and HTML publication');
+    assert(!shouldRepairAcceptance({ completed: false, aborted: false }, stockContract, missingStock), 'workflow acceptance: a provider-stalled incomplete execution never starts a model repair');
+    assert(shouldRepairAcceptance({ completed: true, aborted: false }, stockContract, missingStock), 'workflow acceptance: one repair remains available after completed execution');
+    assert(!shouldRepairAcceptance({ completed: true, aborted: false, stepResults: [{ incomplete: true }] }, stockContract, missingStock), 'workflow acceptance: an incomplete review step does not spend another provider call on acceptance repair');
+    const wordedTop = createWorkflowContract({ text: 'Investigate the five highest-risk Expo cases in the populated July 2025 case window' });
+    assert(wordedTop.kind === 'top-cases' && wordedTop.scope.count === 5 && wordedTop.scope.period === 'July 2025' && wordedTop.budgets.maxStepOutputTokens === 24000, 'workflow contract: worded highest-risk case requests classify, count, and receive a bounded report-sized output budget');
+
+    const noisy = { simple: false, steps: Array.from({ length: 11 }, (_, i) => ({ id: i + 1, task: `s${i + 1}`, delegate: true, parallel: true, group: 'g' })) };
+    const bounded = constrainPlan(noisy, topScoped);
+    assert(bounded.steps.length === topScoped.budgets.maxPlanSteps && bounded.steps.filter((s) => s.delegate || s.parallel).length === topScoped.budgets.maxDelegates, 'workflow contract: plan and delegation budgets are enforced');
+    const monthlyPlan = constrainPlan({ simple: false, steps: [
+      { id: 1, task: 'Collect the evidence', produces: 'evidence' },
+      { id: 2, task: 'Compose the revised HTML report', produces: 'revised_html' },
+      { id: 3, task: 'Save the report with save_document', produces: 'saved_path' },
+      { id: 4, task: 'Verify the saved report', produces: 'status' }
+    ] }, createWorkflowContract({ text: 'Write the July 2026 monthly report for Expo' }));
+    assert(monthlyPlan.steps.length === 3 && /save_document call in this step/.test(monthlyPlan.steps[1].task) && monthlyPlan.steps[1].produces === 'saved_path', 'workflow contract: monthly compose and save are folded into one durable save-first step');
+    const recoveredFlowPlan = constrainPlan({ simple: false, steps: [{ id: 1, task: 'Read existing project documentation' }] }, createWorkflowContract({ text: 'Write a flow diagram for the code and document modes' }));
+    assert(recoveredFlowPlan.steps.length === 2 && /save_document/.test(recoveredFlowPlan.steps[1].task), 'workflow contract: a mode-flow plan cannot omit its source inspection and saved deliverable');
+    const misleadingFlowPlan = constrainPlan({ simple: false, steps: [{ id: 1, task: 'Collect prior diagram documents' }, { id: 2, task: 'Grep implementation for save_document behavior' }] }, createWorkflowContract({ text: 'Write a flow diagram for the code and document modes' }));
+    assert(misleadingFlowPlan.steps.length === 3 && /create and save/i.test(misleadingFlowPlan.steps[2].task), 'workflow contract: merely inspecting save_document code does not masquerade as the required publication step');
+    const docOnlyFlowPlan = constrainPlan({ simple: false, steps: [{ id: 1, task: 'Read AGENT_RULES.md and prior diagrams' }, { id: 2, task: 'Compose the diagram and save it with save_document' }] }, createWorkflowContract({ text: 'Write a flow diagram for the code and document modes' }));
+    assert(/src\/main\/ipc\.js/.test(docOnlyFlowPlan.steps[1].task) && /read_file/.test(docOnlyFlowPlan.steps[1].task), 'workflow contract: a publication plan cannot omit implementation source inspection');
+    const benchmarkSource = fs.readFileSync(path.join(__dirname, 'live-benchmark.js'), 'utf8');
+    assert(/flow:\s*\{[\s\S]{0,180}workingDir:\s*process\.cwd\(\)/.test(benchmarkSource), 'live mode-flow benchmark exposes the application source as its read-only working directory');
+
+    const reportPath = path.join(tmp, 'expo-august.html');
+    fs.writeFileSync(reportPath, '<html><head><script src="https://cdn.example/x.js"></script></head><body>Expo</body></html>');
+    let acceptance = validateWorkflow(createWorkflowContract({ text: 'Write the August 2026 monthly report for Expo' }), {
+      stepResults: [{ step: 1, conclusion: 'saved' }],
+      artifacts: [{ path: reportPath, title: 'Expo August 2026 Monthly Report', doc_type: 'monthly-report', properties: { period: 'August 2026' } }]
+    });
+    assert(!acceptance.ok && acceptance.failures.some((f) => f.id === 'standalone-assets'), 'workflow acceptance: standalone report rejects remote runtime assets');
+    fs.writeFileSync(reportPath, '<html><body>Expo August 2026</body></html>');
+    acceptance = validateWorkflow(createWorkflowContract({ text: 'Write the August 2026 monthly report for Expo' }), {
+      stepResults: [{ step: 1, conclusion: 'saved' }],
+      artifacts: [{ path: reportPath, title: 'Expo August 2026 Monthly Report', doc_type: 'monthly-report', properties: { period: 'August 2026' } }]
+    });
+    assert(acceptance.ok, 'workflow acceptance: one period-matched standalone report passes');
+    acceptance = validateWorkflow(createWorkflowContract({ text: 'Write the July 2026 monthly report for Expo' }), {
+      stepResults: [{ step: 1, conclusion: 'saved' }],
+      artifacts: [{ path: reportPath, title: 'Expo Monthly Security Report — 2026-07', doc_type: 'monthly-report', properties: { period: '2026-07' } }]
+    });
+    assert(acceptance.checks.find((check) => check.id === 'period-matches').ok, 'workflow acceptance: named and ISO month formats identify the same report period');
+
+    const four = Array.from({ length: 4 }, (_, i) => `Case ID: C-00${i + 1}\nVerdict: reviewed`).join('\n');
+    acceptance = validateWorkflow(topScoped, { stepResults: [{ step: 1, conclusion: four }] });
+    assert(!acceptance.ok && acceptance.failures.some((f) => f.id === 'requested-case-count'), 'workflow acceptance: four cases cannot pass a top-five investigation');
+    const five = four + '\nCase ID: C-005\nVerdict: reviewed';
+    assert(validateWorkflow(topScoped, { stepResults: [{ step: 1, conclusion: five }] }).ok, 'workflow acceptance: five unique cases with verdicts pass');
+    const exactRanked = validateWorkflow(topScoped, { caseIds: ['C-001', 'C-002', 'C-003', 'C-004', 'C-005'], stepResults: [{ step: 1, conclusion: five + '\nRelated case: C-099\nVerdict: linked' }] });
+    assert(exactRanked.checks.find((check) => check.id === 'requested-case-count').ok, 'workflow acceptance: authoritative ranked case variables prevent related-case mentions from inflating the top-five count');
+    const htmlVerdicts = '<table><th>Verdict</th>' + Array.from({ length: 5 }, (_unused, index) => `<tr><td>Case ${index + 1}</td><td>so-observation${index + 1}</td></tr>`).join('') + '</table>';
+    const recordedVerdicts = validateWorkflow(topScoped, { caseIds: ['C-001', 'C-002', 'C-003', 'C-004', 'C-005'], stepResults: [{ step: 1, conclusion: htmlVerdicts }] });
+    assert(recordedVerdicts.checks.find((check) => check.id === 'case-verdicts').ok, 'workflow acceptance: five distinct recorded observation IDs prove five HTML case verdicts without prose-specific punctuation');
+    const jsonFive = JSON.stringify({ cases: Array.from({ length: 5 }, (_, i) => ({ [`top_case_${i + 1}_id`]: `C-00${i + 1}`, fingerprint_hash: `F-00${i + 1}`, verdict: 'reviewed' })) });
+    assert(validateWorkflow(topScoped, { stepResults: [{ step: 1, conclusion: jsonFive }] }).ok, 'workflow acceptance: JSON case bundles count case IDs and verdicts without mistaking fingerprint hashes for cases');
+
+    const flowPath = path.join(tmp, 'modes.md');
+    fs.writeFileSync(flowPath, '```mermaid\nflowchart LR\nCode --> Documents\n```');
+    const flowContract = createWorkflowContract({ text: 'Write a flow diagram for the code and document modes' });
+    acceptance = validateWorkflow(flowContract, { stepResults: [{ step: 1, conclusion: 'saved' }], artifacts: [{ path: flowPath }] });
+    assert(!acceptance.ok && acceptance.failures.some((f) => f.id === 'source-inspected'), 'workflow acceptance: a plausible Mermaid fence fails without source evidence');
+    acceptance = validateWorkflow(flowContract, { stepResults: [{ step: 1, conclusion: 'saved' }], artifacts: [{ path: flowPath }], toolTrace: [{ name: 'read_file', args: { path: 'docs/SPEC.md' }, ok: true }] });
+    assert(!acceptance.ok && acceptance.failures.some((f) => f.id === 'source-inspected'), 'workflow acceptance: prose documentation does not masquerade as implementation source inspection');
+    fs.writeFileSync(flowPath, '```mermaid\nflowchart LR\nCode --> Documents\n```\n\nSource evidence: src/main/ipc.js');
+    acceptance = validateWorkflow(flowContract, { stepResults: [{ step: 1, conclusion: 'saved' }], artifacts: [{ path: flowPath }], toolTrace: [{ name: 'read_file', args: { path: 'src/main/ipc.js' }, ok: true }] });
+    assert(acceptance.ok, 'workflow acceptance: source-inspected and cited mode flow passes');
+    acceptance = validateWorkflow(flowContract, { stepResults: [{ step: 1, conclusion: 'saved', incomplete: true }], artifacts: [{ path: flowPath }], toolTrace: [{ name: 'read_file', args: { path: 'src/main/ipc.js' }, ok: true }] });
+    assert(acceptance.ok && /provider stopped after publication/.test(acceptance.checks.find((check) => check.id === 'steps-complete').detail), 'workflow acceptance: provider exhaustion after a deterministically verified durable artifact does not erase completion');
+    fs.writeFileSync(flowPath, '```mermaid\nflowchart LR\nCode --> Documents\n```');
+    acceptance = validateWorkflow(flowContract, { stepResults: [{ step: 1, conclusion: 'saved', incomplete: true }], artifacts: [{ path: flowPath }], toolTrace: [{ name: 'read_file', args: { path: 'src/main/ipc.js' }, ok: true }] });
+    assert(!acceptance.ok && acceptance.failures.some((failure) => failure.id === 'source-cited'), 'workflow acceptance: durable recovery never hides a failed substantive artifact check');
+    assert(!validMermaid('```mermaid\nthis is not a diagram\n```'), 'workflow acceptance: invalid Mermaid syntax cannot pass on fencing alone');
+
+    const sitePath = path.join(tmp, 'site.html'); fs.writeFileSync(sitePath, '<!doctype html><title>Site</title>');
+    const siteContract = createWorkflowContract({ text: 'Create a website' });
+    assert(!validateWorkflow(siteContract, { stepResults: [{ step: 1, conclusion: 'built' }], artifacts: [{ path: sitePath }], check: { ran: true, ok: false }, checkRequired: true }).ok, 'workflow acceptance: website cannot pass a failing project check');
+    assert(validateWorkflow(siteContract, { stepResults: [{ step: 1, conclusion: 'built' }], artifacts: [{ path: sitePath }], check: { ran: true, ok: true }, checkRequired: true }).ok, 'workflow acceptance: website artifact plus passing check succeeds');
+  }
+
+  // Durable recovery records survive the process boundary and expose only the
+  // completed prefix to a resumed planner.
+  {
+    const contract = createWorkflowContract({ text: 'Create a website', turnId: 'resume-smoke' });
+    const run = repo.workflowRuns.start({ turnId: 'resume-smoke', projectId: projA.id, chatId: chat.id, kind: contract.kind, contract, plan: { steps: [{ id: 1, task: 'build' }, { id: 2, task: 'test' }] } });
+    repo.workflowRuns.checkpoint(run.id, { stepKey: 1, step: { id: 1, task: 'build' }, result: { conclusion: 'built' }, values: { seq: 0, entries: [] }, toolTrace: [{ name: 'write_file', ok: true }] });
+    const latest = repo.workflowRuns.latestIncomplete(chat.id);
+    const cps = repo.workflowRuns.checkpoints(run.id);
+    assert(latest.id === run.id && cps.length === 1 && cps[0].result.conclusion === 'built', 'workflow recovery: latest incomplete run and checkpoint round-trip');
+    const resume = renderResumeContext(latest, cps);
+    assert(resume.includes('built') && /do not replay/i.test(resume), 'workflow recovery: resume context preserves results and forbids side-effect replay');
+    const resumedHistory = withResumeContext([{ role: 'user', content: 'resume' }], resume);
+    assert(resumedHistory.length === 2 && resumedHistory[0].role === 'system' && resumedHistory[0].content.includes('built') && resumedHistory[1].content === 'resume', 'workflow recovery: durable checkpoint results are injected into resumed execution history');
+    assert(withResumeContext([{ role: 'user', content: 'fresh' }], '').length === 1, 'workflow recovery: fresh execution history is unchanged when no resume context exists');
+    const remaining = resumePlan({ steps: [{ id: 1, task: 'build' }, { id: 2, task: 'test' }] }, cps);
+    assert(remaining.steps.length === 1 && remaining.steps[0].id === 2, 'workflow recovery: resumed execution removes the durable completed prefix');
+    const partialPlan = resumePlan({ steps: [{ id: 1, task: 'build' }, { id: 2, task: 'test' }] }, [{ step_key: '1', result: { conclusion: '', incomplete: true } }]);
+    assert(partialPlan.steps.length === 2 && partialPlan.steps[0].id === 1, 'workflow recovery: an incomplete checkpoint remains the retry boundary instead of being skipped');
+    const focusedStock = focusResumedStockStep({ steps: [{ id: 2, task: 'broad rebuild' }, { id: 3, task: 'collect' }] }, { kind: 'stock-analysis', error: 'publisher-program: missing; report-consistency: mismatch; host-verified: down' }, [{ step_key: '2', result: { incomplete: true } }]);
+    assert(/FOCUSED RESUME/.test(focusedStock.steps[0].task) && /publisher-program/.test(focusedStock.steps[0].task) && !/host-verified/.test(focusedStock.steps[0].task) && focusedStock.steps[1].task === 'collect', 'workflow recovery: a stalled stock publisher retry narrows to exact publisher defects without swallowing later host work');
+    repo.workflowRuns.updateStatus(run.id, 'partial', { error: 'spreadsheet-formulas: calendar-day offsets remain' });
+    const failedResume = renderResumeContext(repo.workflowRuns.get(run.id), cps);
+    assert(failedResume.includes('spreadsheet-formulas: calendar-day offsets remain') && /correct those exact defects before doing broad inventory/i.test(failedResume), 'workflow recovery: prior acceptance failures are injected as the first correction target');
+    const interrupted = repo.workflowRuns.start({ turnId: 'interrupted-smoke', projectId: projA.id, chatId: chat.id, kind: 'website', contract, plan: { steps: [{ id: 1, task: 'build' }] } });
+    assert(repo.workflowRuns.recoverInterrupted() >= 1 && repo.workflowRuns.get(interrupted.id).status === 'partial', 'workflow recovery: app restart converts orphaned running work into resumable partial state');
+    repo.workflowRuns.updateStatus(interrupted.id, 'completed', { state: { seq: 0, entries: [] } });
+    repo.workflowRuns.updateStatus(run.id, 'completed', { state: { seq: 0, entries: [] } });
+    assert(!repo.workflowRuns.latestIncomplete(chat.id), 'workflow recovery: completed run is no longer resumable');
+  }
+
   // Generated-document placement + write + versioning + index
-  const { placementPath, writeDocument, resolveOutputDir } = require('../src/main/documents');
+  const { placementPath, writeDocument, resolveOutputDir, mimeForPath } = require('../src/main/documents');
+
+  // How a document is READ is decided by the path, not by a label nobody
+  // validated. Uploads were indexed with a hardcoded mime whatever they were —
+  // older rows say "text", newer ones "text/plain" — so an uploaded .html
+  // opened as SOURCE instead of rendering in the artifact view.
+  assert(mimeForPath('Shamrock Landing.dc.html', 'text') === 'text/html', 'a non-mime label ("text") loses to the extension');
+  assert(mimeForPath('Shamrock Landing v2.dc.html', 'text/plain') === 'text/html', 'a GENERIC stored mime loses to a specific extension');
+  assert(mimeForPath('a.dc.html', null) === 'text/html', 'a compound extension still resolves on its last segment');
+  assert(mimeForPath('report.html', 'text/html') === 'text/html', 'a correct stored mime is preserved');
+  assert(mimeForPath('sheet.xlsx', 'application/octet-stream') === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'octet-stream loses to a known extension');
+  assert(mimeForPath('scan.pdf', 'application/pdf') === 'application/pdf', 'PDF detection is unchanged — the viewer still routes it to its own window');
+  assert(mimeForPath('notes.md', null) === 'text/markdown' && mimeForPath('x.txt', 'text/plain') === 'text/plain', 'markdown and plain text are unaffected');
+  assert(mimeForPath('weird.xyz', 'text') === 'text/plain', 'an unknown extension falls back to text/plain, never to undefined');
+  assert(mimeForPath('report.csv', 'text/csv') === 'text/csv', 'a SPECIFIC stored mime is never overridden');
+
   assert(
     placementPath('documents/{type}/{tenant}/{title}-{period}.{ext}', { type: 'monthly-report', title: 'Expo Review', properties: { tenant: 'expo', period: '2026-08' }, format: 'html' }) === 'documents/monthly-report/expo/expo-review-2026-08.html',
     'placement template fills type/tenant/title/period/ext'
@@ -115,6 +314,121 @@ app.whenReady().then(async () => {
   assert(typeof oc.chat === 'function' && typeof oc.listModels === 'function', 'openai-compat connector built for qwen');
   assert(typeof an.chat === 'function' && typeof an.listModels === 'function', 'anthropic connector built');
 
+  // LLM guards: encrypted auth, one active route, metadata-only audit.
+  const guardOne = repo.guards.add({ kind: 'openai_proxy', label: 'Bearer Guard', baseUrl: 'https://guard.example/v1', authMode: 'bearer', secret: 'guard-SECRET', enabled: true });
+  const guardListed = repo.guards.list().find((g) => g.id === guardOne.id);
+  assert(guardListed.has_secret && !('secret' in guardListed) && !('secret_ciphertext' in guardListed), 'guard listing exposes only a has-secret flag');
+  assert(repo.guards.reveal(guardOne.id) === 'guard-SECRET', 'guard bearer token round-trips through secure storage');
+  const guardTwo = repo.guards.add({ kind: 'trylon', label: 'Local Trylon', baseUrl: 'http://127.0.0.1:8000/v1', enabled: true });
+  assert(repo.guards.active().id === guardTwo.id && !repo.guards.get(guardOne.id).enabled, 'enabling a guard turns the previous guard off');
+  repo.guards.recordEvent({ guardId: guardTwo.id, providerId: prov.id, chatId: chat.id, turnId: 'guard-smoke', model: 'gpt-4o', decision: 'blocked', durationMs: 12, detail: 'safety_code=10' });
+  const guardEvent = repo.guards.events(1)[0];
+  assert(guardEvent.decision === 'blocked' && guardEvent.detail === 'safety_code=10' && !('prompt' in guardEvent) && !('response' in guardEvent), 'guard audit stores decision metadata without prompt/response bodies');
+  repo.guards.update(guardTwo.id, { enabled: false });
+
+  // Guard connector routing: Trylon uses a non-streaming OpenAI request, but
+  // Shamrock still receives the completed guarded text as a final delta.
+  {
+    const http = require('node:http');
+    let seen = null;
+    const gateway = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"status":"ok"}'); return;
+      }
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        seen = { url: req.url, auth: req.headers.authorization, xApiKey: req.headers['x-api-key'], body: JSON.parse(body) };
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'X-Trylon-Blocked': 'true',
+          'X-Trylon-Safety-Code': '10',
+          'X-Trylon-Action': '0',
+          'X-Trylon-Message': 'PII blocked',
+          'X-Request-Id': 'guard-request-1'
+        });
+        if (req.url === '/anthropic/v1/messages') {
+          res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'PII blocked' } }));
+        } else {
+          res.end(JSON.stringify({
+            id: 'trylon-blocked-smoke',
+            choices: [{ message: { role: 'assistant', content: 'PII blocked' }, finish_reason: 'content_filter' }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 }
+          }));
+        }
+      });
+    });
+    await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${gateway.address().port}/v1`;
+    const audit = []; const deltas = [];
+    const guarded = getConnector({ type: 'openai' }, 'provider-key', {
+      guard: { enabled: true, kind: 'trylon', base_url: base, auth_mode: 'passthrough' },
+      onAudit: (event) => audit.push(event)
+    });
+    const guardedResult = await guarded.chat({ model: 'gpt-test', messages: [{ role: 'user', content: 'test@example.com' }], onDelta: (d) => deltas.push(d.text) });
+    assert(seen.url === '/v1/chat/completions' && seen.auth === 'Bearer provider-key', 'guard route receives the provider request and passthrough credential');
+    assert(!seen.body.stream && guardedResult.finishReason === 'content_filter' && guardedResult.text === 'PII blocked' && deltas.length === 0, 'Trylon adapter uses supported non-streaming mode and withholds blocked text from the normal token stream');
+    assert(audit.length === 1 && audit[0].decision === 'blocked' && /safety_code=10/.test(audit[0].detail) && /request_id=guard-request-1/.test(audit[0].detail), 'guard route records the block code and correlation id');
+    assert(guardedResult.security && guardedResult.security.direction === 'outbound' && guardedResult.security.stage === 'llm_firewall' && guardedResult.security.auditId === 1, 'Trylon input block becomes a structured outbound firewall event linked to its audit row');
+    const claudeAudit = []; const claudeDeltas = [];
+    const guardedClaude = getConnector({ type: 'anthropic' }, 'claude-provider-key', {
+      guard: { enabled: true, kind: 'trylon', base_url: base, auth_mode: 'passthrough' },
+      onAudit: (event) => claudeAudit.push(event)
+    });
+    const claudeResult = await guardedClaude.chat({ model: 'claude-test', messages: [{ role: 'user', content: 'test@example.com' }], onDelta: (d) => claudeDeltas.push(d.text) });
+    assert(seen.url === '/anthropic/v1/messages' && seen.xApiKey === 'claude-provider-key', 'Trylon routes Claude through its native Anthropic proxy path and passthrough credential');
+    assert(claudeResult.finishReason === 'content_filter' && claudeResult.text === 'PII blocked' && claudeDeltas.length === 0 && claudeAudit[0].decision === 'blocked', 'Trylon adapter returns and audits a guarded Claude block without streaming it as an assistant answer');
+    // A guard is a wire-protocol adapter: every OpenAI-compatible connection
+    // routes through Trylon's /v1 endpoint, whatever the vendor.
+    const guardedQwen = getConnector({ type: 'qwen' }, 'k', { guard: { enabled: true, kind: 'trylon', base_url: base, auth_mode: 'passthrough' } });
+    assert(guardedQwen && typeof guardedQwen.chat === 'function', 'Trylon routes every OpenAI-compatible connection, not just the OpenAI vendor');
+    let unsupported = null;
+    try { getConnector({ type: 'mystery' }, 'k', { guard: { enabled: true, kind: 'trylon', base_url: base, auth_mode: 'passthrough' } }); } catch (error) { unsupported = error; }
+    assert(unsupported, 'a guard fails closed for a protocol it has no adapter for');
+    // Direction is read off Trylon's response id, and it has to work for every
+    // OpenAI-compatible vendor — keyed on `type` it silently degraded to
+    // direction=unknown / stage=guard for Kimi, Qwen and Gemini, which is the
+    // difference between "your prompt never left the machine" and a shrug.
+    const kimiGuarded = getConnector({ type: 'kimi' }, 'k', {
+      guard: { enabled: true, kind: 'trylon', base_url: base, auth_mode: 'passthrough' },
+      onAudit: () => 7
+    });
+    const kimiBlocked = await kimiGuarded.chat({ model: 'kimi-test', messages: [{ role: 'user', content: 'test@example.com' }] });
+    assert(kimiBlocked.security && kimiBlocked.security.direction === 'outbound' && kimiBlocked.security.stage === 'llm_firewall', 'guard direction is classified for every OpenAI-compatible vendor, not only the OpenAI connection');
+    const health = await testGuard({ baseUrl: base });
+    assert(health.ok && health.detail === 'ok', 'guard connection test discovers Trylon health beneath a /v1 base URL');
+    await new Promise((resolve) => gateway.close(resolve));
+  }
+
+  // The gateway STATES which side it refused (X-Trylon-Stage) instead of
+  // leaving the client to infer it. The response-id trick only works on the
+  // OpenAI route; on the Claude route an input and an output block are
+  // byte-identical, which is what left direction=unknown there.
+  {
+    const http = require('node:http');
+    const stageGateway = http.createServer((req, res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'X-Trylon-Blocked': 'true', 'X-Trylon-Safety-Code': '60',
+          'X-Trylon-Action': '0', 'X-Trylon-Message': 'toxic output',
+          'X-Trylon-Stage': 'output'
+        });
+        if (req.url === '/anthropic/v1/messages') res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'toxic output' } }));
+        else res.end(JSON.stringify({ id: 'chatcmpl-real-upstream-id', choices: [{ message: { role: 'assistant', content: 'toxic output' }, finish_reason: 'content_filter' }] }));
+      });
+    });
+    await new Promise((resolve) => stageGateway.listen(0, '127.0.0.1', resolve));
+    const stageBase = `http://127.0.0.1:${stageGateway.address().port}/v1`;
+    const stageGuard = { enabled: true, kind: 'trylon', base_url: stageBase, auth_mode: 'passthrough' };
+    const oaOut = await getConnector({ type: 'openai' }, 'k', { guard: stageGuard, onAudit: () => 1 }).chat({ model: 'm', messages: [{ role: 'user', content: 'x' }] });
+    assert(oaOut.security.direction === 'inbound' && oaOut.security.stage === 'gate_guard', 'an OUTPUT block is reported as inbound at the gate guard');
+    const clOut = await getConnector({ type: 'anthropic' }, 'k', { guard: stageGuard, onAudit: () => 1 }).chat({ model: 'm', messages: [{ role: 'user', content: 'x' }] });
+    assert(clOut.security.direction === 'inbound' && clOut.security.stage === 'gate_guard', 'the Claude route gets a real direction from the header, where the body carries no clue');
+    await new Promise((resolve) => stageGateway.close(resolve));
+  }
+
   // ── Stream honesty: fake SSE server — error frames, truncation, retry ──
   {
     const http = require('node:http');
@@ -139,6 +453,16 @@ app.whenReady().then(async () => {
     };
     const trunc = await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} });
     assert(trunc.truncated === true && trunc.finishReason === 'length' && trunc.text === 'partial tex', 'stream: finish_reason length surfaces as truncated (openai-compat)');
+
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-cut', type: 'function', function: { name: 'save_document', arguments: '{"title":"Expo","content":"unfinished' } }] } }] }));
+      res.write(chunk({ choices: [{ delta: {}, finish_reason: 'length' }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    const cutTool = await ocLive.chat({ model: 'm', messages: [{ role: 'user', content: 'save' }], tools: [{ name: 'save_document', description: '', inputSchema: { type: 'object' } }], onDelta: () => {} });
+    assert(cutTool.truncated && cutTool.toolCalls.length === 0 && cutTool.discardedToolCalls === 1, 'stream: a truncated tool call is discarded instead of executing empty/partial arguments');
 
     // 2. In-stream error frame → the call FAILS (no partial-as-success)
     handler = (req, res) => {
@@ -187,6 +511,18 @@ app.whenReady().then(async () => {
     const anTrunc = await anLive.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], onDelta: () => {} });
     assert(anTrunc.truncated === true && anTrunc.finishReason === 'max_tokens' && anTrunc.text === 'cut of', 'stream: anthropic stop_reason max_tokens surfaces as truncated');
 
+    handler = (req, res) => {
+      sseHead(res);
+      res.write(chunk({ type: 'message_start', message: { usage: { input_tokens: 9, output_tokens: 0 } } }));
+      res.write(chunk({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-cut', name: 'save_document' } }));
+      res.write(chunk({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"title":"Expo","content":"unfinished' } }));
+      res.write(chunk({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 5 } }));
+      res.write(chunk({ type: 'message_stop' }));
+      res.end();
+    };
+    const anCutTool = await anLive.chat({ model: 'm', messages: [{ role: 'user', content: 'save' }], tools: [{ name: 'save_document', description: '', inputSchema: { type: 'object' } }], onDelta: () => {} });
+    assert(anCutTool.truncated && anCutTool.toolCalls.length === 0 && anCutTool.discardedToolCalls === 1, 'stream: Anthropic also discards truncated tool arguments');
+
     // 6. Anthropic in-stream error event → throws
     handler = (req, res) => {
       sseHead(res);
@@ -207,6 +543,27 @@ app.whenReady().then(async () => {
       onEvent: (e) => { if (e.kind === 'truncated') truncEvents.push(e); }
     });
     assert(loopRes.truncated === true && truncEvents.length === 1, 'chat-loop: truncation reaches the caller and the glass box');
+
+    // 8. A turn that dies mid-loop carries its ledger out on the error. An
+    // LLM-firewall block on iteration 4 used to report toolTrace:[] and
+    // iterations:0 — indistinguishable from a block on the first call, and it
+    // threw away three tool results the user had already paid for.
+    let midLoopCalls = 0;
+    let midLoopErr = null;
+    try {
+      await runChatLoop({
+        chat: async () => {
+          midLoopCalls += 1;
+          if (midLoopCalls > 3) { const e = new Error('blocked'); e.code = 'LLM_GUARD_BLOCKED'; throw e; }
+          return { text: '', toolCalls: [{ id: `c${midLoopCalls}`, name: 'probe', args: {} }] };
+        },
+        callTool: async () => ({ text: 'result', isError: false }),
+        model: 'm', messages: [{ role: 'user', content: 'q' }],
+        tools: [{ name: 'probe', description: 'p', inputSchema: { type: 'object' } }]
+      });
+    } catch (e) { midLoopErr = e; }
+    assert(midLoopErr && midLoopErr.partial && midLoopErr.partial.iterations === 4 && midLoopErr.partial.toolTrace.length === 3,
+      'chat-loop: a mid-loop failure carries the work already done out with the error');
 
     sse.close();
   }
@@ -230,7 +587,43 @@ app.whenReady().then(async () => {
   assert(ts.tools.every((t) => t.inputSchema), 'toolset tools carry inputSchema for the model');
   const called = await mcpManager.callTool(echoName, { text: 'hi' }, ts.routes);
   assert(called.text === 'echo: hi', 'manager.callTool executed the tool over a live connection');
+  assert(mcpManager.isAuthFailure(new Error('HTTP 401 Token expired')) && mcpManager.isAuthFailure(new Error('invalid_token')) && !mcpManager.isAuthFailure(new Error('HTTP 500')), 'MCP tool-call auth failures are classified structurally for one reactive refresh');
+  assert(typeof mcpManager.tokenNearExpiry === 'function', 'MCP tool boundary exposes proactive near-expiry authentication maintenance');
+  const publicAuth = mcpManager.publishAuth(999, 'renewing', 'access_token=TOPSECRET refresh_token=ALSOSECRET');
+  assert(publicAuth.state === 'renewing' && !JSON.stringify(publicAuth).includes('TOPSECRET') && !JSON.stringify(publicAuth).includes('ALSOSECRET'), 'MCP auth lifecycle status is useful but never exposes tokens');
+  mcpManager.publishAuth(999, 'renewed', 'Authorization renewed', { expiresAt: Date.now() + 3600000, lastRenewedAt: new Date().toISOString() });
+  assert(mcpManager.authStatus(999)[0].state === 'renewed', 'MCP auth lifecycle exposes renewal state through a read-only snapshot');
+  mcpManager.publishAuth(997, 'connected', 'Connected', { expiresAt: Date.now() - 1 });
+  assert(mcpManager.authStatus(997)[0].state === 'renewal_due', 'MCP auth status never reports an expired credential as connected');
+  let catalogCalls = 0; let catalogRefreshes = 0;
+  const staleCatalogConnection = { open: true, listTools: async () => { catalogCalls += 1; throw new Error('HTTP 401 Token expired'); } };
+  const renewedCatalogConnection = { open: true, listTools: async () => { catalogCalls += 1; return [{ name: 'list_cases' }]; } };
+  const recoveredCatalog = await mcpManager.listToolsWithRecovery({ id: 996, name: 'catalog test' }, staleCatalogConnection, {
+    refreshConnection: async () => { catalogRefreshes += 1; return true; },
+    getConnection: () => renewedCatalogConnection
+  });
+  assert(recoveredCatalog[0].name === 'list_cases' && catalogCalls === 2 && catalogRefreshes === 1, 'MCP tool catalog retries exactly once after an authenticated tools/list 401');
+  const authEvents = []; const stopAuth = mcpManager.onAuthStatus((event) => authEvents.push(event.state));
+  mcpManager.publishAuth(998, 'renewing', 'Renewing'); mcpManager.publishAuth(998, 'renewed', 'Renewed'); stopAuth();
+  assert(authEvents.join(',') === 'renewing,renewed', 'MCP auth lifecycle emits the renewal transition in order');
+  assert(mcpManager.renewalDelay(Date.now() + 180000, Date.now()) >= 119000, 'MCP auth lifecycle schedules proactive renewal before expiry rather than waiting for the next tool call');
   mcpManager.disposeAll();
+
+  // OAuth refresh-token rotation: a SPENT refresh token must never be presented
+  // twice. Servers that rotate (OAuth 2.1 / RFC 6819 §5.2.2.3) read a second
+  // presentation as proof the token was stolen and revoke the whole grant — so
+  // the retry is not a harmless retry, it is what destroys the authorization.
+  {
+    const { isDeadGrant } = require('../src/main/mcp/oauth');
+    const replay = new Error('HTTP 400: refresh_token replay detected'); replay.oauthError = 'invalid_grant';
+    assert(isDeadGrant(replay), 'a replay-detected refresh is recognised as a DEAD grant');
+    const coded = new Error('HTTP 400'); coded.oauthError = 'invalid_grant';
+    assert(isDeadGrant(coded), 'invalid_grant alone is enough — the prose is not required');
+    const flaky = new Error('HTTP 503: upstream temporarily unavailable');
+    assert(!isDeadGrant(flaky), 'a transient 5xx is NOT a dead grant — it stays retryable');
+    const offline = new Error('fetch failed');
+    assert(!isDeadGrant(offline), 'a network failure is NOT a dead grant');
+  }
 
   // Chat loop: fake connector requests a tool, then answers using the result
   let step = 0;
@@ -366,6 +759,42 @@ app.whenReady().then(async () => {
   assert(noCeilingNoPicksDefault.tools.length === bigCatalog.length && noCeilingNoPicksDefault.fellBack && !noCeilingNoPicksDefault.bySkills, 'tool ceiling defaults to the full catalog (not an arbitrary slice) when there is no scope and nothing picked');
   const noCeilingNoPicksCapped = applyToolCeiling({ loadedSkills: [], toolNames: [], allTools: bigCatalog, fallbackCap: 5 });
   assert(noCeilingNoPicksCapped.tools.length === 5 && noCeilingNoPicksCapped.fellBack, 'tool ceiling still honors an explicit fallbackCap when one is passed');
+  const deliberateNoPicks = applyToolCeiling({ loadedSkills: [], toolNames: [], allTools: bigCatalog, selectionSucceeded: true });
+  assert(deliberateNoPicks.tools.length === 0 && !deliberateNoPicks.fellBack, 'tool ceiling preserves a successful deliberate empty selection instead of loading the full catalog');
+  const deterministicCtx = await selectContext({
+    connector: { chat: async () => ({ text: 'I forgot to call the tool.' }) }, model: 'm',
+    skills: [{ name: 'expo-monthly-report', description: 'Create the Expo monthly report.' }],
+    tools: [{ name: 'Fluency_Expo__summarize_case_metrics', description: 'Summarize case metrics.' }, { name: 'Fluency_Expo__delete_case', description: 'Delete a case.' }],
+    userText: 'Use the dedicated Expo monthly report skill and summarize_case_metrics.'
+  });
+  assert(deterministicCtx.deterministicFallback && deterministicCtx.selectionSucceeded && deterministicCtx.skillNames[0] === 'expo-monthly-report' && deterministicCtx.toolNames.includes('Fluency_Expo__summarize_case_metrics'), 'context selector failure narrows by exact lexical signals instead of dumping the full catalog');
+
+  // One turn must use one evidence snapshot. A live report repeated identical
+  // Expo reads late in the turn and received changed totals, then narrated both
+  // versions. Cache only confidently read-only MCP calls; never local tools or
+  // declared writes, and collapse concurrent duplicates too.
+  {
+    const { TurnToolCache, isReadOnlyMcpTool, cacheKey } = require('../src/main/turn-tool-cache');
+    const declared = [
+      { name: 'expo__get_cases', annotations: { readOnlyHint: true } },
+      { name: 'expo__get_and_mark_case', annotations: { readOnlyHint: false } }
+    ];
+    assert(isReadOnlyMcpTool('expo__summarize_case_metrics', []) && !isReadOnlyMcpTool('save_document', []), 'turn cache recognizes conservative read-only MCP names but never infers local tools');
+    assert(!isReadOnlyMcpTool('expo__get_and_mark_case', declared), 'an MCP readOnlyHint=false overrides a read-looking name');
+    assert(cacheKey('expo__list_cases', { b: 2, a: 1 }) === cacheKey('expo__list_cases', { a: 1, b: 2 }), 'turn cache keys equivalent argument objects deterministically');
+    let reads = 0; const hits = [];
+    const snapshot = new TurnToolCache(declared, (name) => hits.push(name));
+    const invokeRead = async () => { reads += 1; await new Promise((r) => setTimeout(r, 10)); return { text: 'snapshot-1' }; };
+    const [firstRead, secondRead] = await Promise.all([
+      snapshot.call('expo__get_cases', { period: '2026-07' }, invokeRead),
+      snapshot.call('expo__get_cases', { period: '2026-07' }, invokeRead)
+    ]);
+    assert(reads === 1 && firstRead.text === secondRead.text && hits.length === 1, 'identical concurrent read-only calls share one successful result per turn');
+    let writes = 0;
+    await snapshot.call('expo__get_and_mark_case', { id: 1 }, async () => { writes += 1; return { text: 'w' }; });
+    await snapshot.call('expo__get_and_mark_case', { id: 1 }, async () => { writes += 1; return { text: 'w' }; });
+    assert(writes === 2, 'declared mutating calls always execute, even with identical arguments');
+  }
 
   // Orchestration: assign work in PARALLEL + merge the results (the full round-trip)
   const { runSubagent: rsa, mergeResults } = require('../src/main/subagent');
@@ -395,7 +824,7 @@ app.whenReady().then(async () => {
   const { filterToolResult } = require('../src/main/filter');
   const pretty = JSON.stringify({ report: 'x'.repeat(80), rows: Array(150).fill({ sev: 'high', host: 'h' }) }, null, 2);
   const f1 = filterToolResult('run_report', pretty);
-  assert(f1.after < f1.before * 0.5 && f1.rules.includes('json-min'), 'filter minifies pretty JSON (big saving)');
+  assert(f1.after < f1.before && f1.rules.includes('json-min') && JSON.parse(f1.text).rows.length === 150, 'filter minifies pretty JSON losslessly');
   const f2 = filterToolResult('logs', Array.from({ length: 20000 }, (_, i) => `event ${i} occurred at host-${i % 7}`).join('\n'), { cap: 2000 });
   assert(f2.after <= 2500 && f2.rules.includes('middle-elide'), 'filter middle-elides huge output to the cap');
   const f2b = filterToolResult('logs', 'repeated warning\n'.repeat(5000));
@@ -406,6 +835,42 @@ app.whenReady().then(async () => {
   // "[0m" without the ESC byte is NOT touched (the regex must anchor on \x1b).
   const fAnsi = filterToolResult('sh', '\x1b[31mred\x1b[0m arr[m] keeps [0m literal');
   assert(fAnsi.text === 'red arr[m] keeps [0m literal', 'filter strips ANSI codes without corrupting bracket text');
+  // Epoch-millis → ISO. A 13-digit epoch has ~1-in-10 odds of passing Luhn, so
+  // raw Fluency case timestamps read as CREDIT_CARD at confidence 1.0 and the
+  // LLM firewall blocked real investigations. Converting at the tool boundary
+  // fixes that AND gives the model a date it can actually reason about.
+  const fEpochNum = filterToolResult('list_cases', '{"id":"c1","first":1785304080000}');
+  assert(fEpochNum.rules.includes('epoch-iso') && JSON.parse(fEpochNum.text).first === '2026-07-29T05:48:00.000Z',
+    'filter converts epoch-millis in JSON to an ISO STRING, keeping the JSON parseable');
+  const fEpochStr = filterToolResult('list_cases', '{"ts":"1785304080000"}');
+  assert(JSON.parse(fEpochStr.text).ts === '2026-07-29T05:48:00.000Z', 'filter converts epoch-millis held as a JSON string');
+  // MCP servers hand back CSV/log blobs as ONE JSON string field. Matching a
+  // string only when it is ENTIRELY a timestamp walks past every epoch inside
+  // such a blob — which is how a real Expo report still tripped the card rule.
+  const fEpochBlob = filterToolResult('list_cases', JSON.stringify({ rows: 'AgentID,new,6,1786307640000,1786309251000\nOther,1,2' }));
+  assert(fEpochBlob.rules.includes('epoch-iso') && JSON.parse(fEpochBlob.text).rows.includes('2026-08-09T20:34:00.000Z') && !JSON.parse(fEpochBlob.text).rows.includes('1786307640000'),
+    'filter converts epoch-millis embedded in a CSV blob carried inside a JSON string');
+  const fEpochProse = filterToolResult('notes', 'First seen at 1785304080000 on DC01');
+  assert(fEpochProse.text === 'First seen at 2026-07-29T05:48:00.000Z on DC01', 'filter converts epoch-millis in free text');
+  const fCard = filterToolResult('notes', 'Card 4111111111111111 and 4111111111111 on file');
+  assert(fCard.text.includes('4111111111111111') && fCard.text.includes('4111111111111') && !fCard.rules.includes('epoch-iso'),
+    'filter NEVER rewrites card numbers as timestamps — the epoch window cannot reach them');
+  const fNotEpoch = filterToolResult('notes', 'event id 100234567890 and value 9999999999999');
+  assert(!fNotEpoch.rules.includes('epoch-iso'), 'filter leaves out-of-window digit strings alone');
+  const verboseCases = {
+    window: { from: '2026-07-01', to: '2026-07-31' },
+    cases: Array.from({ length: 20 }, (_, i) => ({
+      case_id: `C${String(i + 1).padStart(2, '0')}`,
+      riskScore: 2000 - i,
+      status: 'new', owner: null,
+      fingerprint: { fingerprint_hash: `fp-${i + 1}`, evidence: 'e'.repeat(3000) },
+      ai_description: 'narrative '.repeat(700)
+    }))
+  };
+  const compactCases = filterToolResult('Fluency_Expo__list_cases', JSON.stringify(verboseCases), { cap: 24000 });
+  const compactParsed = JSON.parse(compactCases.text);
+  assert(compactParsed.cases.length === 20 && compactParsed.cases[0].case_id === 'C01' && compactParsed.cases[19].case_id === 'C20', 'list_cases compaction preserves every ranked case row and valid JSON');
+  assert(compactCases.rules.includes('case-list-compact') && !compactCases.rules.includes('middle-elide'), 'list_cases uses structural compaction instead of destructive middle slicing');
   // Chat loop applies the filter to tool results
   let cstep = 0;
   const bigJson = JSON.stringify({ items: Array(400).fill({ a: 1, b: 2 }) }, null, 2);
@@ -589,6 +1054,20 @@ app.whenReady().then(async () => {
   // ── P1: Step executor (plan-and-execute, stuck → re-plan → escalate) ────────
   const { executeStep, executePlan } = require('../src/main/execute');
   {
+    // Large research results stay available in the raw execution ledger, but
+    // only the two newest tool rounds remain verbatim in the provider prompt.
+    // Older rounds retain a deterministic head/tail/URL digest and their
+    // assistant/tool protocol pairing.
+    const history = [];
+    for (let i = 1; i <= 4; i += 1) {
+      history.push({ role: 'assistant', content: '', toolCalls: [{ id: `tool-${i}`, name: 'web_fetch', args: { i } }] });
+      history.push({ role: 'tool', toolCallId: `tool-${i}`, name: 'web_fetch', content: `${'x'.repeat(7000)}https://example.com/source-${i}${'y'.repeat(7000)}` });
+    }
+    const pruned = compactToolHistory(history, { keepRecentRounds: 2, maxOldResultChars: 3000 });
+    assert(pruned.stats.inspected === 4 && pruned.stats.compacted === 2 && pruned.stats.savedChars > 10000, 'tool history: older research rounds are compacted with measurable savings');
+    assert(/Earlier tool result compacted/.test(pruned.messages[1].content) && pruned.messages[1].content.includes('https://example.com/source-1'), 'tool history: compacted evidence preserves its source URL');
+    assert(pruned.messages[5].content.length > 10000 && pruned.messages.length === history.length, 'tool history: two recent rounds stay verbatim and protocol structure is unchanged');
+
     // (a) Objective: step 2's tool call is formed ONLY from a value step 1
     // discovered. Step 1's model lists tenants (result carries tenant_id); the
     // store captures it; step 2's directive shows it as a KNOWN VALUE and the
@@ -659,6 +1138,76 @@ app.whenReady().then(async () => {
     assert(replanCalls === 3, 'stuck step auto-re-planned exactly REPLAN_BUDGET (3) times');
     assert(escalation && escalation.goal === 'dig everything' && escalation.replans === 3, 'escalation carries the goal + re-plan count for the user');
     assert(out.stepResults.length === 1 && out.stepResults[0].incomplete, 'declined escalation keeps the partial for synthesis');
+
+    // A defensive resume filter rejects completed step ids even when a
+    // contract accidentally returns the full plan during refinement.
+    let stepTwoAttempts = 0;
+    const starts = [];
+    const replaySafe = await executePlan({
+      chat: async ({ messages, tools }) => {
+        const directive = messages.filter((m) => m.role === 'user').pop().content;
+        if (/CURRENT STEP \(1\)/.test(directive)) return { text: 'one done', toolCalls: [] };
+        if (/CURRENT STEP \(2\)/.test(directive) && stepTwoAttempts++ === 0 && tools.length) return { text: '', toolCalls: [{ id: 'r2', name: 'search', args: {} }] };
+        if (!tools.length) return { text: 'step two partial', toolCalls: [] };
+        return { text: /CURRENT STEP \(3\)/.test(directive) ? 'three done' : 'two done', toolCalls: [] };
+      },
+      callTool: noop, model: 'mock',
+      plan: { goal: 'resume safely', steps: [{ id: 1, task: 'one' }, { id: 2, task: 'two' }, { id: 3, task: 'three' }] },
+      tools: [{ name: 'search', description: '', inputSchema: {} }], store: new VariableStore(), stepBudget: 1, replanBudget: 1,
+      refinePlan: async () => ({ steps: [{ id: 1, task: 'one' }, { id: 2, task: 'two revised' }, { id: 3, task: 'three' }] }),
+      onEvent: (e) => { if (e.kind === 'step-start') starts.push(e.step); }
+    });
+    assert(replaySafe.completed && starts.filter((id) => id === 1).length === 1 && starts.includes(3), 're-plan resume: completed prefix is never replayed and later steps still run');
+
+    // Replan allowance is per step. One difficult early step must not consume
+    // the only refinement available to every later step in the workflow.
+    const stuckOnce = new Set();
+    let perStepRefines = 0;
+    const eachStepRefines = await executePlan({
+      chat: async ({ messages, tools }) => {
+        const directive = messages.filter((m) => m.role === 'user').pop().content;
+        const id = Number((directive.match(/CURRENT STEP \((\d+)\)/) || [])[1]);
+        if (!tools.length) return { text: `partial-${id}`, toolCalls: [] };
+        if (!stuckOnce.has(id)) { stuckOnce.add(id); return { text: '', toolCalls: [{ id: `s-${id}`, name: 'search', args: {} }] }; }
+        return { text: `done-${id}`, toolCalls: [] };
+      }, callTool: noop, model: 'mock',
+      plan: { goal: 'two hard steps', steps: [{ id: 1, task: 'hard one' }, { id: 2, task: 'hard two' }] },
+      tools: [{ name: 'search', description: '', inputSchema: {} }], store: new VariableStore(), stepBudget: 1, replanBudget: 1,
+      refinePlan: async ({ stuckStep }) => {
+        perStepRefines += 1;
+        const tail = [{ ...stuckStep, task: `${stuckStep.task} revised` }];
+        if (stuckStep.id === 1) tail.push({ id: 2, task: 'hard two' });
+        return { steps: tail };
+      }, onEvent: () => {}
+    });
+    assert(eachStepRefines.completed && perStepRefines === 2 && eachStepRefines.replans === 2, 're-plan budget: each stuck step receives its own bounded refinement allowance');
+
+    // A step that DIES (an LLM-firewall block, most often) kills the turn — but
+    // the steps before it finished, and their tool results are evidence the
+    // user already paid for. Both executeStep and executePlan carry the ledger
+    // out on `e.partial`; the flat loop already did, so a planned turn used to
+    // be the one path that silently threw the whole thing away.
+    {
+      let modelCalls = 0;
+      const dyingChat = async ({ tools }) => {
+        modelCalls += 1;
+        if (modelCalls > 3) { const e = new Error('blocked'); e.code = 'LLM_GUARD_BLOCKED'; throw e; }
+        if (!tools || !tools.length) return { text: 'done', toolCalls: [], usage: { calls: 1, inputTokens: 10, outputTokens: 2, cachedTokens: 0, cacheCreationTokens: 0, measured: true } };
+        return { text: '', toolCalls: [{ id: `t${modelCalls}`, name: 'search', args: {} }], usage: { calls: 1, inputTokens: 10, outputTokens: 2, cachedTokens: 0, cacheCreationTokens: 0, measured: true } };
+      };
+      let died = null;
+      try {
+        await executePlan({
+          chat: dyingChat, callTool: async () => ({ text: 'result', isError: false }), model: 'mock',
+          plan: { goal: 'two steps', steps: [{ id: 1, task: 'first' }, { id: 2, task: 'second' }] },
+          tools: [{ name: 'search', description: '', inputSchema: {} }],
+          store: new VariableStore(), stepBudget: 4
+        });
+      } catch (e) { died = e; }
+      assert(died && died.code === 'LLM_GUARD_BLOCKED', 'a guard block during a planned turn still kills the turn');
+      assert(died.partial && died.partial.toolTrace.length > 0, 'a planned turn carries the tool work it had already done out with the error');
+      assert(died.partial.usage && died.partial.usage.inputTokens > 0, 'and carries the tokens the turn actually spent, not just the blocked call');
+    }
 
     // A useful re-plan (tail replaced with a completable step) needs no escalation.
     const healChat = async ({ messages, tools }) => {
@@ -747,9 +1296,13 @@ app.whenReady().then(async () => {
   {
     const vs = new VariableStore();
     const seq = [];
+    let delegatedDigestVisible = false;
     const chatSeq = async ({ messages, tools }) => {
       const directive = messages.filter((m) => m.role === 'user').pop().content;
-      if (/CURRENT STEP/.test(directive)) return { text: 'sequential step done', toolCalls: [] };
+      if (/CURRENT STEP/.test(directive)) {
+        delegatedDigestVisible = messages.some((m) => m.role === 'assistant' && /DELEGATED STEP 1 RESULT/.test(m.content || '') && /found it/.test(m.content || ''));
+        return { text: 'sequential step done', toolCalls: [] };
+      }
       return { text: 'final synthesized answer', toolCalls: [] };
     };
     const out = await executePlan({
@@ -760,6 +1313,21 @@ app.whenReady().then(async () => {
     });
     assert(out.completed && out.stepResults.length === 2 && out.stepResults[0].parallel, 'parallel step handed off to the sub-agent runner');
     assert(vs.get('case_id') === 'C-99', "parallel step's conclusion harvested into shared working memory");
+    assert(delegatedDigestVisible, 'a sequential step can see the delegated evidence digest without recollecting it');
+
+    let naturalStep = 0; let naturalConclusionVisible = false;
+    await executePlan({
+      chat: async ({ messages }) => {
+        naturalStep += 1;
+        if (naturalStep === 1) return { text: 'ANALYSIS: use verified total 195', toolCalls: [] };
+        naturalConclusionVisible = messages.some((m) => m.role === 'assistant' && /verified total 195/.test(m.content || ''));
+        return { text: 'drafted from analysis', toolCalls: [] };
+      },
+      callTool: async () => ({ text: '{}' }), model: 'mock',
+      plan: { goal: 'handoff', steps: [{ id: 1, task: 'analyze' }, { id: 2, task: 'draft' }] },
+      tools: [], store: new VariableStore(), history: []
+    });
+    assert(naturalConclusionVisible, 'a sequential step sees the prior step conclusion, not only its raw tool ledger');
 
     const syn = await synthesize({ chat: chatSeq, model: 'mock', plan: { goal: 'mixed' }, stepResults: out.stepResults, store: vs, history: [] });
     assert(syn.reply === 'final synthesized answer', 'synthesize produces the final answer over mixed results');
@@ -781,6 +1349,7 @@ app.whenReady().then(async () => {
     const { renderStepDirective } = require('../src/main/execute');
     const dir = renderStepDirective({ id: 2, task: 'expand the case', produces: 'case_id, expansion_key' }, vs);
     assert(/MUST PRODUCE: case_id, expansion_key/.test(dir) && /set_variable/.test(dir), 'step directive carries produces + set_variable guidance');
+    assert(/must not invent new mandatory content or silently expand acceptance/i.test(dir), 'step directive prevents self-authored validators from expanding the workflow contract');
   }
 
   // ── Read-time skill healing (skill-content.js) ─────────────────────────────
@@ -966,25 +1535,50 @@ app.whenReady().then(async () => {
       inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((r) => setTimeout(r, 25));
       inFlight--;
-      return { conclusion: `result-${s.id} case_id: C${s.id}00` };
+      return { conclusion: `result-${s.id} case_id: C${s.id}00`, toolTrace: [{ name: 'read_file', args: { path: `src/file-${s.id}.js` }, ok: true }] };
     };
-    const chat = async () => ({ text: 'seq done', toolCalls: [] });
+    let groupDigestVisible = false;
+    const chat = async ({ messages }) => {
+      groupDigestVisible = messages.some((m) => m.role === 'assistant' && /DELEGATED GROUP RESULT/.test(m.content || '') && /MERGED:/.test(m.content || ''));
+      return { text: 'seq done', toolCalls: [] };
+    };
     const groupSteps = [
       { id: 1, task: 'collect a', parallel: true, group: 'collect', agent: 'auto' },
       { id: 2, task: 'collect b', parallel: true, group: 'collect', agent: 'auto' },
       { id: 3, task: 'collect c', parallel: true, group: 'collect', agent: 'auto' }
     ];
     let mergeArgs = null;
+    const completedGroupSteps = [];
+    const completedTraceSizes = new Map();
     const exec = await executePlan({
       chat, callTool: async () => ({ text: 'ok' }), model: 'm',
       plan: { goal: 'g', steps: [...groupSteps, { id: 4, task: 'analyze the merged product', parallel: false, agent: 'auto' }] },
       tools: [], store: new VariableStore(), history: [], runParallel,
-      mergeGroup: async (a) => { mergeArgs = a; return 'MERGED: ' + a.results.map((r) => r.conclusion).join(' | '); }
+      mergeGroup: async (a) => { mergeArgs = a; return 'MERGED: ' + a.results.map((r) => r.conclusion).join(' | '); },
+      onStepComplete: async (step, _result, trace) => { completedGroupSteps.push(step.id); completedTraceSizes.set(step.id, trace.length); }
     });
     assert(maxInFlight >= 2, 'O16: group members run CONCURRENTLY (not awaited one at a time)');
     assert(exec.stepResults.length === 2 && exec.stepResults[0].group === 'collect', 'O16: a fan-out group lands as ONE step-result');
+    assert(exec.pending.length === 0 && exec.stepResults[0].memberSteps.join(',') === '1,2,3', 'O16: merged fan-out members are all recorded as completed for plan status');
+    assert([1, 2, 3].every((id) => completedGroupSteps.includes(id)), 'O16: every fan-out member reaches durable checkpoint bookkeeping');
+    assert([1, 2, 3].every((id) => completedTraceSizes.get(id) >= 1), 'O16: every fan-out checkpoint preserves its worker tool evidence');
     assert(exec.stepResults[0].conclusion.startsWith('MERGED:') && mergeArgs.results.length === 3, 'O16: the merge contract sees every member result');
+    assert(exec.delegatedToolTrace.length === 3 && exec.delegatedToolTrace.every((t) => t.name === 'read_file'), 'O16: delegated evidence traces reach deterministic acceptance without entering mutation gates');
     assert(exec.completed && exec.stepResults[1].conclusion === 'seq done', 'O16: sequential steps still run after the group');
+    assert(groupDigestVisible, 'O16: the sequential consumer sees the merged group evidence in its history');
+
+    let parallelHistory = null;
+    await executePlan({
+      chat: async () => ({ text: 'shortlist: C100, C200', toolCalls: [] }),
+      callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'dynamic fan-out', steps: [
+        { id: 1, task: 'discover shortlist', parallel: false, agent: 'auto' },
+        { id: 2, task: 'investigate case #1', parallel: true, agent: 'auto' }
+      ] },
+      tools: [], store: new VariableStore(), history: [],
+      runParallel: async (_step, context) => { parallelHistory = context.history; return { conclusion: 'C100 complete' }; }
+    });
+    assert(Array.isArray(parallelHistory) && parallelHistory.some((m) => /shortlist: C100, C200/.test(m.content || '')), 'O16: a later parallel worker receives prior sequential evidence for symbolic fan-out');
 
     const exec2 = await executePlan({
       chat, callTool: async () => ({ text: 'ok' }), model: 'm',
@@ -1010,9 +1604,12 @@ app.whenReady().then(async () => {
   {
     const { buildLibraryTools } = require('../src/main/coding-tools');
     const lib = path.join(tmp, 'doc-library');
+    const sourceRoot = path.join(tmp, 'doc-source');
     fs.mkdirSync(path.join(lib, 'acme', 'monthly-reports'), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
     fs.writeFileSync(path.join(lib, 'acme', 'monthly-reports', 'aug.md'), '# August\nfindings: clean\n');
-    const lt = buildLibraryTools({ root: lib });
+    fs.writeFileSync(path.join(sourceRoot, 'src', 'mode.js'), 'export const mode = "documents";\n');
+    const lt = buildLibraryTools({ root: lib, readRoots: [sourceRoot] });
 
     assert(lt.tools.length === 3 && !lt.names.has('write_file') && !lt.names.has('run_command'), 'library: pack is read-only — no write or shell tools offered');
     const lr = await lt.call('read_file', { path: 'acme/monthly-reports/aug.md' });
@@ -1021,9 +1618,13 @@ app.whenReady().then(async () => {
     assert(!ll.isError && ll.text.includes('aug.md'), 'library: list_dir walks the library tree');
     const lg = await lt.call('grep_files', { pattern: 'findings' });
     assert(!lg.isError && lg.text.includes('aug.md:2'), 'library: grep_files searches document contents');
+    const sourceRead = await lt.call('read_file', { path: path.join(sourceRoot, 'src', 'mode.js') });
+    assert(!sourceRead.isError && sourceRead.text.includes('documents'), 'library: Documents mode can inspect configured project source read-only');
+    const relativeSourceRead = await lt.call('read_file', { path: 'src/mode.js' });
+    assert(!relativeSourceRead.isError && relativeSourceRead.text.includes('documents'), 'library: a relative source path falls back to the sole configured source root when absent from the library');
     const lesc1 = await lt.call('read_file', { path: '../outside/secret.txt' });
     const lesc2 = await lt.call('read_file', { path: '/etc/passwd' });
-    assert(lesc1.isError && lesc2.isError, 'library: jail blocks relative + absolute escapes (single root)');
+    assert(lesc1.isError && lesc2.isError, 'library: jail blocks escapes outside every configured read root');
     const lw = await lt.call('write_file', { path: 'x.md', content: 'no' });
     assert(lw.isError && lw.text.includes('unknown'), 'library: write_file is not a library tool — refused, nothing written');
   }
@@ -1364,6 +1965,18 @@ app.whenReady().then(async () => {
     // A process that dies immediately is reported as an error with its output.
     const bad = await ct2.call('start_server', { command: 'node -e "console.error(\'boom\'); process.exit(1)"', wait_seconds: 6 });
     assert(bad.isError && bad.text.includes('boom'), 'dev server: failed start reported with its output');
+
+    const hostedRoot = path.join(tmp, 'framework-host');
+    fs.mkdirSync(path.join(hostedRoot, 'reports', '2026-09-01'), { recursive: true });
+    fs.writeFileSync(path.join(hostedRoot, 'reports', '2026-09-01', 'index.html'), '<!doctype html><title>Daily</title>');
+    fs.writeFileSync(path.join(hostedRoot, 'stock-selection-history.xlsx'), 'workbook');
+    const hosted = await ensureStockHost({ projectId: 'framework-smoke', root: hostedRoot });
+    assert(hosted.running && hosted.frameworkOwned && hosted.verified && hosted.verifiedPaths.length === 2, 'workflow hosting: framework starts and health-checks the dated report and workbook without a model tool call');
+    const outsideHost = path.join(tmp, 'outside-host.txt'); fs.writeFileSync(outsideHost, 'secret'); fs.symlinkSync(outsideHost, path.join(hostedRoot, 'escape.txt'));
+    const escaped = await fetch(new URL('/escape.txt', hosted.url));
+    assert(escaped.status === 404, 'workflow hosting: framework static host rejects symlinks that escape the project root');
+    const hostedGate = validateWorkflow(createWorkflowContract({ text: 'Create a stock analysis program using public news and price trends with a daily HTML page and spreadsheet history' }), { stepResults: [{ step: 1, conclusion: 'done' }], artifacts: [], workingDir: hostedRoot, primarySourceVerification: { ok: false, detail: 'test' }, serverStatus: hosted });
+    assert(hostedGate.checks.find((check) => check.id === 'host-verified').ok, 'workflow hosting: acceptance requires verified framework ownership, not merely a URL-shaped server status');
     devServer.disposeAll();
   }
 
@@ -1490,7 +2103,7 @@ app.whenReady().then(async () => {
   // the connector's idle timer aborted mid-step and executeStep re-threw,
   // losing every completed step, the synthesis, and the persistence.
   {
-    const { executeStep, executePlan } = require('../src/main/execute');
+    const { executeStep, executePlan, planStatusResults } = require('../src/main/execute');
     const abortErr = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; return e; };
 
     const r = await executeStep({
@@ -1524,20 +2137,20 @@ app.whenReady().then(async () => {
     // deliverable — the turn then reported success having produced nothing.
     let calls = 0;
     let refineCalls = 0;
-    const stallTwiceThenWork = async () => {
+    const stallOnceThenWork = async () => {
       calls += 1;
-      if (calls === 2 || calls === 3) throw abortErr();   // step 2 stalls twice
+      if (calls === 2) throw abortErr();   // step 2 stalls once
       return { text: `done-${calls}`, toolCalls: [] };
     };
     const survived = await executePlan({
-      chat: stallTwiceThenWork, callTool: async () => ({ text: 'ok' }), model: 'm',
+      chat: stallOnceThenWork, callTool: async () => ({ text: 'ok' }), model: 'm',
       plan: { goal: 'g', steps: [{ id: 1, task: 'read' }, { id: 2, task: 'draft' }, { id: 3, task: 'WRITE THE FILE' }] },
       tools: [], store: new VariableStore(), history: [],
       refinePlan: async () => { refineCalls += 1; return { steps: [] }; },   // a replan here would delete step 3
       onEvent: () => {}
     });
     assert(refineCalls === 0, 'a provider stall RETRIES the step — it never triggers a re-plan');
-    assert(survived.stepResults.length === 3 && survived.completed, 'the deliverable step still runs after two stalls (plan preserved)');
+    assert(survived.stepResults.length === 3 && survived.completed, 'the deliverable step still runs after a transient stall (plan preserved)');
 
     // A genuine task-level stuck still replans — the transport path must not
     // swallow the case re-planning exists for.
@@ -1565,13 +2178,23 @@ app.whenReady().then(async () => {
     });
     assert(shrankEvents.length === 1 && shrankEvents[0].skipped.includes(3), 'a plan that loses its steps to a re-plan reports plan-shrank');
     assert(Array.isArray(shrank.skipped) && shrank.skipped.includes(3), 'the skipped step ids are returned so the reply can say what did not run');
+    assert(shrank.pending.length === 0 && /were replaced/.test(planStatusResults(shrank)[0].conclusion), 'plan status: only steps actually removed by refinement use replaced wording');
+
+    const providerStopped = await executePlan({
+      chat: async () => { throw abortErr(); }, callTool: async () => ({ text: 'ok' }), model: 'm',
+      plan: { goal: 'g', steps: [{ id: 1, task: 'slow' }, { id: 2, task: 'host' }, { id: 3, task: 'validate' }] },
+      tools: [], store: new VariableStore(), history: [], onEvent: () => {}
+    });
+    const pendingRow = planStatusResults(providerStopped).find((row) => row.step === 'plan-pending');
+    assert(providerStopped.skipped.length === 0 && providerStopped.pending.join(',') === '2,3', 'plan status: provider exhaustion leaves later steps pending, not replaced');
+    assert(pendingRow && /were not replaced/.test(pendingRow.conclusion) && pendingRow.incomplete, 'plan status: partial reply explicitly distinguishes pending work from a revised plan');
 
     const clean = await executePlan({
       chat: async () => ({ text: 'done', toolCalls: [] }), callTool: async () => ({ text: 'ok' }), model: 'm',
       plan: { goal: 'g', steps: [{ id: 1, task: 'a' }, { id: 2, task: 'b' }] },
       tools: [], store: new VariableStore(), history: [], onEvent: () => {}
     });
-    assert(clean.skipped.length === 0, 'a plan that runs every step reports no attrition');
+    assert(clean.skipped.length === 0 && clean.pending.length === 0, 'a plan that runs every step reports no attrition');
   }
 
   // Cost-outlier gating. This signal never fired in ANY live drive, because
@@ -1579,7 +2202,17 @@ app.whenReady().then(async () => {
   // MIN_COST_HISTORY. That is correct (a new project must not cry wolf) but it
   // was entirely uncovered — the quiet path and the loud path both untested.
   {
-    const { medianOf, COST_OUTLIER_FACTOR, MIN_COST_HISTORY } = require('../src/main/ipc');
+    const { medianOf, toolsForPlannedStep, reviewRepairVerified, recordDelegatedResult, expandParallelStepTask, modeFlowSourceContext, COST_OUTLIER_FACTOR, MIN_COST_HISTORY } = require('../src/main/ipc');
+    const boundedTools = toolsForPlannedStep([{ name: 'delegate' }, { name: 'assign' }, { name: 'set_variable' }, { name: 'Fluency_Expo__list_cases' }]);
+    assert(boundedTools.length === 1 && boundedTools[0].name === 'Fluency_Expo__list_cases', 'planned sequential steps cannot spawn ad-hoc delegates outside the explicit plan');
+    assert(!reviewRepairVerified({ incomplete: true }, false, {}) && reviewRepairVerified({ incomplete: false }, false, {}), 'review status: a budget-stuck repair is partial, never reported as fixed');
+    const delegation = { count: 0, absorbedTokens: 0 }; const delegatedTasks = [];
+    recordDelegatedResult(delegation, delegatedTasks, { inputTokens: 120, durationMs: 25 }, 'collector');
+    assert(delegation.count === 1 && delegation.absorbedTokens === 120 && delegatedTasks[0].label === 'collector', 'parallel telemetry: a plan worker records its result without relying on a hidden callback scope');
+    const expandedWorker = expandParallelStepTask({ id: 3, task: 'Same as step 2 for top_case_2_id.', produces: 'investigation_2' }, [{ id: 2, task: 'Investigate top_case_1_id and record its verdict.' }]);
+    const sourceContext = modeFlowSourceContext({ kind: 'mode-flow' }, '/repo/src/main/ipc.js\n/repo/src/main/workflow-contracts.js');
+    assert(sourceContext.includes('AUTHORITATIVE SOURCE ROOT FILE MAP') && sourceContext.includes('/repo/src/main/ipc.js'), 'mode-flow delegates receive an explicit source-root map distinct from the document library');
+    assert(/top_case_2_id/.test(expandedWorker) && !/top_case_1_id/.test(expandedWorker), 'parallel execution: shorthand workers receive a self-contained referenced task with the correct ranked case id');
     assert(medianOf([100, 200, 300, 400]) === 0, 'cost: fewer than MIN_COST_HISTORY samples yields no median — a new project stays silent');
     assert(medianOf([100, 200, 300, 400, 500]) === 300, 'cost: an odd sample count takes the middle value');
     assert(medianOf([100, 200, 300, 400, 500, 600]) === 350, 'cost: an even sample count averages the two middles');
@@ -1600,7 +2233,7 @@ app.whenReady().then(async () => {
   // detection breadth, retry budget, per-step reset, exhaustion fall-through,
   // the skipped wrap-up call, and the STOP interaction.
   {
-    const { executeStep, executePlan, isProviderAbort, TRANSPORT_RETRIES } = require('../src/main/execute');
+    const { executeStep, executePlan, renderProviderPausedReply, isProviderAbort, TRANSPORT_RETRIES } = require('../src/main/execute');
     const abortErr = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; return e; };
     const store = () => new VariableStore();
 
@@ -1630,6 +2263,14 @@ app.whenReady().then(async () => {
     } catch (e) { threw = e; }
     assert(threw && threw.message === 'boom', 'transport: a genuine error still throws — only aborts degrade');
 
+    const truncatedMutation = await executeStep({
+      chat: async () => ({ text: '', toolCalls: [], truncated: true, finishReason: 'length', discardedToolCalls: 1 }),
+      callTool: async () => { throw new Error('must not execute'); }, model: 'm',
+      step: { id: 1, task: 'save a large report' }, tools: [{ name: 'save_document', description: '', inputSchema: {} }],
+      history: [], store: store(), onEvent: () => {}
+    });
+    assert(truncatedMutation.stuck && truncatedMutation.reason === 'output-truncated' && !truncatedMutation.history.some((m) => m.role === 'assistant' && !m.content), 'transport: discarded truncated tool calls become a replan outcome without an empty assistant message');
+
     // --- the wrap-up model call is SKIPPED on a stall (a dead provider cannot summarize) ---
     let chatCalls = 0;
     const r1 = await executeStep({
@@ -1640,7 +2281,7 @@ app.whenReady().then(async () => {
 
     // --- retry budget: exactly TRANSPORT_RETRIES, then it becomes a real stuck ---
     let attempts = 0; let replanned = 0; const events = [];
-    await executePlan({
+    const exhausted = await executePlan({
       chat: async () => { attempts += 1; throw abortErr(); },   // stalls forever
       callTool: async () => ({ text: 'ok' }), model: 'm',
       plan: { goal: 'g', steps: [{ id: 1, task: 'a' }] }, tools: [], store: store(), history: [],
@@ -1650,7 +2291,18 @@ app.whenReady().then(async () => {
     assert(events.length === TRANSPORT_RETRIES, `transport: exactly ${TRANSPORT_RETRIES} retries are emitted, not more`);
     assert(events[0].attempt === 1 && events[events.length - 1].attempt === TRANSPORT_RETRIES, 'transport: retry events carry an increasing attempt number');
     assert(attempts === TRANSPORT_RETRIES + 1, 'transport: the step is attempted once plus its retries');
-    assert(replanned === 1, 'transport: once retries are exhausted it falls through to the normal re-plan path');
+    assert(replanned === 0, 'transport: retry exhaustion never re-plans an unchanged task against an unavailable provider');
+    assert(exhausted.terminalReason === 'provider-timeout' && /checkpoints were saved/.test(renderProviderPausedReply(exhausted.stepResults)), 'transport: exhaustion returns a deterministic saved-work reply without a third provider call');
+
+    const deadlineStarted = Date.now();
+    const deadline = await executeStep({
+      chat: async ({ signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { const e = new Error('deadline'); e.name = 'AbortError'; reject(e); }, { once: true });
+      }),
+      callTool: async () => ({ text: 'ok' }), model: 'm', step: { id: 9, task: 'bounded stock step' },
+      tools: [], history: [], store: store(), maxDurationMs: 25, onEvent: () => {}
+    });
+    assert(deadline.reason === 'provider-budget-exhausted' && Date.now() - deadlineStarted < 500, 'transport: one step wall-clock deadline aborts its in-flight model call and preserves a partial result');
 
     // --- per-step reset: a later step gets its OWN retry budget ---
     // Keyed off the STEP, not the call index: a retry shifts every later index,
@@ -1879,6 +2531,8 @@ app.whenReady().then(async () => {
     try { registerIpc(); } finally { ipcMain.handle = realHandle; }
 
     assert(handlers.has('project:drift'), 'O30: project:drift IPC handler is registered');
+    assert(handlers.has('workflows:latest') && handlers.has('workflows:get'), 'workflow recovery IPC is registered read-only');
+    assert(handlers.has('mcp:authStatus'), 'MCP authentication status IPC is registered');
     const setSetting = (input) => handlers.get('settings:set')({}, input);
     const gp = repo.projects.create({ name: 'GateProj' });
 
@@ -1950,3 +2604,4 @@ app.whenReady().then(async () => {
   console.error('\nSMOKE TEST ERROR:', err);
   app.exit(1);
 });
+// qa-template-end

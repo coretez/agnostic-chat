@@ -56,7 +56,11 @@ model needed. We measure it, we don't assume it.
 5. **Modes** *(obj 1, 2)* — group skills into working sets; mode-aware selection
    tightens fixed overhead further.
 6. **Extractive filter layer** *(obj 3)* — query-aware keep-the-relevant-slices
-   on top of today's deterministic filter.
+   on top of today's deterministic filter. **First bounded slice shipped
+   2026-08-31:** planned and flat loops retain two recent tool rounds verbatim
+   and reduce older large results to deterministic head/tail/source-URL
+   evidence, with inspected/compacted/saved counts in PROCESS. Query-aware
+   relevance selection remains the next extension.
 
 Telemetry (1) and the trend view (4) are the backbone: they turn every objective
 above from an aspiration into a number the app shows us — and that the evaluator
