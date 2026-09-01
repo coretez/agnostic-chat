@@ -6,6 +6,33 @@ An LLM-agnostic, project-centric desktop harness for real work — coding, docum
 
 Built with Electron. Everything stays local on your Mac: API keys are encrypted at rest via the macOS Keychain (`safeStorage`) and only ever leave to call the provider you selected.
 
+## Download
+
+**Current release:** Shamrock 0.1.1<br>
+**Last updated:** <time datetime="2026-09-01T14:33:00-04:00">September 1, 2026 at 2:33 PM EDT</time>
+
+[Download Shamrock 0.1.1 source (.zip)](https://github.com/coretez/agnostic-chat/archive/refs/heads/feature/rules-to-gates.zip)
+
+Shamrock is currently a macOS development preview. A signed installer is not yet published. To run this release from source, install Node.js, then use:
+
+```bash
+git clone --branch feature/rules-to-gates https://github.com/coretez/agnostic-chat.git
+cd agnostic-chat
+npm install
+npm start
+```
+
+### What changed in 0.1.1
+
+- Added repository-wide QA for JavaScript, TypeScript, TSX, and Python, enforcing the 20-executable-line function limit, descriptive names, and duplicate-function detection.
+- Added proactive authentication renewal so connected tools remain signed in during long and parallel workflows.
+- Added reachable, dated, primary-source verification for stock research and deterministic framework-owned report hosting with health checks.
+- Prevented stock workflows from selecting unrelated SIEM security tools.
+- Improved recovery after provider exhaustion and corrected partial-result wording so pending work is not described as replaced.
+- Refactored stock and website benchmark validators into smaller, reusable functions and removed duplicated validator logic.
+
+See the complete [Shamrock 0.1.1 release notes](docs/RELEASE_0.1.1.md), including validation coverage and known limitations.
+
 ## Highlights
 
 - **Three work modes per chat** — **WORK** (general agentic work over your connected tools), **DOCUMENTS** (a deliverables factory), and **CODE** (a governed coding harness) — one titlebar switch.
